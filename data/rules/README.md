@@ -82,7 +82,11 @@ not tradeable.
 
 A list of unit kinds; the list index is the sim's `UnitKindId`. M1 ships
 one kind, `yeoman` (index 0). Combat stats, costs and trainer buildings are
-added in M3a / M4a, each with a validator rule.
+added in M3a / M4a, each with a validator rule. How the movement fields are
+used is specified in `docs/design/pathing.md` ("Movement step"): speed is
+converted once at spawn to tiles per tick (`x100 / (100 * tick_rate_hz)`),
+the radius to fixed-point tiles; the arrive and separation radii are read per
+tick.
 
 | Field | Meaning | Yeoman |
 |-------|---------|--------|

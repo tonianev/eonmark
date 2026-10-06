@@ -78,7 +78,18 @@ cargo run -p sim-cli -- data-check data
 cargo test -p sim
 ```
 
-A changed number changes `rules_hash`. Golden replay fixtures (M1) record the hash they were made with, so a rules change that alters a fixture's final hash must also bump `rules_version` in `data/rules/rules.ron`, with a one-line reason in the commit. A changed hash without that bump is a bug, not a fixture update. Balance PRs attach a `play-bots` table once that command exists (M5b).
+A changed number changes `rules_hash`. Golden replay fixtures record the hash they were made with, so a rules change that alters a fixture's final hash must also bump `rules_version` in `data/rules/rules.ron`, with a one-line reason in the commit (see "Golden replay fixtures" below). A changed hash without that bump is a bug, not a fixture update. Balance PRs attach a `play-bots` table once that command exists (M5b).
+
+## Golden replay fixtures
+
+`crates/sim/tests/fixtures/` holds `.eonreplay` recordings with a sibling `.hash` file (`0x<16 hex>` and a newline). `cargo test -p sim` re-simulates the short ones and `sim-cli verify --release` checks the long ones in CI on both operating systems; the `hash-parity` job diffs the macOS and Linux results. The rules:
+
+1. A fixture regenerates only in a commit that also bumps `rules_version` in `data/rules/rules.ron` and states the reason in one line of the commit message (`Bump rules_version to 2: Yeoman speed 1.8 -> 2.0 tiles/s`). One commit, both changes.
+2. A changed hash without that bump is a bug. Do not update the `.hash` file; bisect with `sim-cli hash-dump <replay> --every 1` as described in [docs/DETERMINISM.md](docs/DETERMINISM.md).
+3. `RULES CHANGED since recording` from `verify` means RON was edited without a bump. Either revert the edit or bump and regenerate in the same commit.
+4. An intended behaviour change in Rust (a new movement rule, a fixed sim bug) bumps `SIM_VERSION` in `crates/sim/src/state.rs` as well, and the same commit regenerates every fixture.
+
+To regenerate, run `cargo run -p sim-cli --release -- record --scenario <name> --ticks <n> --out crates/sim/tests/fixtures/<name>.eonreplay`, then `verify` the new file and write its `OK final_hash=` value into `<name>.hash`. The fixture README in that directory lists each scenario and its tick count. Reviewers reject a PR that changes a fixture without the version bump, and CI reports the mismatch as a failing golden test.
 
 ## Determinism rules
 
@@ -148,7 +159,7 @@ The PR template, [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLAT
 - Imperative subject line of 72 characters or fewer: `Add Yield Cap table to rules.ron`, not `Added` or `Adds`.
 - A body that says why, when the subject is not enough. Reference issues with `Closes #12`.
 - No AI attribution trailers: no `Co-Authored-By` lines for tools and no "generated with" footers. Disclosure belongs in the PR template checkbox, not in the git history.
-- A golden fixture regeneration goes in a commit that also bumps `rules_version` and states the reason.
+- A golden fixture regeneration goes in a commit that also bumps `rules_version` and states the reason in one line (see "Golden replay fixtures").
 
 ## Names
 

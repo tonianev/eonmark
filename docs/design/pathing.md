@@ -14,8 +14,9 @@ Area: `area:sim`. Milestone: M1 (see [../ROADMAP.md](../ROADMAP.md)). Benches re
 | Grid generation counter | `cost_grid_generation: u32`, +1 on every cost change | `Map` |
 | Step costs | 10 orthogonal, 14 diagonal (octile) | `pathing.rs` constants |
 | A* expansion budget | 4000 node expansions per tick, shared by all requests | `data/rules/rules.ron` (`path_budget_expansions`) |
-| Path cache | bounded LRU, size in data, cleared on every grid change | `data/rules/rules.ron` (`path_cache_entries`) |
-| Repath cadence | every 60 ticks (3 s) while moving, or when the next waypoint becomes blocked | `movement.rs` |
+| Path cache | bounded, insertion-order eviction, size in data, cleared on every grid change and on restore, transparent (see "Path cache") | `data/rules/rules.ron` (`path_cache_entries`) |
+| Repath cadence | every 60 ticks (3 s) while moving (`REPATH_INTERVAL_TICKS`), or when the next waypoint becomes blocked | `movement.rs`, `state.rs` |
+| Unit kind stats | `speed_tiles_per_s_x100: 180`, `radius_tiles_x100: 35`, `arrive_radius_tiles_x100: 25`, `separation_tiles_x100: 10` for the one M1 kind, `yeoman` | `data/rules/units.ron` |
 | Spatial grid | 2 x 2 tile cells, rebuilt every tick, unhashed | `movement.rs` |
 | Tick rate | 20 Hz | `rules.ron` (`tick_rate_hz`) |
 | Bench: 500 movers | mean step < 5 ms, p95 < 10 ms, release, dev Mac | `sim-cli bench --units 500 --ticks 1200` |
@@ -31,15 +32,22 @@ The pop cap bounds real unit counts: 25 + 25 per Arms level gives at most 100 un
 
 Water, mountain and forest tiles are blocked by the map loader. Buildings block the tiles of their footprint when construction starts and unblock them when the building is destroyed. Units are never written into the cost grid; unit-to-unit avoidance is handled by the movement step, not by pathfinding.
 
-Every mutation of `cost` bumps `cost_grid_generation`. Three derived structures depend on the generation and are rebuilt lazily when it changes:
+Every mutation of `cost` goes through `Map::set_blocked(tile, blocked) -> bool`, which bumps `cost_grid_generation` only when the cost actually changes. Three derived structures depend on the generation:
 
 | Derived structure | Hashed | Rebuilt |
 | --- | --- | --- |
-| Path cache | no | cleared wholesale on any generation change |
-| Connected component ids (one u16 per tile) | no | recomputed by flood fill on first use after a generation change |
-| Spatial grid of unit positions | no | every tick |
+| Path cache | no | cleared wholesale on any generation change and on `restore()` |
+| Connected component ids (one u16 per tile, `NO_COMPONENT` for blocked tiles) | no | eagerly, by flood fill inside `set_blocked` when the generation changes, and in `restore()` |
+| Spatial grid of unit positions | no | every tick, and in `restore()` |
 
-`restore()` rebuilds all three before it returns, so a restored sim never serves a stale derived value.
+Components are rebuilt eagerly rather than on first use so that `Map::component_of` works through a shared `&Map` inside `group_targets` and `Pathing::service` (M1 decision; one flood fill per changed tile is cheap at 16k tiles, and M3a may add a batched `set_blocked_many` if building footprints make it matter). `restore()` rebuilds all three before it returns, so a restored sim never serves a stale derived value. `Map` itself (`cost` plus the generation) is hashed state with its own sub-hash, `map`.
+
+Two fixed neighbour orders exist and both are total:
+
+| Function | Order | Used by |
+| --- | --- | --- |
+| `Map::neighbors8(tile)` | N, NE, E, SE, S, SW, W, NW; passable tiles only; no corner cutting | A*, the component flood fill, the oracle test |
+| `Map::nearest_passable(tile, component)` | E, SE, S, SW, W, NW, N, NE; every in-bounds neighbour, blocked ones too | goal correction, group-order click correction |
 
 ## The A* search
 
@@ -51,85 +59,96 @@ Corner cutting. The design is silent on diagonal moves past blocked tiles. The c
 
 Open set. The open set is a `BinaryHeap` of `(f, g, tile)` entries ordered so that the entry with the smallest `f` pops first; among equal `f` the largest `g` pops first (deeper nodes, fewer re-expansions); among equal `(f, g)` the smallest tile index pops first. The third key makes the order total, so two machines always pop the same node. Stale heap entries (a node already closed with a better `g`) are skipped when popped.
 
-Per-search arrays, sized to the map:
+Per-search arrays, sized to the map (`map.len()` entries each):
 
 | Array | Type | Meaning |
 | --- | --- | --- |
-| `g` | `Vec<u32>`, `u32::MAX` = unvisited | best known cost to each tile |
-| `parent` | `Vec<u16>` | tile index of the predecessor on the best path (16384 tiles fit in u16) |
-| `closed` | `Vec<bool>` or a bitset | tile has been expanded |
+| `g` | `Vec<u32>`, `G_UNVISITED` (`u32::MAX`) = unvisited | best known cost to each tile |
+| `parent` | `Vec<u32>`, `NO_PARENT` (`u32::MAX`) = none | row-major tile index of the predecessor on the best path |
+| `closed` | `Vec<bool>` | tile has been expanded |
 
-Resumable API. A search is a struct holding the heap, the three arrays and an expansion counter. Its only entry point is:
+Resumable API. A search is `AStarSearch { from, to, open: BinaryHeap<Node>, closed, g, parent, expansions }`, where `Node { f, g, tile: u32 }`. It is created with `AStarSearch::new(map, from, to)` (`g[from] = 0`, one open entry `Node { f: octile(from, to), g: 0, tile: idx(from) }`) and driven by one method:
 
 ```text
-resume(&mut self, budget: u32) -> SearchStatus
+resume(&mut self, map: &Map, budget: &mut u32) -> SearchStatus
 SearchStatus = Found(Vec<Tile>) | Exhausted | Suspended
 ```
 
-`resume` pops and expands nodes until one of three things happens: the goal is popped (`Found`, with the path reconstructed through `parent` from goal to start and reversed), the heap is empty (`Exhausted`, the goal is unreachable from the start), or `budget` expansions have been spent (`Suspended`, the search keeps its state and continues on the next call). Expansions, not heap pops, are what the budget counts, so skipped stale entries are free.
+`resume` pops and expands nodes until one of three things happens: the goal is popped (`Found`, with the path reconstructed through `parent` from goal to start and reversed, so it runs start..=goal inclusive and is a single tile when start == goal), the heap is empty (`Exhausted`, the goal is unreachable from the start), or `*budget` reaches zero with work left (`Suspended`, the search keeps its state and continues on the next call). Every expansion decrements `*budget` by one, so several searches share one per-tick budget by passing the same counter. A call with `*budget == 0` suspends without expanding. Expansions, not heap pops, are what the budget counts, so skipped stale entries are free.
+
+`AStarSearch` serialises with serde (the heap as a sequence in its internal array order, then the arrays and the counter) and is hashed sim state while it is the active search; see "Snapshot and restore" below.
 
 Path output. A found path is the list of tile centres from the start tile to the goal tile. No smoothing or string pulling is done in v0.1; arrival steering rounds the corners visually. This is a conservative default and is listed under open questions.
 
 ## Request queue and the per-tick budget
 
-Units do not search for paths directly. A Move, AttackMove or Gather command pushes a `PathRequest { unit, start_tile, goal_tile, requested_tick }` into the sim's request queue. The queue is a `Vec<PathRequest>` kept sorted by `(requested_tick, UnitId)`, so older requests go first and ties are broken by id.
+Units do not search for paths directly. A Move, AttackMove or Gather command pushes a `PathRequest { requested_tick, unit, from, to }` into the sim's request queue through `Pathing::request`, which replaces any earlier request of the same unit. The queue is a `Vec<PathRequest>` kept sorted by `sort_key() = (requested_tick, UnitId)`, so older requests go first and ties are broken by id. `Pathing::cancel(unit)` drops a unit's request (Stop does this).
 
-Each tick the pathing step walks the queue in order with a budget of `path_budget_expansions` expansions (default 4000). For each request:
+Each tick `Pathing::service(map, budget, tick)` walks the queue in order with a budget of `path_budget_expansions` expansions (default 4000) and returns `Vec<(UnitId, Option<Vec<Tile>>)>`, where `None` means unreachable. If a search is already `active` (suspended from an earlier tick) it is resumed first and nothing else runs until it finishes. Then, for each queued request:
 
-1. Correct the goal. If the goal tile is blocked or lies in a different connected component from the start tile, replace it with the nearest passable tile of the start's component (see BFS fallback below). If start and corrected goal are equal, the request completes with an empty path.
-2. Consult the cache with key `(start_tile, goal_tile, cost_grid_generation)`. A hit completes the request with the cached path and spends no budget.
-3. Otherwise call `resume(remaining_budget)` on the request's search, creating it on first contact. `Found` stores the path on the unit and in the cache. `Exhausted` cannot happen after step 1 but is handled defensively by clearing the unit's order and emitting `SimEvent::CommandRejected { reason: Unreachable }`. `Suspended` leaves the request at its position in the queue and ends the tick's pathing work, because the budget is gone.
+1. Correct the goal. If the start tile is blocked, the start becomes `nearest_passable(from, None)`. If the goal tile is blocked or lies in a different connected component from the start tile, replace it with `nearest_passable(to, Some(component_of(start)))`, the nearest passable tile of the start's component (see BFS fallback below). If start and corrected goal are equal, the request completes with an empty path.
+2. Consult the cache with key `(start_tile, goal_tile, cost_grid_generation)`. A hit completes the request only when `expansions_used <= remaining budget`, charging exactly `expansions_used` against the budget; otherwise the hit is ignored and the real search runs (see "Path cache" for why).
+3. Otherwise call `resume(map, &mut remaining)` on the request's search, creating it with `AStarSearch::new` on first contact. `Found` stores the path on the unit's order and inserts `(path, expansions_used)` into the cache. `Exhausted` cannot happen after step 1 but is handled defensively: `service` reports `None`, and `Sim::step` clears the unit's order and emits `SimEvent::PathUnreachable { unit }` (an asynchronous failure has no `seq`, so `CommandRejected { Unreachable }` is reserved for a synchronous reject). `Suspended` stores the request and its search as `active` and ends the tick's pathing work, because the budget is gone.
 
 A unit whose request is still queued or suspended waits in place. It does not drift toward the goal, so the state at the end of the tick is a pure function of the inputs.
 
-Snapshot and restore. The request queue is hashed sim state (it has its own sub-hash, `pathing`). A suspended search also carries progress that decides on which tick a path appears. The design does not say how that progress is saved; the conservative choice is to store only the request plus its `expansions_done` counter, and on `restore()` rebuild the search by running `resume(expansions_done)` against the restored grid. The A* is deterministic, so this reproduces the exact heap and arrays. Serialising the full heap is an acceptable alternative if the implementer prefers it; either way the M1 test `snapshot_restore_matches_uninterrupted_including_spawns` must pass with 500 movers.
+Snapshot and restore. The request queue and the active search are hashed sim state (together they are the `pathing` sub-hash). The M1 decision, recorded in [../DETERMINISM.md](../DETERMINISM.md), is to serialise the suspended search in full: `Pathing { queue, active: Option<(PathRequest, AStarSearch)> }` is part of `State`, and `AStarSearch` serialises its `BinaryHeap<Node>` as a sequence in internal array order plus the `closed`, `g` and `parent` arrays and the expansion counter. `std::collections::BinaryHeap` deserialises by pushing in that order, which reproduces the identical array, so a snapshot taken mid-search restores the exact search and a restored sim pops the same nodes on its next `resume`. The alternative of storing only an expansion counter and replaying `resume(expansions_done)` on restore was rejected because it costs the replayed expansions at restore time and because a counter cannot represent the search that the transparent-cache fallback skipped. A unit test in `pathing.rs` runs a search for k expansions, round-trips the `AStarSearch` through postcard, finishes both copies and asserts identical `Found` paths and identical hashes of the intermediate struct; `snapshot_restore_matches_uninterrupted_including_spawns` covers the same with 500 movers.
 
 ## Path cache
 
-The cache maps `(start_tile, goal_tile, cost_grid_generation)` to a path and holds at most `path_cache_entries` entries with least-recently-used eviction. It is cleared wholesale whenever `cost_grid_generation` changes, which is why a hit is always equal to a fresh search: both read the same grid. The cache is derived state. It is never hashed, never serialised, and `restore()` starts with an empty one. A proptest runs the same command stream with the cache disabled and enabled and asserts identical hashes every tick (`path_cache_is_transparent`).
+The cache maps `(start_tile, goal_tile, cost_grid_generation)` to a `CacheEntry { path, expansions_used }` and holds at most `path_cache_entries` entries. It is cleared wholesale whenever `cost_grid_generation` changes, which is why a hit is always equal to a fresh search: both read the same grid. The cache is derived state. It is never hashed, never serialised (`#[serde(skip)]`), and `restore()` starts with an empty one. A proptest runs the same command stream with the cache disabled and enabled and asserts identical hashes every tick (`path_cache_is_transparent`).
 
-The LRU order itself does not affect sim results, only which paths are recomputed, so it may use any container as long as it is deterministic in what it returns.
+The transparent cache rule (virtual budget). A hit must leave the hashed state at the end of every tick identical to the state the same run reaches with the cache disabled. The active search is hashed state, so a request that the real search would have *suspended* cannot be served from the cache: no cache replay can reproduce the partially built heap. Therefore:
+
+- `expansions_used` records the total number of expansions the original search spent, across however many ticks it was suspended.
+- When a request is reached with `remaining` budget left in the tick and `expansions_used <= remaining`, the hit is honoured: the request completes this tick with the cached path and `remaining` drops by exactly `expansions_used`, which is precisely what the real search would have done.
+- When `expansions_used > remaining`, the hit is ignored and the real search runs; it suspends naturally and is cached when it completes.
+
+Timing, results and hashes are thereby identical with the cache on or off; the cache only saves work for searches that fit in the remaining budget. This is the strongest reading of `path_cache_is_transparent` and the one the test asserts: equal hashes on every tick, not just at the end.
+
+Eviction is deterministic: entries live in a `BTreeMap` keyed by an insertion counter (`PathCache { entries, by_key, capacity, enabled, next_insert }`) and the smallest counter is evicted at capacity. Whether the cache evicts or hits never changes results, only work, so the eviction policy may change freely as long as it stays deterministic in what it returns.
 
 ## Repathing
 
-A moving unit requests a new path in two cases:
+A moving unit requests a new path in two cases. `movement::step` returns the ids that need one and `Sim::step` issues the `PathRequest`s:
 
 | Trigger | Check | Why |
 | --- | --- | --- |
-| Next waypoint blocked | the cost of the next waypoint's tile is 255 | a building was placed on the route |
-| Periodic | `(tick - path_start_tick) % 60 == 0` while a path is active | the route may have become shorter after a blocked tile cleared, and the goal of an AttackMove or Gather may have moved |
+| Next waypoint blocked | the cost of the tile of `order.path[order.next]` is 255 | a building was placed on the route |
+| Periodic | `tick >= order.repath_at` while a path is active; `repath_at` is set to `tick + REPATH_INTERVAL_TICKS` (60) when a path is stored and again when a repath is requested | the route may have become shorter after a blocked tile cleared, and the goal of an AttackMove or Gather may have moved |
 
-Both go through the normal queue, so repath cost is bounded by the same budget. Until the new path arrives the unit keeps following the old one unless the next waypoint is blocked, in which case it stops.
+Both go through the normal queue with `requested_tick = tick`, so repath cost is bounded by the same budget. Until the new path arrives the unit keeps following the old one unless the next waypoint is blocked, in which case it stops. A `MoveOrder { goal, path, next, repath_at }` with an empty `path` is a unit waiting for its first path; it does not move.
 
 ## Group orders: spiral offsets
 
-When one command moves several units to the same point, every unit needs its own target tile or they all push toward one spot. The sim assigns targets as follows:
+When one command moves several units to the same point, every unit needs its own target tile or they all push toward one spot. `movement::group_targets(map, click, n) -> Vec<FxVec2>` returns `n` tile centres and the Move handler assigns them as follows:
 
-1. Sort the ordered units by `UnitId`.
-2. Walk a square spiral outward from the clicked tile: the click tile itself, then the ring at Chebyshev distance 1 in a fixed order (east, then clockwise), then distance 2, and so on.
-3. Skip any tile that is blocked, or whose connected component differs from the click tile's component, or that has already been assigned in this order.
-4. Give the next unassigned spiral tile to the next unit in id order.
+1. Validate and dedupe the ordered units, then sort them by `UnitId`.
+2. Correct the click: `tile_of(click)` is replaced by `nearest_passable(tile, None)` when it is blocked. If the map has no passable tile at all, every target is the raw click position.
+3. Walk `Map::spiral` outward from the corrected tile: the tile itself, then the ring at Chebyshev distance 1 starting at the east tile and going clockwise on screen (south first, since `y` grows south), then distance 2, and so on. Every map tile is visited exactly once.
+4. Skip any tile that is blocked or whose connected component differs from the corrected click tile's component.
+5. Give the next spiral tile's centre (`center_of`, tile + 0.5) to the next unit in id order; the unit's `MoveOrder.goal` is that centre and its `PathRequest.to` is that tile.
 
-Component ids are recomputed once per `cost_grid_generation`, so step 3 is an array lookup. The spiral is bounded by the map edges; if it runs out of tiles the remaining units share the last assigned tile.
-
-When the click tile itself is blocked, or lies in a component none of the ordered units can reach, the click is first corrected by the BFS fallback from the perspective of the first unit in id order, and the spiral starts from the corrected tile.
+Component ids are rebuilt once per `cost_grid_generation`, so step 4 is an array lookup. The spiral is bounded by the map edges; if it runs out of tiles the remaining units share the last assigned target. The `queue` flag on `Command::Move` is ignored in M1: a unit holds one `Option<MoveOrder>`.
 
 ## BFS nearest-passable fallback
 
-`nearest_passable(from: Tile, component: u16) -> Tile` performs a breadth-first search over the 8-neighbourhood with a fixed neighbour order (east, south-east, south, south-west, west, north-west, north, north-east) and returns the first tile whose cost is 1 and whose component id equals `component`. Because the neighbour order is fixed and the queue is FIFO, the result is the same on every machine. The search is bounded by the map, so it always terminates; on a map with no passable tile in the component it returns `from`, which callers treat as "no path".
+`Map::nearest_passable(from: Tile, component: Option<u16>) -> Option<Tile>` performs a breadth-first search over the 8-neighbourhood with a fixed neighbour order (east, south-east, south, south-west, west, north-west, north, north-east) over every in-bounds tile, blocked ones included since the search starts from a blocked tile, and returns the first tile whose cost is 1 and, when `component` is `Some`, whose component id equals it. Because the neighbour order is fixed and the queue is FIFO, the result is the same on every machine. The search is bounded by the map, so it always terminates; on a map with no passable tile in the component it returns `None`, which callers treat as "no path" (goal correction then leaves the request to end `Exhausted`, group targets fall back to the raw click).
 
 ## Movement step
 
 Movement runs after pathing in the same tick, in `UnitId` order, in fixed point (`Fx = I32F32`, `FxVec2`, see `fx.rs`). There is no trigonometry: a unit stores a facing vector and the renderer derives a heading in f32.
 
+`movement::step(units, map, grid, rules, tick, events) -> Vec<UnitId>` runs after `Pathing::service` and after the spatial grid has been rebuilt for the tick. Unit stats come from `data/rules/units.ron` through `rules.unit_kind(kind)`: `speed` (tiles per tick, `speed_tiles_per_s_x100 / (100 * tick_rate_hz)`) and `radius` (`radius_tiles_x100 / 100`) are converted once at spawn and stored on the `Unit`; `arrive_radius_tiles_x100` and `separation_tiles_x100` are read per tick.
+
 For each moving unit:
 
-1. Arrival steering. The desired velocity points from the unit to its next waypoint with magnitude `speed`, scaled down linearly inside an arrival radius around the final waypoint so units stop instead of oscillating. Waypoints are consumed when the unit is within half a tile.
-2. Separation. Neighbours are read from the spatial grid (the unit's cell and the eight around it). For each neighbour closer than the sum of radii plus a margin, a push-away vector is accumulated. Distances are compared with `dist_sq_i64`, never with square roots.
-3. Integrate. `position += clamp(desired + separation, speed) * dt`, where `dt` is one tick.
+1. Arrival steering. The desired velocity points from the unit to its next waypoint `order.path[order.next]` with magnitude `speed`, scaled down linearly inside the kind's arrive radius around the final waypoint so units stop instead of oscillating. Intermediate waypoints are consumed when the unit is within half a tile; the final one when within the arrive radius, which clears the order and emits `SimEvent::UnitArrived { unit }`.
+2. Separation. Neighbours are read from the spatial grid (`SpatialGrid::neighbors(pos, radius)`, the cells intersecting the square `[pos - r, pos + r]`, in ascending id order). For each neighbour closer than `radius_a + radius_b + separation`, a push-away vector is accumulated. Distances are compared with `dist_sq_i64` against the squared threshold in I32F32 scale, never with square roots.
+3. Integrate. `position += clamp(desired + separation, speed)`, one tick per step so there is no `dt` factor.
 4. Circle-vs-circle correction. After all units have moved, pairs that still overlap are separated by half the penetration each, visited in `(UnitId, UnitId)` order so the correction is reproducible. Corrections never push a unit into a blocked tile; a correction that would do so is dropped for that unit.
 
-Units never move into a blocked tile. A unit that would cross into one stops at the boundary and triggers the blocked-waypoint repath above.
+Units never move into a blocked tile. A unit that would cross into one stops at the boundary and triggers the blocked-waypoint repath above. The function returns the ids that need a repath (blocked next waypoint or `tick >= repath_at`); `Sim::step` turns them into `PathRequest`s.
 
 ## Interactions with other systems
 
@@ -149,7 +168,7 @@ The `pathfinding` crate is a dev-dependency only. `cargo tree -p sim -e normal` 
 - `path_exists_iff_connected`: for random start and goal tiles on the plains map and on random grids, the in-house search finds a path exactly when the oracle's `astar` with the same neighbour function and the same corner-cutting rule finds one.
 - cost equality: when both find a path, the total octile cost is identical.
 
-Other M1 tests touching this module: `path_cache_is_transparent` (proptest, cache on versus off), `sort_keys_are_total_orders`, `dist_sq_i64_map_corners`, and the golden fixtures `move_500_short` (in `cargo test`), `move_500` and `group_spiral` (verified by `sim-cli verify` in CI).
+Other M1 tests touching this module: `path_cache_is_transparent` (proptest, cache on versus off, equal hashes every tick), `sort_keys_are_total_orders`, `dist_sq_i64_map_corners`, the mid-search snapshot round-trip unit test in `pathing.rs`, and the golden fixtures `move_500_short`, `group_spiral` and `snapshot_restore` (in `cargo test`) and `move_500` (verified by `sim-cli verify --release` in CI, on both operating systems).
 
 ## Acceptance checklist (M1)
 
@@ -188,5 +207,6 @@ If adopted, it keeps the same sim API (`PathRequest` in, waypoints out, same bud
 
 - Corner cutting is forbidden here as the conservative reading of the design. If playtests show units taking visibly long detours around single buildings, allow diagonals past one blocked neighbour and update the oracle test together.
 - Paths are raw tile centres. A later string-pulling pass would need to stay in fixed point and prove it never crosses a blocked tile; file as `needs-design` if arrival looks jagged in M2.
-- Suspended-search persistence: expansion counter replay (recommended above) versus serialising the heap. Decide in M1 and record in [../DETERMINISM.md](../DETERMINISM.md).
-- The default budget of 4000 and the cache size are placeholders until the M1 bench. The `good first issue` "tune the path cache LRU size and A* budget with a bench table" owns the follow-up.
+- Suspended-search persistence was decided in M1: the full heap and arrays are serialised (see "Request queue" above and [../DETERMINISM.md](../DETERMINISM.md)). Revisit only if snapshot size becomes a problem; a 128x128 search is at most about 150 KB.
+- The default budget of 4000 and the cache size are placeholders until the M1 bench. The `good first issue` "tune the path cache size and A* budget with a bench table" owns the follow-up.
+- Movement under a suspended search: a unit waits in place until its path arrives. If the bench shows visible stalls when many units are ordered at once, consider a per-request budget floor; it changes hashes, so it bumps `SIM_VERSION`.

@@ -13,7 +13,7 @@
 //! consulted.
 
 use rand_core::{Rng, SeedableRng};
-use sim::scenarios::{EAST, Stream, WEST};
+use sim::scenarios::{BENCH_CROSS_SEED, EAST, Stream, WEST};
 use sim::{Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, Rules, Sim, UnitId, UnitKindId};
 
 /// A point in the river (impassable) north of the central ford. `bench
@@ -29,7 +29,7 @@ pub const SELFTEST_TICKS: u32 = 400;
 
 /// Default seed for the CLI-only scenarios (`selftest`, `Crossing`); the
 /// fixture scenarios carry their own seed in [`sim::scenarios`].
-pub const DEFAULT_SEED: u64 = 1;
+pub const DEFAULT_SEED: u64 = BENCH_CROSS_SEED;
 
 /// A scripted command stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,9 @@ pub enum Scenario {
     /// exercises the delay queue, rejections and the RNG without pathing.
     /// 400 ticks.
     Selftest,
-    /// `units` Yeomen crossing west to east with no Stop (the `bench` stream).
+    /// `units` Yeomen crossing west to east in a band of groups, each to its
+    /// mirrored goal, through all three fords ([`sim::scenarios::bench_cross`],
+    /// the `bench` stream).
     Crossing {
         /// Units to spawn.
         units: u16,
@@ -121,23 +123,7 @@ impl Scenario {
                 (setup, stream)
             }
             Scenario::Crossing { units } => {
-                let setup = MatchSetup::scenario(rules, seed.unwrap_or(DEFAULT_SEED));
-                let stream = vec![
-                    (0, vec![spawn(0, 0, WEST, units)]),
-                    (
-                        5,
-                        vec![PlayerCommand::new(
-                            PlayerId(0),
-                            1,
-                            Command::Move {
-                                units: (1..=u32::from(units)).map(UnitId).collect(),
-                                target: EAST,
-                                queue: false,
-                            },
-                        )],
-                    ),
-                ];
-                (setup, stream)
+                sim::scenarios::bench_cross(rules, units, seed.unwrap_or(DEFAULT_SEED))
             }
         }
     }
@@ -414,15 +400,23 @@ mod tests {
     }
 
     #[test]
-    fn crossing_moves_every_spawned_unit() {
+    fn crossing_is_the_shared_bench_cross_stream() {
         let rules = rules();
-        let (_, stream) = Scenario::Crossing { units: 12 }.setup_and_stream(&rules, None, 10);
-        let Command::Move { units, target, .. } = &sim::scenarios::commands_at(&stream, 5)[0].cmd
-        else {
-            panic!("tick 5 is the Move");
-        };
-        assert_eq!(units.len(), 12);
-        assert_eq!(*target, EAST);
+        let (setup, stream) = Scenario::Crossing { units: 12 }.setup_and_stream(&rules, None, 10);
+        let (expected_setup, expected_stream) =
+            sim::scenarios::bench_cross(&rules, 12, DEFAULT_SEED);
+        assert_eq!(setup, expected_setup);
+        assert_eq!(stream, expected_stream);
+        let moved: usize = sim::scenarios::commands_at(&stream, 5)
+            .iter()
+            .map(|c| match &c.cmd {
+                Command::Move { units, .. } => units.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(moved, 12, "every spawned unit is moved");
+        let (setup, _) = Scenario::Crossing { units: 12 }.setup_and_stream(&rules, Some(4), 10);
+        assert_eq!(setup.seed, 4);
     }
 
     #[test]

@@ -20,8 +20,9 @@ Area: `area:sim`. Milestone: M1 (see [../ROADMAP.md](../ROADMAP.md)). Benches re
 | Unit kind stats | `speed_tiles_per_s_x100: 180`, `radius_tiles_x100: 35`, `arrive_radius_tiles_x100: 25`, `arrive_slowdown_radius_tiles_x100: 50`, `waypoint_radius_tiles_x100: 50`, `separation_tiles_x100: 10`, `return_to_post_radius_tiles_x100: 100` for the one M1 kind, `yeoman` | `data/rules/units.ron` |
 | Spatial grid | 2 x 2 tile cells, rebuilt every tick, unhashed | `movement.rs` |
 | Tick rate | 20 Hz | `rules.ron` (`tick_rate_hz`) |
+| Bench stream | `scenarios::bench_cross(n)`: `n` Yeomen in six groups spawned at column 20, rows 16, 35, 54, 73, 92, 111, each group ordered to its mirror point at column 107, so two groups cross at each of the three fords (rows 14-21, 60-67, 106-113 of the river at columns 62-65) | `crates/sim/src/scenarios.rs`, `sim-cli bench --units N` |
 | Bench: 500 movers | mean step < 5 ms, p95 < 10 ms, release, dev Mac | `sim-cli bench --units 500 --ticks 1200` |
-| Bench: arrival | >= 99 % of 500 units within 3 tiles of the component-corrected goal | same bench |
+| Bench: arrival | >= 99 % of 500 units within 3 tiles of the component-corrected goal | same bench; `--arrival-curve` prints the percentage every 100 ticks and the first tick the gate holds |
 | Bench: saturated budget | one tick that spends the full 4000 expansions < 2 ms | `sim-cli bench --astar --budget 4000` |
 | Test oracle | `pathfinding` 4.16.0, dev-dependency only | `crates/sim/Cargo.toml` |
 
@@ -181,6 +182,8 @@ The `pathfinding` crate is a dev-dependency only. `cargo tree -p sim -e normal` 
 - cost equality: when both find a path, the total octile cost is identical.
 
 Other M1 tests touching this module: `path_cache_is_transparent` (proptest, cache on versus off, equal hashes every tick), `sort_keys_are_total_orders`, `dist_sq_i64_map_corners`, the mid-search snapshot round-trip unit test in `pathing.rs`, `return_to_post_converges_100_units_and_settles`, and the golden fixtures `move_500_short`, `group_spiral` and `snapshot_restore` (in `cargo test`) and `move_500` (verified by `sim-cli verify --release` in CI, on both operating systems).
+
+The bench stream (`sim-cli bench --units N --ticks T`) is `scenarios::bench_cross(N)`, not the `move_500` fixture: `move_500` sends all 500 units from the west start through the middle ford alone, which measures the throughput of one 8-tile ford (about one unit per tick) rather than a crossing, and its stream is frozen as the hash-parity fixture. `bench_cross` spawns the units in six equal groups along the west side (column 20, rows 16 to 111) and orders each group to its mirror point on the east side, so A* sends two groups through each ford. The bench reports the step-time statistics, the arrived percentage at `T` with a breakdown of the units outside 3 tiles (moving, waiting for a path, displaced after arriving, no order), the first tick after which the 99 % gate held and the tick from which it held to the end; `--arrival-curve` adds the percentage every 100 ticks and `--verbose` lists every straggler. At 1.8 tiles/s the 87-column walk alone is about 970 ticks, so the gate tick is the number to read, not the percentage at 1200.
 
 ## Acceptance checklist (M1)
 

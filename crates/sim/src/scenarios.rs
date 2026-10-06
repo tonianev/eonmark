@@ -55,6 +55,20 @@ pub const NAMES: [&str; 4] = [
     "snapshot_restore",
 ];
 
+/// Spawn rows of [`bench_cross`]: a band along the west side from the
+/// north ford's latitude to the south ford's, 19 rows apart. Rows 16 and 35
+/// route through the north ford (rows 14-21 of the river at columns
+/// 62-65), 54 and 73 through the middle one (60-67), 92 and 111 through
+/// the south one (106-113), so the three fords carry two groups each.
+pub const BENCH_CROSS_ROWS: [i32; 6] = [16, 35, 54, 73, 92, 111];
+/// Column of the [`bench_cross`] spawn points.
+pub const BENCH_CROSS_WEST_X: i32 = 20;
+/// Column of the [`bench_cross`] goals: the spawn column mirrored across
+/// the map's `MirrorX` midline (`127 - 20`).
+pub const BENCH_CROSS_EAST_X: i32 = 107;
+/// Default seed of [`bench_cross`] (`sim-cli bench --seed`).
+pub const BENCH_CROSS_SEED: u64 = 1;
+
 fn spawn(owner: u8, seq: u32, at: FxVec2, count: u16) -> PlayerCommand {
     PlayerCommand::new(
         PlayerId(owner),
@@ -166,6 +180,51 @@ pub fn snapshot_restore(rules: &Rules) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
+/// The `sim-cli bench --units n` crossing: `n` Yeomen spawned during tick 0
+/// in one group per row of [`BENCH_CROSS_ROWS`], of (as near as possible)
+/// equal size, at `(BENCH_CROSS_WEST_X, row)` in
+/// row order, so group `k` holds consecutive ids; during tick 5 each group
+/// is ordered to its mirrored point `(BENCH_CROSS_EAST_X, row)` with its own
+/// Move command (one spiral of targets per group). A* routes the groups
+/// through all three fords instead of funnelling every unit through the
+/// middle one as [`move_500`] does. `n` smaller than the number of rows
+/// fills the first rows only. Not a golden fixture: the stream depends on
+/// `n`, and [`move_500`] stays the hash-parity fixture.
+pub fn bench_cross(rules: &Rules, n: u16, seed: u64) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, seed);
+    let groups = u16::try_from(BENCH_CROSS_ROWS.len()).expect("a handful of rows");
+    let base = n / groups;
+    let extra = n % groups;
+    let mut spawns = Vec::new();
+    let mut moves = Vec::new();
+    let mut first_id = 1u32;
+    for (k, row) in (0u16..).zip(BENCH_CROSS_ROWS) {
+        let count = base + u16::from(k < extra);
+        if count == 0 {
+            break;
+        }
+        let last_id = first_id + u32::from(count) - 1;
+        spawns.push(spawn(
+            0,
+            u32::from(k),
+            FxVec2::from_ints(BENCH_CROSS_WEST_X, row),
+            count,
+        ));
+        moves.push(mv(
+            0,
+            u32::from(groups + k),
+            ids(first_id..=last_id),
+            FxVec2::from_ints(BENCH_CROSS_EAST_X, row),
+        ));
+        first_id = last_id + 1;
+    }
+    let mut stream = vec![(0, spawns)];
+    if !moves.is_empty() {
+        stream.push((5, moves));
+    }
+    (setup, stream)
+}
+
 /// Look a scenario up by name: `(setup, stream, ticks)`.
 pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
     let (setup, stream, ticks) = match name {
@@ -260,6 +319,61 @@ mod tests {
             panic!("first order is a Move");
         };
         assert_eq!(map.tile_of(*target).x, 0, "first click is on the west edge");
+    }
+
+    #[test]
+    fn bench_cross_spawns_a_west_band_and_mirrors_each_group_east() {
+        let rules = rules();
+        let map = crate::map::Map::from_def(rules.map(&rules.default_map).unwrap());
+        let (setup, stream) = bench_cross(&rules, 500, BENCH_CROSS_SEED);
+        assert_eq!(setup.seed, BENCH_CROSS_SEED);
+        assert!(setup.debug_commands);
+        let spawns = commands_at(&stream, 0);
+        let moves = commands_at(&stream, 5);
+        assert_eq!(spawns.len(), BENCH_CROSS_ROWS.len());
+        assert_eq!(moves.len(), BENCH_CROSS_ROWS.len());
+        let mut next_id = 1u32;
+        let mut total = 0u16;
+        for ((s, m), row) in spawns.iter().zip(moves).zip(BENCH_CROSS_ROWS) {
+            let Command::DebugSpawn { at, count, .. } = &s.cmd else {
+                panic!("tick 0 is spawns");
+            };
+            let Command::Move { units, target, .. } = &m.cmd else {
+                panic!("tick 5 is moves");
+            };
+            assert_eq!(*at, FxVec2::from_ints(BENCH_CROSS_WEST_X, row));
+            assert_eq!(*target, FxVec2::from_ints(BENCH_CROSS_EAST_X, row));
+            assert!(map.passable(map.tile_of(*at)), "spawn row {row}");
+            assert!(map.passable(map.tile_of(*target)), "goal row {row}");
+            assert!((83..=84).contains(count), "500 over 6 groups: {count}");
+            assert_eq!(units.len(), usize::from(*count));
+            assert_eq!(units[0], UnitId(next_id), "consecutive ids per group");
+            next_id += u32::from(*count);
+            total += count;
+        }
+        assert_eq!(total, 500);
+        // Seq numbers are unique per player so the sim applies them in order.
+        let mut seqs: Vec<u32> = spawns.iter().chain(moves).map(|c| c.seq).collect();
+        seqs.sort_unstable();
+        seqs.dedup();
+        assert_eq!(seqs.len(), 2 * BENCH_CROSS_ROWS.len());
+        // The west spawn column mirrors onto the east goal column.
+        assert_eq!(
+            BENCH_CROSS_WEST_X + BENCH_CROSS_EAST_X,
+            i32::from(map.width()) - 1
+        );
+        // Fewer units than rows: only the first rows are used, no empty groups.
+        let (_, small) = bench_cross(&rules, 2, 9);
+        assert_eq!(commands_at(&small, 0).len(), 2);
+        assert_eq!(commands_at(&small, 5).len(), 2);
+        let (_, none) = bench_cross(&rules, 0, 9);
+        assert!(commands_at(&none, 0).is_empty());
+        assert!(commands_at(&none, 5).is_empty());
+        // Every spawned id gets exactly one Move, so the ids match a fresh sim.
+        let delay = setup.cmd_delay;
+        let sim = run(setup, rules, &stream, 5 + delay + 1);
+        assert!(sim.view().units().all(|u| u.order.is_some()));
+        assert_eq!(sim.view().unit_count(), 500);
     }
 
     #[test]

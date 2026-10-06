@@ -15,7 +15,7 @@ use scenarios::Scenario;
 use sim::replay::DEFAULT_HASH_EVERY;
 use sim::{
     AStarSearch, FxVec2, Map, MatchSetup, PlayerId, ReplayFile, ReplayReader, ReplayWriter, Rules,
-    SearchStatus, Sim, SimEvent, SubHashes, UnitId, VerifyOutcome,
+    SearchStatus, Sim, SimEvent, SimView, SubHashes, UnitId, VerifyOutcome,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -94,6 +94,10 @@ enum Cmd {
         /// List every unit that did not arrive (id, position, order state).
         #[arg(long)]
         verbose: bool,
+        /// Print the arrived percentage every 100 ticks and the first tick
+        /// at which 99% of the units are within 3 tiles of their goal.
+        #[arg(long)]
+        arrival_curve: bool,
     },
     /// Feed seeded random command streams to the sim and compare two runs.
     Fuzz {
@@ -158,7 +162,17 @@ fn main() -> ExitCode {
             budget,
             seed,
             verbose,
-        } => bench(&cli.data, units, ticks, astar, budget, seed, verbose),
+            arrival_curve,
+        } => bench(
+            &cli.data,
+            units,
+            ticks,
+            astar,
+            budget,
+            seed,
+            verbose,
+            arrival_curve,
+        ),
         Cmd::Fuzz { ticks, seed, cases } => fuzz(&cli.data, ticks, seed, cases),
         Cmd::Record {
             scenario,
@@ -477,6 +491,33 @@ fn stats_ms(samples: &[f64]) -> (f64, f64, f64) {
 /// arrived: 3 tiles.
 const ARRIVED_DIST_SQ: i64 = (3 * 3) << 32;
 
+/// The arrival gate (docs/design/pathing.md): this percentage of the units
+/// within 3 tiles of their goal.
+const ARRIVAL_GATE_PCT: f64 = 99.0;
+
+/// `--arrival-curve` prints a line every this many ticks.
+const ARRIVAL_CURVE_EVERY: u32 = 100;
+
+/// Units within 3 tiles of their goal, over the goals captured so far.
+fn arrived_count(view: &SimView<'_>, goals: &BTreeMap<UnitId, FxVec2>) -> usize {
+    goals
+        .iter()
+        .filter(|(id, goal)| {
+            view.unit(**id)
+                .is_some_and(|u| u.pos.dist_sq_i64(**goal) <= ARRIVED_DIST_SQ)
+        })
+        .count()
+}
+
+/// `arrived` as a percentage of `total` (0 when nothing has a goal yet).
+fn arrived_pct(arrived: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        100.0 * arrived as f64 / total as f64
+    }
+}
+
 /// An `Fx` as a float for printing (this crate may use floats; the sim may not).
 fn fx_f64(v: sim::Fx) -> f64 {
     v.to_bits() as f64 / f64::from(1u32 << 31) / 2.0
@@ -505,6 +546,7 @@ fn bench(
     budget: Option<u32>,
     seed: u64,
     verbose: bool,
+    arrival_curve: bool,
 ) -> ExitCode {
     let rules = match load_rules(data) {
         Ok(r) => r,
@@ -524,6 +566,13 @@ fn bench(
     let mut arrived_events: BTreeSet<UnitId> = BTreeSet::new();
     let mut unreachable: BTreeSet<UnitId> = BTreeSet::new();
     let mut step_ms = Vec::with_capacity(ticks as usize);
+    // First tick (after its step) at which the gate held, and the first tick
+    // from which it held through every later tick (a shove can break it
+    // again). `None` when it never held.
+    let mut gate_first: Option<u32> = None;
+    let mut gate_since: Option<u32> = None;
+    let mut curve: Vec<(u32, f64)> = Vec::new();
+    println!("bench units={units} ticks={ticks} seed={seed}");
     for t in 0..ticks {
         let cmds = sim::scenarios::commands_at(&stream, t);
         let start = Instant::now();
@@ -544,6 +593,19 @@ fn bench(
                 }
                 _ => {}
             }
+        }
+        // Outside the timed step: the gate check every tick is a few hundred
+        // squared distances.
+        let tick = sim.tick();
+        let pct = arrived_pct(arrived_count(&sim.view(), &goals), goals.len());
+        if pct >= ARRIVAL_GATE_PCT {
+            gate_first.get_or_insert(tick);
+            gate_since.get_or_insert(tick);
+        } else {
+            gate_since = None;
+        }
+        if arrival_curve && tick.is_multiple_of(ARRIVAL_CURVE_EVERY) {
+            curve.push((tick, pct));
         }
     }
     let (mean, p95, max) = stats_ms(&step_ms);
@@ -568,7 +630,11 @@ fn bench(
         let state = match &u.order {
             None if arrived_events.contains(id) => {
                 tally.displaced += 1;
-                "arrived, then displaced"
+                if u.post.is_some_and(|p| p.returning) {
+                    "arrived, displaced, returning to post"
+                } else {
+                    "arrived, then displaced"
+                }
             }
             None => {
                 tally.no_order += 1;
@@ -589,15 +655,10 @@ fn bench(
         };
         stragglers.push((*id, u.pos, *goal, state));
     }
-    let pct = if goals.is_empty() {
-        0.0
-    } else {
-        100.0 * arrived as f64 / goals.len() as f64
-    };
-    println!("bench units={units} ticks={ticks} seed={seed}");
+    let pct = arrived_pct(arrived, goals.len());
     println!("step_ms mean={mean:.3} p95={p95:.3} max={max:.3}");
     println!(
-        "arrived {pct:.1}% ({arrived}/{}) within 3 tiles of the goal",
+        "arrived {pct:.1}% ({arrived}/{}) within 3 tiles of the goal at tick {ticks}",
         goals.len()
     );
     println!(
@@ -609,6 +670,20 @@ fn bench(
         arrived_events.len(),
         unreachable.len()
     );
+    match (gate_first, gate_since) {
+        (Some(first), Some(since)) => println!(
+            "gate >= {ARRIVAL_GATE_PCT}%: first held after tick {first}, held from tick {since} to the end"
+        ),
+        (Some(first), None) => println!(
+            "gate >= {ARRIVAL_GATE_PCT}%: first held after tick {first}, not holding at tick {ticks}"
+        ),
+        _ => println!("gate >= {ARRIVAL_GATE_PCT}%: not reached by tick {ticks}"),
+    }
+    if arrival_curve {
+        for (tick, pct) in &curve {
+            println!("  tick {tick:>5} arrived {pct:5.1}%");
+        }
+    }
     if verbose {
         for (id, pos, goal, state) in &stragglers {
             println!(
@@ -812,6 +887,19 @@ mod tests {
                 astar: true,
                 budget: Some(4000),
                 verbose: false,
+                arrival_curve: false,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["sim-cli", "bench", "--ticks", "2400", "--arrival-curve"])
+            .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Bench {
+                units: 500,
+                ticks: 2400,
+                astar: false,
+                arrival_curve: true,
                 ..
             }
         ));
@@ -905,6 +993,13 @@ mod tests {
                 "seed {seed} produced no invalid commands"
             );
         }
+    }
+
+    #[test]
+    fn arrived_pct_guards_empty_goals() {
+        assert_eq!(arrived_pct(0, 0), 0.0);
+        assert!((arrived_pct(495, 500) - 99.0).abs() < 1e-9);
+        assert!(arrived_pct(494, 500) < ARRIVAL_GATE_PCT);
     }
 
     #[test]

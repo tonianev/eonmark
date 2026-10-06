@@ -54,10 +54,13 @@ when you can; the validator does not require it.
 | `vision.unit_tiles`, `vision.building_tiles`, `vision.town_tiles` | Placeholder vision radii | 8, 10, 14 | M3a, M7 |
 | `path_budget_expansions` | A* expansions shared per tick | 4000 | M1 |
 | `path_cache_entries` | Bounded path cache size | 1024 | M1 |
+| `repath_interval_ds` | Deciseconds between periodic repaths while a unit is moving (30 = 3 s = 60 ticks) | 30 | M1 |
+| `separation_push_moving_div` | The separation push on a moving unit is capped at `speed / this` so steering keeps the upper hand | 2 | M1 |
+| `separation_push_idle_div` | The separation push on a unit without an order is capped at `speed / this`: parked units yield slowly to a passing crowd instead of jamming it | 8 | M1 |
 
 Validation: every count except `pop_cap_per_arms_level` and `rules_version` is > 0 (tightening those two is a listed good first issue), `yield_cap_table` is non-empty and strictly
 increasing, `town_radius_grown_tiles >= town_radius_tiles`, `default_map`
-resolves to a file. Fields the design names for later milestones (ramping
+resolves to a file, the three movement fields are > 0. Fields the design names for later milestones (ramping
 parameters, Harrying doubling, age-gap table, late-game pressure knobs,
 the 45-minute cap) are added when those milestones land, each with a
 validator rule.
@@ -94,12 +97,15 @@ tick.
 | `name` | Display name | `"Yeoman"` |
 | `speed_tiles_per_s_x100` | Movement speed in tiles per second, times 100; converted once to tiles per tick at spawn | 180 (1.8 tiles/s, 0.09 tiles/tick at 20 Hz) |
 | `radius_tiles_x100` | Collision radius in tiles, times 100 | 35 |
-| `arrive_radius_tiles_x100` | Arrival steering slows the unit inside this radius of its final waypoint | 25 |
+| `arrive_radius_tiles_x100` | The unit has arrived (order cleared, `UnitArrived` emitted) within this radius of its final waypoint | 25 |
+| `arrive_slowdown_radius_tiles_x100` | Arrival steering slows the unit linearly inside this radius of its final waypoint; at least the arrive radius | 50 |
+| `waypoint_radius_tiles_x100` | A non-final waypoint counts as reached within this radius (50 = half a tile) | 50 |
 | `separation_tiles_x100` | Margin added to the sum of two radii before separation pushes neighbours apart | 10 |
 
 Validation: at least one kind, ids unique and lowercase, `speed_tiles_per_s_x100 > 0`,
-`radius_tiles_x100 > 0`, every `_x100` field at most 100000. Errors name
-the file and `units[i].<field>`.
+`radius_tiles_x100 > 0`, `waypoint_radius_tiles_x100 > 0`,
+`arrive_slowdown_radius_tiles_x100 >= arrive_radius_tiles_x100`, every `_x100`
+field at most 100000. Errors name the file and `units[i].<field>`.
 
 ## Worked example: slower attrition
 
@@ -116,7 +122,7 @@ Then bump `rules_version` (replays recorded under the old value will report
 cargo run -p sim-cli -- data-check data
 ```
 
-Expected output starts with `OK rules_version=2`. A typo such as
+Expected output starts with `OK rules_version=3` (the repository is at 2). A typo such as
 `attrition_interval_s` fails with the file path, the span and the field:
 
 ```text

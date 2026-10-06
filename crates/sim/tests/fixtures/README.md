@@ -16,9 +16,15 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
-Recorded 2026-10-06 at `rules_version` 1 (first creation, no bump needed):
+Recorded 2026-10-06 at `rules_version` 2, `SIM_VERSION` 2 (first creation was
+at 1/1 the same day; the bump moved the movement constants into `rules.ron` and
+`units.ron`, added the replay clean-exit trailer and stopped `Pathing::service`
+from parking a zero-expansion search; every final hash is unchanged from the
+first recording, only the intermediate `pathing` sub-hashes of saturated ticks
+and the header differ):
 `cargo run -p sim-cli --release -- record --scenario <name> --out crates/sim/tests/fixtures/<name>.eonreplay`.
 
 Regeneration policy (docs/DETERMINISM.md, "Golden fixtures"): fixtures change
 only in a commit that bumps `rules_version` in `data/rules/rules.ron` with a
-one-line reason. A changed hash without that bump is a bug.
+one-line reason. A changed hash without that bump is a bug. CI runs
+`scripts/check_fixture_policy.sh` against the PR base to enforce it.

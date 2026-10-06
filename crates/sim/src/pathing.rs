@@ -44,6 +44,9 @@
 //! start's component), completes trivially when start == goal, then consults
 //! the cache and finally runs or resumes the search. A `Suspended` result
 //! ends the tick's pathing work; the request stays at the head as `active`.
+//! The walk also stops as soon as the budget is spent, so the head request
+//! of a saturated tick stays queued instead of becoming an `active` search
+//! with zero expansions (`SIM_VERSION` 2).
 //!
 //! # The transparent cache rule (virtual budget)
 //!
@@ -388,7 +391,11 @@ impl PathCache {
 }
 
 /// The pathing subsystem: request queue, the active search and the cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Equality compares the hashed fields only (`queue` and `active`), like
+/// `Map`'s, so two sims that agree on hashed state compare equal whether or
+/// not their derived caches do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pathing {
     /// Outstanding requests sorted by `(requested_tick, UnitId)`, excluding
     /// the active one.
@@ -399,6 +406,14 @@ pub struct Pathing {
     #[serde(skip)]
     pub cache: PathCache,
 }
+
+impl PartialEq for Pathing {
+    fn eq(&self, o: &Pathing) -> bool {
+        self.queue == o.queue && self.active == o.active
+    }
+}
+
+impl Eq for Pathing {}
 
 impl Pathing {
     /// Empty subsystem with a cache of `cache_entries` capacity.
@@ -515,9 +530,15 @@ impl Pathing {
             }
         }
 
-        // 2. Queued requests in (requested_tick, UnitId) order.
+        // 2. Queued requests in (requested_tick, UnitId) order. With no
+        //    budget left nothing can complete (a trivial start == goal
+        //    request is the one exception and simply waits a tick), so the
+        //    walk stops before goal correction and before the cache lookup:
+        //    a fresh search would only suspend with zero expansions and sit
+        //    in hashed state, bloating every snapshot by its three
+        //    map-sized arrays. Cache on and off take the same early exit.
         let mut consumed = 0;
-        while consumed < self.queue.len() {
+        while consumed < self.queue.len() && *remaining > 0 {
             let req = self.queue[consumed];
             if req.requested_tick > tick {
                 break;
@@ -1078,5 +1099,11 @@ mod tests {
         let back: Pathing = postcard::from_bytes(&bytes).unwrap();
         assert!(back.cache.is_empty(), "cache is not serialised");
         assert_eq!(back.queue, p.queue);
+        assert_eq!(back, p, "equality ignores the derived cache");
+        let mut q = p.clone();
+        q.cache.clear();
+        assert_eq!(q, p);
+        q.request(req(0, 1, Tile::new(0, 0), Tile::new(1, 1)));
+        assert_ne!(q, p, "equality covers the queue");
     }
 }

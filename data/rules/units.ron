@@ -11,6 +11,8 @@
       speed_tiles_per_s_x100: 180,
       radius_tiles_x100: 35,
       arrive_radius_tiles_x100: 25,
+      arrive_slowdown_radius_tiles_x100: 50,
+      waypoint_radius_tiles_x100: 50,
       separation_tiles_x100: 10,
     ),
   ],

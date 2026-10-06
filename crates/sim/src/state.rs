@@ -30,10 +30,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bump when any change alters simulation results for the same inputs.
-pub const SIM_VERSION: u32 = 1;
-
-/// Ticks between periodic repaths while a unit is moving.
-pub const REPATH_INTERVAL_TICKS: u32 = 60;
+///
+/// 2: `Pathing::service` stops walking the queue once the tick's budget is
+/// spent instead of parking a zero-expansion search as `active`.
+pub const SIM_VERSION: u32 = 2;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,7 +522,7 @@ impl Sim {
                 .get_mut(&unit)
                 .and_then(|u| u.order.as_mut())
             {
-                order.repath_at = tick + REPATH_INTERVAL_TICKS;
+                order.repath_at = tick + self.rules.repath_interval_ticks();
             }
         }
 
@@ -578,13 +578,14 @@ impl Sim {
                     return;
                 }
                 let targets = movement::group_targets(&self.state.map, *target, movers.len());
+                let repath_at = tick + self.rules.repath_interval_ticks();
                 for (unit, goal) in movers.into_iter().zip(targets) {
                     let u = self.state.units.get_mut(&unit).expect("validated");
                     u.order = Some(MoveOrder {
                         goal,
                         path: Vec::new(),
                         next: 0,
-                        repath_at: tick + REPATH_INTERVAL_TICKS,
+                        repath_at,
                     });
                     let from = self.state.map.tile_of(u.pos);
                     let to = self.state.map.tile_of(goal);

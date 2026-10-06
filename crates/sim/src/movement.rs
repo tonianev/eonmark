@@ -10,17 +10,18 @@
 //! Per tick, for every unit in `UnitId` order:
 //!
 //! 1. Arrival steering (units with a path) toward `order.path[order.next]`
-//!    at `unit.speed` (tiles per tick), scaled down linearly inside twice
-//!    the kind's arrive radius around the final waypoint. A waypoint is
-//!    consumed when the unit is within half a tile of it, or once the unit
-//!    is closer to the following waypoint than the waypoint itself is; the
-//!    final one when within the arrive radius, which clears the order and
-//!    emits [`SimEvent::UnitArrived`].
+//!    at `unit.speed` (tiles per tick), scaled down linearly inside the
+//!    kind's `arrive_slowdown_radius` around the final waypoint. A waypoint
+//!    is consumed when the unit is within the kind's `waypoint_radius` of
+//!    it, or once the unit is closer to the following waypoint than the
+//!    waypoint itself is; the final one when within the arrive radius,
+//!    which clears the order and emits [`SimEvent::UnitArrived`].
 //! 2. Separation from neighbours read from the grid: for each neighbour
 //!    closer than `radius_a + radius_b + separation`, accumulate a push-away
 //!    vector of the penetration depth. Compare with `dist_sq_i64`, never a
-//!    square root. The sum is capped at `speed / 2` (moving) or `speed / 8`
-//!    (no order) so steering keeps the upper hand.
+//!    square root. The sum is capped at `speed / separation_push_moving_div`
+//!    (moving) or `speed / separation_push_idle_div` (no order) so steering
+//!    keeps the upper hand.
 //! 3. Integrate: `pos += clamp(desired + separation, speed)`, sliding along
 //!    a blocked tile's wall (x-only, then y-only) instead of entering it.
 //! 4. After every unit has moved, circle-vs-circle correction over
@@ -30,9 +31,12 @@
 //! Units never enter a blocked tile. Repath triggers (each re-issues a
 //! `PathRequest` through `Pathing::request`, unless one is still
 //! outstanding): the next waypoint's tile is blocked, `tick >=
-//! order.repath_at` (every 60 ticks while moving), or terrain blocked every
-//! candidate step this tick. See [`step`] for the decisions taken where the
-//! design is silent and the crowd measurements behind them.
+//! order.repath_at` (every `repath_interval_ds` while moving), or terrain
+//! blocked every candidate step this tick. See [`step`] for the decisions
+//! taken where the design is silent and the crowd measurements behind them.
+//!
+//! Every number here comes from `data/rules/`: the per-kind radii from
+//! `units.ron` and the push caps and repath cadence from `rules.ron`.
 
 use crate::fx::{Fx, FxVec2};
 use crate::ids::UnitId;
@@ -125,26 +129,16 @@ impl SpatialGrid {
     }
 }
 
-/// Squared half-tile distance in `I32F32` scale: a non-final waypoint is
-/// consumed when the unit is closer than this.
-const HALF_TILE_SQ: i64 = (Fx::HALF.to_bits() * Fx::HALF.to_bits()) >> 32;
-
-/// The separation push on a *moving* unit is capped at `speed / MOVING_PUSH_DIV`
-/// so the steering direction always keeps at least half the weight.
-const MOVING_PUSH_DIV: i32 = 2;
-
-/// The separation push on a unit *without an order* is capped at
-/// `speed / IDLE_PUSH_DIV`: parked units yield slowly to a crowd passing
-/// through instead of jamming it (`IDLE_PUSH_DIV = inf`) or being flung
-/// tiles away from where they arrived (`IDLE_PUSH_DIV = 2`). Measured on
-/// the 500-unit crossing: 1/8 keeps 95% of arrived units within 3 tiles of
-/// their goal while 99% still arrive.
-const IDLE_PUSH_DIV: i32 = 8;
-
-/// Per-kind movement parameters, indexed by `UnitKindId`.
+/// Per-kind movement parameters, indexed by `UnitKindId`
+/// (`data/rules/units.ron`, converted once per tick).
 struct KindParams {
-    /// Final-arrival radius; the linear slowdown starts at twice this.
+    /// Final-arrival radius.
     arrive: Fx,
+    /// The linear slowdown toward the final waypoint starts inside this.
+    slowdown: Fx,
+    /// Squared radius, in `dist_sq_i64` scale, inside which a non-final
+    /// waypoint is consumed.
+    waypoint_sq: i64,
     /// Separation margin added to the sum of radii.
     separation: Fx,
 }
@@ -153,11 +147,21 @@ fn kind_params(rules: &Rules) -> Vec<KindParams> {
     rules
         .units
         .iter()
-        .map(|k| KindParams {
-            arrive: crate::state::fx_from_x100(k.arrive_radius_tiles_x100),
-            separation: crate::state::fx_from_x100(k.separation_tiles_x100),
+        .map(|k| {
+            let waypoint = crate::state::fx_from_x100(k.waypoint_radius_tiles_x100);
+            KindParams {
+                arrive: crate::state::fx_from_x100(k.arrive_radius_tiles_x100),
+                slowdown: crate::state::fx_from_x100(k.arrive_slowdown_radius_tiles_x100),
+                waypoint_sq: (waypoint * waypoint).to_bits(),
+                separation: crate::state::fx_from_x100(k.separation_tiles_x100),
+            }
         })
         .collect()
+}
+
+/// `speed / div` for a `rules.ron` divisor (validated `> 0`).
+fn push_cap(speed: Fx, div: u32) -> Fx {
+    speed.div_int(i32::try_from(div).expect("push divisor validated > 0 and fits i32"))
 }
 
 /// Length of a vector: the integer square root of its squared length,
@@ -223,20 +227,25 @@ fn slide(map: &Map, from: FxVec2, v: FxVec2) -> (FxVec2, bool) {
 /// - The final waypoint is `path.last()` (the component-corrected goal
 ///   tile), not `order.goal`, so a unit in another component than the click
 ///   still arrives. Arrival is `dist <= arrive_radius`; the linear slowdown
-///   applies inside `2 * arrive_radius`, and a step is never longer than the
-///   remaining distance, so a unit cannot overshoot its waypoint.
-/// - A non-final waypoint is consumed when the unit is within half a tile of
-///   it *or* is already closer to the following waypoint than the waypoint
-///   itself is (the unit was pushed past it; steering back would be a
-///   detour that stalls a crowd). This second rule is what lets 500 units
-///   flow through the 8-tile water gap at about one unit per tick.
+///   applies inside `arrive_slowdown_radius` (half a tile for the Yeoman),
+///   and a step is never longer than the remaining distance, so a unit
+///   cannot overshoot its waypoint.
+/// - A non-final waypoint is consumed when the unit is within the kind's
+///   `waypoint_radius` (half a tile) of it *or* is already closer to the
+///   following waypoint than the waypoint itself is (the unit was pushed
+///   past it; steering back would be a detour that stalls a crowd). This
+///   second rule is what lets 500 units flow through the 8-tile water gap
+///   at about one unit per tick.
 /// - Separation pushes a unit away from each neighbour closer than
 ///   `radius_a + radius_b + separation` by the penetration depth along the
-///   centre line; the sum is capped at `speed / 2` for moving units and
-///   `speed / 8` for units without an order, which also take part so a
-///   parked block yields to a crowd. Two coincident units push along the x
-///   axis, the higher id eastward. Units later in id order see earlier
-///   units' updated positions.
+///   centre line; the sum is capped at `speed / separation_push_moving_div`
+///   (2) for moving units and `speed / separation_push_idle_div` (8) for
+///   units without an order, which also take part so a parked block yields
+///   to a crowd instead of jamming it (an infinite divisor) or being flung
+///   tiles away from where it arrived (a divisor of 2); measured on the
+///   500-unit crossing, 8 keeps 95% of arrived units within 3 tiles of
+///   their goal. Two coincident units push along the x axis, the higher id
+///   eastward. Units later in id order see earlier units' updated positions.
 /// - A step that would enter a blocked tile (or leave the map) slides along
 ///   the wall (x-only, then y-only) and otherwise stays put.
 /// - `facing` is the normalised velocity of the last tick the unit moved
@@ -254,6 +263,8 @@ pub fn step(
     events: &mut Vec<SimEvent>,
 ) -> Vec<UnitId> {
     let params = kind_params(rules);
+    let moving_div = rules.separation_push_moving_div;
+    let idle_div = rules.separation_push_idle_div;
     let max_radius = units.values().map(|u| u.radius).max().unwrap_or(Fx::ZERO);
     let max_speed = units.values().map(|u| u.speed).max().unwrap_or(Fx::ZERO);
     let max_sep = params
@@ -286,10 +297,11 @@ pub fn step(
             while i < last {
                 let here = map.center_of(order.path[i]);
                 let ahead = map.center_of(order.path[i + 1]);
-                // Consumed when within half a tile, or once the unit is
-                // already closer to the following waypoint than this one
-                // is (it has been passed; steering back would be a detour).
-                if u.pos.dist_sq_i64(here) < HALF_TILE_SQ
+                // Consumed when within the waypoint radius, or once the
+                // unit is already closer to the following waypoint than
+                // this one is (it has been passed; steering back would be
+                // a detour).
+                if u.pos.dist_sq_i64(here) < p.waypoint_sq
                     || u.pos.dist_sq_i64(ahead) < here.dist_sq_i64(ahead)
                 {
                     i += 1;
@@ -307,11 +319,8 @@ pub fn step(
                 continue;
             }
             let mut mag = u.speed;
-            if i == last {
-                let slow = p.arrive + p.arrive;
-                if dist < slow {
-                    mag = u.speed * dist / slow;
-                }
+            if i == last && dist < p.slowdown {
+                mag = u.speed * dist / p.slowdown;
             }
             mag = mag.min(dist);
             if dist > Fx::ZERO {
@@ -344,18 +353,18 @@ pub fn step(
             }
         }
 
-        // 3. Integrate with the speed clamp. The push is capped first (see
-        //    `MOVING_PUSH_DIV` / `IDLE_PUSH_DIV`) so the desired direction
-        //    always keeps at least half the weight: in a dense crowd the sum
-        //    of pushes would otherwise drown the steering and stall the flow.
+        // 3. Integrate with the speed clamp. The push is capped first (the
+        //    `separation_push_*_div` rules) so the desired direction always
+        //    keeps the upper hand: in a dense crowd the sum of pushes would
+        //    otherwise drown the steering and stall the flow.
         let plen = length(push);
-        let push_cap = if u.order.is_some() {
-            u.speed.div_int(MOVING_PUSH_DIV)
+        let cap = if u.order.is_some() {
+            push_cap(u.speed, moving_div)
         } else {
-            u.speed.div_int(IDLE_PUSH_DIV)
+            push_cap(u.speed, idle_div)
         };
-        if plen > push_cap {
-            push = rescale(push, push_cap, plen);
+        if plen > cap {
+            push = rescale(push, cap, plen);
         }
         let mut v = desired + push;
         let vlen = length(v);

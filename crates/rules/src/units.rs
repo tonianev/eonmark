@@ -22,9 +22,15 @@ pub struct UnitKind {
     pub speed_tiles_per_s_x100: u32,
     /// Collision radius in tiles, times 100 (`35` is 0.35 tiles).
     pub radius_tiles_x100: u32,
-    /// Arrival steering starts slowing the unit inside this radius around its
-    /// final waypoint, in tiles times 100.
+    /// A unit has arrived when it is within this radius of its final
+    /// waypoint, in tiles times 100.
     pub arrive_radius_tiles_x100: u32,
+    /// Arrival steering slows the unit linearly inside this radius around its
+    /// final waypoint, in tiles times 100. At least `arrive_radius_tiles_x100`.
+    pub arrive_slowdown_radius_tiles_x100: u32,
+    /// A non-final waypoint counts as reached within this radius, in tiles
+    /// times 100 (`50` is half a tile).
+    pub waypoint_radius_tiles_x100: u32,
     /// Extra margin added to the sum of two radii before separation pushes
     /// neighbours apart, in tiles times 100.
     pub separation_tiles_x100: u32,
@@ -96,6 +102,7 @@ impl Units {
             };
             positive("speed_tiles_per_s_x100", u.speed_tiles_per_s_x100)?;
             positive("radius_tiles_x100", u.radius_tiles_x100)?;
+            positive("waypoint_radius_tiles_x100", u.waypoint_radius_tiles_x100)?;
             let bounded = |name: &str, v: u32| -> Result<(), Error> {
                 if v > MAX_X100 {
                     return Err(Error::invalid(
@@ -107,6 +114,17 @@ impl Units {
                 Ok(())
             };
             bounded("arrive_radius_tiles_x100", u.arrive_radius_tiles_x100)?;
+            bounded(
+                "arrive_slowdown_radius_tiles_x100",
+                u.arrive_slowdown_radius_tiles_x100,
+            )?;
+            if u.arrive_slowdown_radius_tiles_x100 < u.arrive_radius_tiles_x100 {
+                return Err(Error::invalid(
+                    path,
+                    &field("arrive_slowdown_radius_tiles_x100"),
+                    "must be >= arrive_radius_tiles_x100",
+                ));
+            }
             bounded("separation_tiles_x100", u.separation_tiles_x100)?;
         }
         Ok(())
@@ -134,6 +152,8 @@ mod tests {
             speed_tiles_per_s_x100: 180,
             radius_tiles_x100: 35,
             arrive_radius_tiles_x100: 25,
+            arrive_slowdown_radius_tiles_x100: 50,
+            waypoint_radius_tiles_x100: 50,
             separation_tiles_x100: 10,
         }
     }
@@ -169,6 +189,17 @@ mod tests {
         u.units[0].separation_tiles_x100 = MAX_X100 + 1;
         let err = u.validate(Path::new("u.ron")).unwrap_err().to_string();
         assert!(err.contains("units[0].separation_tiles_x100"), "{err}");
+        let mut u = sample();
+        u.units[0].waypoint_radius_tiles_x100 = 0;
+        let err = u.validate(Path::new("u.ron")).unwrap_err().to_string();
+        assert!(err.contains("units[0].waypoint_radius_tiles_x100"), "{err}");
+        let mut u = sample();
+        u.units[0].arrive_slowdown_radius_tiles_x100 = 24;
+        let err = u.validate(Path::new("u.ron")).unwrap_err().to_string();
+        assert!(
+            err.contains("units[0].arrive_slowdown_radius_tiles_x100"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -188,7 +219,7 @@ mod tests {
 
     #[test]
     fn unknown_field_is_rejected_with_name() {
-        let text = r#"(units: [(id: "yeoman", name: "Yeoman", speed_tiles_per_s_x100: 180, radius_tiles_x100: 35, arrive_radius_tiles_x100: 25, separation_tiles_x100: 10, hp: 3)])"#;
+        let text = r#"(units: [(id: "yeoman", name: "Yeoman", speed_tiles_per_s_x100: 180, radius_tiles_x100: 35, arrive_radius_tiles_x100: 25, arrive_slowdown_radius_tiles_x100: 50, waypoint_radius_tiles_x100: 50, separation_tiles_x100: 10, hp: 3)])"#;
         let err = crate::parse_ron::<Units>(Path::new("u.ron"), text).unwrap_err();
         assert!(err.to_string().contains("hp"), "{err}");
     }

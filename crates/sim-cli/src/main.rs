@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use scenarios::Scenario;
 use sim::replay::DEFAULT_HASH_EVERY;
 use sim::{
-    AStarSearch, FxVec2, Map, MatchSetup, PlayerId, ReplayReader, ReplayWriter, Rules,
+    AStarSearch, FxVec2, Map, MatchSetup, PlayerId, ReplayFile, ReplayReader, ReplayWriter, Rules,
     SearchStatus, Sim, SimEvent, SubHashes, UnitId, VerifyOutcome,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,6 +91,9 @@ enum Cmd {
         /// Match seed.
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// List every unit that did not arrive (id, position, order state).
+        #[arg(long)]
+        verbose: bool,
     },
     /// Feed seeded random command streams to the sim and compare two runs.
     Fuzz {
@@ -154,7 +157,8 @@ fn main() -> ExitCode {
             astar,
             budget,
             seed,
-        } => bench(&cli.data, units, ticks, astar, budget, seed),
+            verbose,
+        } => bench(&cli.data, units, ticks, astar, budget, seed, verbose),
         Cmd::Fuzz { ticks, seed, cases } => fuzz(&cli.data, ticks, seed, cases),
         Cmd::Record {
             scenario,
@@ -272,17 +276,34 @@ fn hash_dump(data: &Path, ticks: u32, seed: u64) -> ExitCode {
 // M1: verify, hash-dump <replay>, record, bench, fuzz
 // ---------------------------------------------------------------------------
 
-/// The controller that drives AI slots during a re-simulation. M1 replays
+/// The controller that drives AI slots during a re-simulation, plus the
+/// warnings a re-simulation prints on stderr before its result. M1 replays
 /// are scenario recordings with two human slots; a header with an AI slot is
 /// driven by `ai::Passive` with a warning until the header names a bot (M5b).
+/// A file without the clean-exit trailer (a recording killed mid-match) is
+/// re-simulated up to its last complete record with a warning; the OK line
+/// itself is unchanged so CI's `^OK` grep and hash-parity diff still apply.
 fn replay_controller(replay: &Path) -> Box<dyn sim::AiController> {
-    if let Ok((setup, _)) = ReplayReader::open(replay)
-        && setup.players.iter().any(|p| p.is_ai)
+    if let Ok(ReplayFile {
+        setup,
+        truncated,
+        undecoded_bytes,
+        records,
+    }) = ReplayReader::open(replay)
     {
-        eprintln!(
-            "warning: {} has AI slots; they are driven by ai::Passive (bot ids in the header arrive in M5b)",
-            replay.display()
-        );
+        if setup.players.iter().any(|p| p.is_ai) {
+            eprintln!(
+                "warning: {} has AI slots; they are driven by ai::Passive (bot ids in the header arrive in M5b)",
+                replay.display()
+            );
+        }
+        if truncated {
+            eprintln!(
+                "warning: {} has no clean-exit trailer (recording was cut); checking {} complete records, {undecoded_bytes} trailing bytes dropped",
+                replay.display(),
+                records.len()
+            );
+        }
     }
     Box::new(ai::Passive)
 }
@@ -456,6 +477,26 @@ fn stats_ms(samples: &[f64]) -> (f64, f64, f64) {
 /// arrived: 3 tiles.
 const ARRIVED_DIST_SQ: i64 = (3 * 3) << 32;
 
+/// An `Fx` as a float for printing (this crate may use floats; the sim may not).
+fn fx_f64(v: sim::Fx) -> f64 {
+    v.to_bits() as f64 / f64::from(1u32 << 31) / 2.0
+}
+
+/// Where the units that are *not* within 3 tiles of their goal stand at the
+/// end of `bench`, by order state.
+#[derive(Debug, Default)]
+struct ArrivalTally {
+    /// Order completed (`UnitArrived`) but since pushed more than 3 tiles away.
+    displaced: usize,
+    /// Still following a path.
+    moving: usize,
+    /// Order held, path request outstanding (queued or suspended).
+    waiting_path: usize,
+    /// Order dropped as unreachable (`PathUnreachable`), or never ordered.
+    no_order: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn bench(
     data: &Path,
     units: u16,
@@ -463,6 +504,7 @@ fn bench(
     astar: bool,
     budget: Option<u32>,
     seed: u64,
+    verbose: bool,
 ) -> ExitCode {
     let rules = match load_rules(data) {
         Ok(r) => r,
@@ -474,7 +516,13 @@ fn bench(
     let (setup, stream) = Scenario::Crossing { units }.setup_and_stream(&rules, Some(seed), ticks);
     let mut sim = scenarios::build(&setup, &rules);
     // Each unit's goal, captured while its order is live (arrival clears it).
+    // `order.goal` is the unit's own spiral-offset tile centre from
+    // `movement::group_targets`, already corrected to a passable tile of the
+    // click's component; the path's last tile is that same tile for every
+    // unit that starts in the click's component (all of them here).
     let mut goals: BTreeMap<UnitId, FxVec2> = BTreeMap::new();
+    let mut arrived_events: BTreeSet<UnitId> = BTreeSet::new();
+    let mut unreachable: BTreeSet<UnitId> = BTreeSet::new();
     let mut step_ms = Vec::with_capacity(ticks as usize);
     for t in 0..ticks {
         let cmds = sim::scenarios::commands_at(&stream, t);
@@ -486,16 +534,61 @@ fn bench(
                 goals.entry(u.id).or_insert(order.goal);
             }
         }
+        for e in sim.drain_events() {
+            match e {
+                SimEvent::UnitArrived { unit } => {
+                    arrived_events.insert(unit);
+                }
+                SimEvent::PathUnreachable { unit } => {
+                    unreachable.insert(unit);
+                }
+                _ => {}
+            }
+        }
     }
     let (mean, p95, max) = stats_ms(&step_ms);
     let view = sim.view();
-    let arrived = goals
-        .iter()
-        .filter(|(id, goal)| {
-            view.unit(**id)
-                .is_some_and(|u| u.pos.dist_sq_i64(**goal) <= ARRIVED_DIST_SQ)
-        })
-        .count();
+    let mut tally = ArrivalTally::default();
+    let mut arrived = 0usize;
+    let mut near_but_moving = 0usize;
+    let mut stragglers = Vec::new();
+    for (id, goal) in &goals {
+        let Some(u) = view.unit(*id) else {
+            continue;
+        };
+        // The acceptance gate: within 3 tiles of the goal, whatever the
+        // order state (a unit on its last half tile counts).
+        if u.pos.dist_sq_i64(*goal) <= ARRIVED_DIST_SQ {
+            arrived += 1;
+            if u.order.is_some() {
+                near_but_moving += 1;
+            }
+            continue;
+        }
+        let state = match &u.order {
+            None if arrived_events.contains(id) => {
+                tally.displaced += 1;
+                "arrived, then displaced"
+            }
+            None => {
+                tally.no_order += 1;
+                if unreachable.contains(id) {
+                    "unreachable"
+                } else {
+                    "no order"
+                }
+            }
+            Some(order) if order.path.is_empty() => {
+                tally.waiting_path += 1;
+                "waiting for path"
+            }
+            Some(_) => {
+                tally.moving += 1;
+                "moving"
+            }
+        };
+        stragglers.push((*id, u.pos, *goal, state));
+    }
     let pct = if goals.is_empty() {
         0.0
     } else {
@@ -507,6 +600,27 @@ fn bench(
         "arrived {pct:.1}% ({arrived}/{}) within 3 tiles of the goal",
         goals.len()
     );
+    println!(
+        "not within 3 tiles: moving={} waiting_path={} displaced={} no_order={}; arrived events={} unreachable={} near_but_still_moving={near_but_moving}",
+        tally.moving,
+        tally.waiting_path,
+        tally.displaced,
+        tally.no_order,
+        arrived_events.len(),
+        unreachable.len()
+    );
+    if verbose {
+        for (id, pos, goal, state) in &stragglers {
+            println!(
+                "  unit {} at ({:.2}, {:.2}) goal ({:.1}, {:.1}) {state}",
+                id.0,
+                fx_f64(pos.x),
+                fx_f64(pos.y),
+                fx_f64(goal.x),
+                fx_f64(goal.y)
+            );
+        }
+    }
     println!("final_hash=0x{:016x}", sim.hash());
     ExitCode::SUCCESS
 }
@@ -697,6 +811,7 @@ mod tests {
                 ticks: 1200,
                 astar: true,
                 budget: Some(4000),
+                verbose: false,
                 ..
             }
         ));
@@ -757,7 +872,7 @@ mod tests {
         let (final_hash2, _) =
             record_scenario(&rules, Scenario::Selftest, 90, &out2, true, None, 0).unwrap();
         assert_eq!(final_hash2, final_hash);
-        let (_, recs) = ReplayReader::open(&out2).unwrap();
+        let recs = ReplayReader::open(&out2).unwrap().records;
         let hashes = recs
             .iter()
             .filter(|r| matches!(r, sim::replay::Record::Hash(_)))

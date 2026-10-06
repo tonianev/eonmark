@@ -47,9 +47,9 @@ pub use ids::{
 pub use map::Map;
 pub use movement::SpatialGrid;
 pub use pathing::{AStarSearch, PathRequest, Pathing, SearchStatus};
-pub use replay::{ReplayError, ReplayReader, ReplayWriter, VerifyOutcome, verify};
+pub use replay::{ReplayError, ReplayFile, ReplayReader, ReplayWriter, VerifyOutcome, verify};
 pub use rules::Rules;
 pub use state::{
-    Building, MatchSetup, MoveOrder, Player, PlayerSlot, REPATH_INTERVAL_TICKS, RejectReason,
-    SIM_VERSION, Sim, SimEvent, SnapshotError, SubHashes, Unit,
+    Building, MatchSetup, MoveOrder, Player, PlayerSlot, RejectReason, SIM_VERSION, Sim, SimEvent,
+    SnapshotError, SubHashes, Unit,
 };

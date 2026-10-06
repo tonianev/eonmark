@@ -8,6 +8,8 @@
 //! u16 little-endian           format version, 1       (FORMAT_VERSION)
 //! postcard(MatchSetup)        header
 //! postcard(Record)*           stream, no framing
+//! "EONRDONE"                  8-byte clean-exit trailer (TRAILER), only
+//!                             when the writer `finish`ed
 //! ```
 //!
 //! Records are [`Record::Tick`] for every tick that had commands (the
@@ -20,15 +22,21 @@
 //! `postcard::take_from_bytes` and stops at the first record that does not
 //! decode, keeping everything before it. Postcard encodings are
 //! self-delimiting and prefix-free per type, so a cut-off tail never decodes
-//! as a shorter valid record.
+//! as a shorter valid record. The trailer tells truncation apart from
+//! corruption: a file that ends with [`TRAILER`] was closed cleanly, so any
+//! undecodable bytes before the trailer are damage, not a cut, and the
+//! reader returns [`ReplayError::Corrupt`] instead of silently dropping the
+//! rest of the stream. A file without the trailer is a truncated recording:
+//! every complete record is kept, [`ReplayFile::truncated`] is set and the
+//! CLI prints a warning while `verify` still reports the ticks it checked.
 //!
 //! # Writer
 //!
 //! [`ReplayWriter`] wraps a `BufWriter<File>`. `tick` and `hash` append
 //! records; `flush` writes the buffer (the game calls it every 20 ticks);
-//! `finish` flushes and `sync_all`s once at clean exit. No fsync during play
-//! (Apple `F_FULLFSYNC` cost). The dedicated writer thread and channel live
-//! in the game crate (M2); this type is the sink.
+//! `finish` appends the trailer, flushes and `sync_all`s once at clean exit.
+//! No fsync during play (Apple `F_FULLFSYNC` cost). The dedicated writer
+//! thread and channel live in the game crate (M2); this type is the sink.
 //!
 //! # Verify
 //!
@@ -51,6 +59,10 @@ use std::path::{Path, PathBuf};
 
 /// File magic.
 pub const MAGIC: [u8; 4] = *b"EONR";
+/// Clean-exit trailer appended by [`ReplayWriter::finish`]. Its first byte
+/// (`E`, 0x45) is not a valid [`Record`] tag, so the record loop can never
+/// read it as a record.
+pub const TRAILER: [u8; 8] = *b"EONRDONE";
 /// Format version written by this build.
 pub const FORMAT_VERSION: u16 = 1;
 /// Default interval between hash records, in ticks.
@@ -139,6 +151,17 @@ pub enum ReplayError {
         /// Tick the re-simulation had already reached.
         reached: u32,
     },
+    /// The file ends with the clean-exit [`TRAILER`] but a record before it
+    /// does not decode: the stream was damaged after it was written (a
+    /// truncated file has no trailer and is not an error).
+    Corrupt {
+        /// File involved.
+        path: PathBuf,
+        /// Byte offset of the first record that does not decode.
+        offset: usize,
+        /// Bytes between that record and the trailer.
+        undecoded: usize,
+    },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -169,6 +192,15 @@ impl core::fmt::Display for ReplayError {
             } => write!(
                 f,
                 "{}: record for tick {tick} after the stream reached tick {reached}",
+                path.display()
+            ),
+            ReplayError::Corrupt {
+                path,
+                offset,
+                undecoded,
+            } => write!(
+                f,
+                "{}: corrupt record stream: {undecoded} undecodable bytes at offset {offset} before the clean-exit trailer",
                 path.display()
             ),
         }
@@ -251,8 +283,16 @@ impl ReplayWriter {
         })
     }
 
-    /// Flush and `sync_all`; consumes the writer. Call once at clean exit.
+    /// Append the clean-exit [`TRAILER`], flush and `sync_all`; consumes the
+    /// writer. Call once at clean exit; a recording that is killed never
+    /// reaches it, which is how the reader knows the file is truncated.
     pub fn finish(mut self) -> Result<(), ReplayError> {
+        self.out
+            .write_all(&TRAILER)
+            .map_err(|source| ReplayError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
         self.flush()?;
         self.out
             .get_ref()
@@ -274,14 +314,34 @@ impl ReplayWriter {
     }
 }
 
+/// A decoded replay: the header, every complete record, and whether the
+/// recording was closed cleanly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayFile {
+    /// The header.
+    pub setup: MatchSetup,
+    /// Every record that decoded, in file order.
+    pub records: Vec<Record>,
+    /// `true` when the file does not end with [`TRAILER`]: the recording was
+    /// cut (`kill -9`, crash, disk full) and `records` holds everything up
+    /// to the last complete record. `false` means the writer `finish`ed and
+    /// every record decoded.
+    pub truncated: bool,
+    /// Bytes after the last complete record that did not decode (a partial
+    /// record left by the cut). Always 0 when `truncated` is `false`.
+    pub undecoded_bytes: usize,
+}
+
 /// Reads an `.eonreplay` file, tolerating a truncated tail.
 #[derive(Debug)]
 pub struct ReplayReader;
 
 impl ReplayReader {
     /// Read the whole file: header (magic and version checked) and every
-    /// complete record. A truncated final record is dropped silently.
-    pub fn open(path: &Path) -> Result<(MatchSetup, Vec<Record>), ReplayError> {
+    /// complete record. A partial final record without a trailer is dropped
+    /// and reported through [`ReplayFile::truncated`]; an undecodable record
+    /// in a file that has the trailer is [`ReplayError::Corrupt`].
+    pub fn open(path: &Path) -> Result<ReplayFile, ReplayError> {
         let bytes = std::fs::read(path).map_err(|source| ReplayError::Io {
             path: path.to_path_buf(),
             source,
@@ -290,7 +350,7 @@ impl ReplayReader {
     }
 
     /// Decode from bytes already in memory (the body of `open`; tests use it).
-    pub fn decode(path: &Path, bytes: &[u8]) -> Result<(MatchSetup, Vec<Record>), ReplayError> {
+    pub fn decode(path: &Path, bytes: &[u8]) -> Result<ReplayFile, ReplayError> {
         if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC {
             return Err(ReplayError::BadMagic {
                 path: path.to_path_buf(),
@@ -310,8 +370,16 @@ impl ReplayReader {
                 found,
             });
         }
+        // A clean exit ends the file with the trailer; strip it before the
+        // record loop so the loop sees exactly the record stream.
+        let finished = rest.ends_with(&TRAILER);
+        let stream = if finished {
+            &rest[..rest.len() - TRAILER.len()]
+        } else {
+            rest
+        };
         let (setup, mut rest): (MatchSetup, &[u8]) =
-            postcard::take_from_bytes(rest).map_err(|source| ReplayError::Header {
+            postcard::take_from_bytes(stream).map_err(|source| ReplayError::Header {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -322,7 +390,20 @@ impl ReplayReader {
             records.push(record);
             rest = tail;
         }
-        Ok((setup, records))
+        let undecoded_bytes = rest.len();
+        if finished && undecoded_bytes > 0 {
+            return Err(ReplayError::Corrupt {
+                path: path.to_path_buf(),
+                offset: bytes.len() - TRAILER.len() - undecoded_bytes,
+                undecoded: undecoded_bytes,
+            });
+        }
+        Ok(ReplayFile {
+            setup,
+            records,
+            truncated: !finished,
+            undecoded_bytes,
+        })
     }
 }
 
@@ -398,7 +479,7 @@ pub fn verify(
     data_dir: &Path,
     ai: Box<dyn AiController>,
 ) -> Result<VerifyOutcome, ReplayError> {
-    let (setup, records) = ReplayReader::open(path)?;
+    let ReplayFile { setup, records, .. } = ReplayReader::open(path)?;
     let mut sim = match prepare(setup, data_dir, ai)? {
         Ok(sim) => sim,
         Err(outcome) => return Ok(outcome),
@@ -448,7 +529,7 @@ pub fn hash_dump(
     every: u32,
     mut emit: impl FnMut(u32, u64, &SubHashes),
 ) -> Result<VerifyOutcome, ReplayError> {
-    let (setup, records) = ReplayReader::open(path)?;
+    let ReplayFile { setup, records, .. } = ReplayReader::open(path)?;
     let mut sim = match prepare(setup, data_dir, ai)? {
         Ok(sim) => sim,
         Err(outcome) => return Ok(outcome),
@@ -709,8 +790,11 @@ mod tests {
         let (setup, _) = scenario_setup(5);
         let hashes = record(&path, setup.clone(), 50, 20);
         assert_eq!(hashes.iter().map(|h| h.0).collect::<Vec<_>>(), [20, 40, 50]);
-        let (read_setup, records) = ReplayReader::open(&path).unwrap();
-        assert_eq!(read_setup, setup);
+        let file = ReplayReader::open(&path).unwrap();
+        assert_eq!(file.setup, setup);
+        assert!(!file.truncated, "finish() wrote the trailer");
+        assert_eq!(file.undecoded_bytes, 0);
+        let records = file.records;
         let ticks: Vec<u32> = records
             .iter()
             .filter_map(|r| match r {
@@ -733,6 +817,7 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(&bytes[..4], &MAGIC);
         assert_eq!(bytes[4..6], FORMAT_VERSION.to_le_bytes());
+        assert!(bytes.ends_with(&TRAILER));
     }
 
     #[test]
@@ -741,18 +826,31 @@ mod tests {
         let (setup, _) = scenario_setup(5);
         record(&path, setup, 60, 20);
         let bytes = std::fs::read(&path).unwrap();
-        let (_, full) = ReplayReader::decode(&path, &bytes).unwrap();
-        // The last record is Hash(60); cut it in half.
+        let full = ReplayReader::decode(&path, &bytes).unwrap().records;
+        // The last record is Hash(60), followed by the trailer; drop the
+        // trailer (a kill between the last record and finish) and then cut
+        // the record in half.
         let last = postcard::to_allocvec(full.last().unwrap()).unwrap();
-        assert!(bytes.ends_with(&last));
-        let cut = &bytes[..bytes.len() - last.len() / 2];
-        let (_, records) = ReplayReader::decode(&path, cut).unwrap();
-        assert_eq!(records.len(), full.len() - 1);
-        assert_eq!(records, full[..full.len() - 1]);
-        // Cut at a record boundary: still every complete record.
-        let cut = &bytes[..bytes.len() - last.len()];
-        let (_, records) = ReplayReader::decode(&path, cut).unwrap();
-        assert_eq!(records, full[..full.len() - 1]);
+        let stream = &bytes[..bytes.len() - TRAILER.len()];
+        assert!(stream.ends_with(&last));
+        let cut = &stream[..stream.len() - last.len() / 2];
+        let file = ReplayReader::decode(&path, cut).unwrap();
+        assert_eq!(file.records.len(), full.len() - 1);
+        assert_eq!(file.records, full[..full.len() - 1]);
+        assert!(file.truncated);
+        assert_eq!(file.undecoded_bytes, last.len() - last.len() / 2);
+        // Cut at a record boundary: still every complete record, no partial.
+        let cut = &stream[..stream.len() - last.len()];
+        let file = ReplayReader::decode(&path, cut).unwrap();
+        assert_eq!(file.records, full[..full.len() - 1]);
+        assert!(file.truncated);
+        assert_eq!(file.undecoded_bytes, 0);
+        // Killed right after the last record, before `finish`: complete
+        // stream, still reported as truncated.
+        let file = ReplayReader::decode(&path, stream).unwrap();
+        assert_eq!(file.records, full);
+        assert!(file.truncated);
+        assert_eq!(file.undecoded_bytes, 0);
         // Cut inside the header.
         let err = ReplayReader::decode(&path, &bytes[..10]).unwrap_err();
         assert!(matches!(err, ReplayError::Header { .. }), "{err}");
@@ -774,6 +872,65 @@ mod tests {
     }
 
     #[test]
+    fn corruption_before_the_trailer_is_an_error_not_truncation() {
+        let path = temp_path("corrupt");
+        let (setup, _) = scenario_setup(5);
+        record(&path, setup, 60, 20);
+        let bytes = std::fs::read(&path).unwrap();
+        let full = ReplayReader::decode(&path, &bytes).unwrap();
+        // Overwrite the enum tag of the first record (right after the
+        // header) with a value that is not a Record variant.
+        let header_len = postcard::to_allocvec(&full.setup).unwrap().len();
+        let first = MAGIC.len() + 2 + header_len;
+        let mut bad = bytes.clone();
+        bad[first] = 0x09;
+        let err = ReplayReader::decode(&path, &bad).unwrap_err();
+        match err {
+            ReplayError::Corrupt {
+                offset, undecoded, ..
+            } => {
+                assert_eq!(offset, first);
+                assert_eq!(undecoded, bytes.len() - TRAILER.len() - first);
+            }
+            other => panic!("{other}"),
+        }
+        assert!(err.to_string().contains("corrupt record stream"), "{err}");
+        // The same damage on a file without the trailer is read as a
+        // truncation at that record (the reader cannot tell them apart).
+        let cut = &bad[..bad.len() - TRAILER.len()];
+        let file = ReplayReader::decode(&path, cut).unwrap();
+        assert!(file.records.is_empty());
+        assert!(file.truncated);
+        assert_eq!(file.undecoded_bytes, cut.len() - first);
+        // Damage in the middle: everything before it is kept in the
+        // truncated reading, and the trailer makes it an error.
+        let hash40 = postcard::to_allocvec(
+            full.records
+                .iter()
+                .find(|r| matches!(r, Record::Hash(h) if h.tick == 40))
+                .unwrap(),
+        )
+        .unwrap();
+        let at = bytes
+            .windows(hash40.len())
+            .position(|w| w == hash40.as_slice())
+            .unwrap();
+        let mut bad = bytes.clone();
+        bad[at] = 0x09;
+        let err = ReplayReader::decode(&path, &bad).unwrap_err();
+        assert!(
+            matches!(err, ReplayError::Corrupt { offset, .. } if offset == at),
+            "{err}"
+        );
+        let err = verify(&path, &data_dir(), Box::new(NoAi));
+        assert!(err.is_ok(), "the undamaged file still verifies");
+        let bad_path = temp_path("corrupt_copy");
+        std::fs::write(&bad_path, &bad).unwrap();
+        let err = verify(&bad_path, &data_dir(), Box::new(NoAi)).unwrap_err();
+        assert!(matches!(err, ReplayError::Corrupt { .. }), "{err}");
+    }
+
+    #[test]
     fn verify_reproduces_a_recording_and_a_truncated_copy() {
         let path = temp_path("verify_ok");
         let (setup, _) = scenario_setup(9);
@@ -783,11 +940,12 @@ mod tests {
         assert_eq!(outcome, VerifyOutcome::Ok { final_hash, ticks });
         assert_eq!(ticks, 70);
         assert_eq!(outcome.exit_code(), 0);
-        // Truncate mid-record (as `kill -9` would): the file verifies up to
-        // the last complete hash record.
+        // Truncate mid-record (as `kill -9` would, so no trailer): the file
+        // verifies up to the last complete hash record.
         let bytes = std::fs::read(&path).unwrap();
         let cut_path = temp_path("verify_cut");
-        std::fs::write(&cut_path, &bytes[..bytes.len() - 5]).unwrap();
+        std::fs::write(&cut_path, &bytes[..bytes.len() - TRAILER.len() - 5]).unwrap();
+        assert!(ReplayReader::open(&cut_path).unwrap().truncated);
         let outcome = verify(&cut_path, &data_dir(), Box::new(NoAi)).unwrap();
         assert_eq!(
             outcome,

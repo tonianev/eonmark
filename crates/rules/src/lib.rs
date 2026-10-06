@@ -144,6 +144,15 @@ pub struct Rules {
     pub path_budget_expansions: u32,
     /// Entries kept in the bounded path cache.
     pub path_cache_entries: u32,
+    /// Deciseconds between periodic repaths while a unit is moving
+    /// (`30` = 60 ticks at 20 Hz). Convert with [`Rules::repath_interval_ticks`].
+    pub repath_interval_ds: u32,
+    /// The separation push on a moving unit is capped at `speed / this`, so
+    /// the steering direction keeps at least that share of the weight.
+    pub separation_push_moving_div: u32,
+    /// The separation push on a unit without an order is capped at
+    /// `speed / this`: parked units yield slowly to a passing crowd.
+    pub separation_push_idle_div: u32,
     /// Contents of `rules/resources.ron`. Attached by [`Rules::load`].
     #[serde(skip_deserializing)]
     pub resources: Resources,
@@ -244,6 +253,12 @@ impl Rules {
         positive("vision.town_tiles", self.vision.town_tiles)?;
         positive("path_budget_expansions", self.path_budget_expansions)?;
         positive("path_cache_entries", self.path_cache_entries)?;
+        positive("repath_interval_ds", self.repath_interval_ds)?;
+        positive(
+            "separation_push_moving_div",
+            self.separation_push_moving_div,
+        )?;
+        positive("separation_push_idle_div", self.separation_push_idle_div)?;
         Ok(())
     }
 
@@ -263,6 +278,11 @@ impl Rules {
     /// Annexation timer in ticks.
     pub fn annexation_ticks(&self) -> u32 {
         self.ticks_from_ds(self.annexation_ds)
+    }
+
+    /// Ticks between periodic repaths while a unit is moving.
+    pub fn repath_interval_ticks(&self) -> u32 {
+        self.ticks_from_ds(self.repath_interval_ds)
     }
 
     /// Yield cap for a Trade level, clamped to the last table entry.
@@ -322,6 +342,16 @@ mod tests {
         assert_eq!(rules.ticks_from_ds(32), 64);
         assert_eq!(rules.attrition_interval_ticks(), 64);
         assert_eq!(rules.annexation_ticks(), 1200);
+        assert_eq!(rules.repath_interval_ticks(), 60);
+        assert_eq!(rules.separation_push_moving_div, 2);
+        assert_eq!(rules.separation_push_idle_div, 8);
+        assert_eq!(
+            rules
+                .unit_kind(0)
+                .unwrap()
+                .arrive_slowdown_radius_tiles_x100,
+            50
+        );
         assert_eq!(rules.yield_cap(0), 70);
         assert_eq!(rules.yield_cap(99), 200);
         assert_eq!(rules.pop_cap(2), 75);
@@ -403,6 +433,23 @@ mod tests {
         r.town_radius_grown_tiles = 1;
         let err = r.validate_match_rules(Path::new("x.ron")).unwrap_err();
         assert!(err.to_string().contains("town_radius_grown_tiles"), "{err}");
+        for (field, set) in [
+            (
+                "repath_interval_ds",
+                (|r: &mut Rules| r.repath_interval_ds = 0) as fn(&mut Rules),
+            ),
+            ("separation_push_moving_div", |r| {
+                r.separation_push_moving_div = 0
+            }),
+            ("separation_push_idle_div", |r| {
+                r.separation_push_idle_div = 0
+            }),
+        ] {
+            let mut r = Rules::load(data_dir()).unwrap();
+            set(&mut r);
+            let err = r.validate_match_rules(Path::new("x.ron")).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
     }
 
     fn copy_dir(src: &Path, dst: &Path) {
@@ -435,7 +482,7 @@ mod tests {
         let dir = copied_data_dir("rules-version-zero");
         let path = dir.join("rules/rules.ron");
         let text = std::fs::read_to_string(&path).unwrap();
-        let text = text.replacen("rules_version: 1,", "rules_version: 0,", 1);
+        let text = text.replacen("rules_version: 2,", "rules_version: 0,", 1);
         std::fs::write(&path, text).unwrap();
         let err = Rules::load(&dir).unwrap_err();
         let msg = err.to_string();

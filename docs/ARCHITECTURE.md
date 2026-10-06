@@ -69,7 +69,7 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `state.rs` | `Sim`, `MatchSetup` (with `debug_commands`, `scenario`), `State`, `Unit`, `MoveOrder`, `SimEvent`, `RejectReason`, `SubHashes`, `step`, `tick`, `hash`, `sub_hashes`, `snapshot`/`restore` with `rebuild_derived`, `drain_events`, the command delay queue | M0 (skeleton); M1 (done: sub-hashes, events, Move/Stop/DebugSpawn handlers, pathing and movement ticks) |
 | `pathing.rs` | In-house A* `AStarSearch::resume(map, &mut budget)`, `Pathing` request queue sorted by `(requested_tick, UnitId)`, hashed active search, transparent generation-keyed `PathCache` | M1 (done) |
 | `movement.rs` | `SpatialGrid` (2x2 tiles, derived), `step` (arrival steering, separation, circle correction, repath triggers), `group_targets` (component-aware spiral offsets) | M1 (done) |
-| `replay.rs` | `.eonreplay` v1: `MAGIC`, header, `TickBatch`, `HashRecord` with sub-hashes, `ReplayWriter`, truncation-tolerant `ReplayReader`, `verify` with the four `VerifyOutcome`s | M1 (done; the writer thread lives in `game`, M2) |
+| `replay.rs` | `.eonreplay` v1: `MAGIC`, header, `TickBatch`, `HashRecord` with sub-hashes, `ReplayWriter` (clean-exit trailer), truncation-tolerant `ReplayReader` (`ReplayFile`, `Corrupt` error), `verify` with the four `VerifyOutcome`s | M1 (done; the writer thread lives in `game`, M2) |
 | `hash.rs` | `hash_value`: xxh3 over postcard | M0; per-subsystem sub-hashes M1 (done) |
 | `ai_hook.rs` | `AiController` trait, `SimView` | M0 |
 | `economy.rs` | Integer micro-unit income, Yield Cap, gather slots, ramping costs, pop cap, idle-worker seeking | M3a |

@@ -457,51 +457,57 @@ impl Sim {
             }
         }
 
-        // 4. Pathing. (Guarded so the M0 suite, which has no units, never
-        //    reaches the `todo!()` bodies; implementer B may drop the guard.)
-        if !self.state.pathing.is_idle() {
-            let completed = self.state.pathing.service(
-                &self.state.map,
-                self.rules.path_budget_expansions,
-                tick,
-            );
-            for (unit, path) in completed {
-                let Some(u) = self.state.units.get_mut(&unit) else {
-                    continue;
-                };
-                match path {
-                    Some(path) => {
-                        if let Some(order) = &mut u.order {
-                            order.path = path;
-                            order.next = 0;
-                        }
+        // 4. Pathing. Completed paths land on the units' orders. An empty
+        //    path (start tile == corrected goal tile) becomes the unit's own
+        //    tile so movement walks to its centre and arrives there instead
+        //    of waiting forever.
+        let completed =
+            self.state
+                .pathing
+                .service(&self.state.map, self.rules.path_budget_expansions, tick);
+        for (unit, path) in completed {
+            let Some(u) = self.state.units.get_mut(&unit) else {
+                continue;
+            };
+            match path {
+                Some(path) => {
+                    if let Some(order) = &mut u.order {
+                        order.path = if path.is_empty() {
+                            vec![self.state.map.tile_of(u.pos)]
+                        } else {
+                            path
+                        };
+                        order.next = 0;
                     }
-                    None => {
-                        u.order = None;
-                        self.events.push(SimEvent::PathUnreachable { unit });
-                    }
+                }
+                None => {
+                    u.order = None;
+                    self.events.push(SimEvent::PathUnreachable { unit });
                 }
             }
         }
 
-        // 5. Movement (same guard as above).
+        // 5. Movement. A unit that still has a request outstanding (queued
+        //    or suspended) is not re-requested: a replacement would move it
+        //    to the back of the queue and could starve it under a saturated
+        //    budget. Its periodic timer is pushed back either way.
         self.grid.rebuild(&self.state.units);
-        if self.state.units.values().any(|u| u.order.is_some()) {
-            let repath = movement::step(
-                &mut self.state.units,
-                &self.state.map,
-                &self.grid,
-                &self.rules,
-                tick,
-                &mut self.events,
-            );
-            for unit in repath {
-                let Some(u) = self.state.units.get(&unit) else {
-                    continue;
-                };
-                let Some(order) = &u.order else {
-                    continue;
-                };
+        let repath = movement::step(
+            &mut self.state.units,
+            &self.state.map,
+            &self.grid,
+            &self.rules,
+            tick,
+            &mut self.events,
+        );
+        for unit in repath {
+            let Some(u) = self.state.units.get(&unit) else {
+                continue;
+            };
+            let Some(order) = &u.order else {
+                continue;
+            };
+            if !self.state.pathing.has_request(unit) {
                 let req = PathRequest {
                     requested_tick: tick,
                     unit,
@@ -509,14 +515,14 @@ impl Sim {
                     to: self.state.map.tile_of(order.goal),
                 };
                 self.state.pathing.request(req);
-                if let Some(order) = self
-                    .state
-                    .units
-                    .get_mut(&unit)
-                    .and_then(|u| u.order.as_mut())
-                {
-                    order.repath_at = tick + REPATH_INTERVAL_TICKS;
-                }
+            }
+            if let Some(order) = self
+                .state
+                .units
+                .get_mut(&unit)
+                .and_then(|u| u.order.as_mut())
+            {
+                order.repath_at = tick + REPATH_INTERVAL_TICKS;
             }
         }
 

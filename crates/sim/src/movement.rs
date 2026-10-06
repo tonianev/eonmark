@@ -7,25 +7,32 @@
 //! [`SpatialGrid`] is derived: rebuilt every tick by `Sim::step` and by
 //! `Sim::restore`, never hashed.
 //!
-//! Per tick, for every unit with an order, in `UnitId` order:
+//! Per tick, for every unit in `UnitId` order:
 //!
-//! 1. Arrival steering toward `order.path[order.next]` at `unit.speed`
-//!    (tiles per tick), scaled down linearly inside the kind's arrive radius
-//!    around the final waypoint. A waypoint is consumed when the unit is
-//!    within half a tile of it; the final one when within the arrive radius,
-//!    which clears the order and emits [`SimEvent::UnitArrived`].
+//! 1. Arrival steering (units with a path) toward `order.path[order.next]`
+//!    at `unit.speed` (tiles per tick), scaled down linearly inside twice
+//!    the kind's arrive radius around the final waypoint. A waypoint is
+//!    consumed when the unit is within half a tile of it, or once the unit
+//!    is closer to the following waypoint than the waypoint itself is; the
+//!    final one when within the arrive radius, which clears the order and
+//!    emits [`SimEvent::UnitArrived`].
 //! 2. Separation from neighbours read from the grid: for each neighbour
 //!    closer than `radius_a + radius_b + separation`, accumulate a push-away
-//!    vector. Compare with `dist_sq_i64`, never a square root.
-//! 3. Integrate: `pos += clamp(desired + separation, speed)`.
+//!    vector of the penetration depth. Compare with `dist_sq_i64`, never a
+//!    square root. The sum is capped at `speed / 2` (moving) or `speed / 8`
+//!    (no order) so steering keeps the upper hand.
+//! 3. Integrate: `pos += clamp(desired + separation, speed)`, sliding along
+//!    a blocked tile's wall (x-only, then y-only) instead of entering it.
 //! 4. After every unit has moved, circle-vs-circle correction over
 //!    overlapping pairs in `(UnitId, UnitId)` order, half the penetration
 //!    each; a correction that would enter a blocked tile is dropped.
 //!
-//! Units never enter a blocked tile; one that would stops at the boundary
-//! and the blocked-waypoint repath fires. Repath triggers (both re-issue a
-//! `PathRequest` through `Pathing::request`): the next waypoint's tile is
-//! blocked, or `tick >= order.repath_at` (every 60 ticks while moving).
+//! Units never enter a blocked tile. Repath triggers (each re-issues a
+//! `PathRequest` through `Pathing::request`, unless one is still
+//! outstanding): the next waypoint's tile is blocked, `tick >=
+//! order.repath_at` (every 60 ticks while moving), or terrain blocked every
+//! candidate step this tick. See [`step`] for the decisions taken where the
+//! design is silent and the crowd measurements behind them.
 
 use crate::fx::{Fx, FxVec2};
 use crate::ids::UnitId;
@@ -118,12 +125,126 @@ impl SpatialGrid {
     }
 }
 
+/// Squared half-tile distance in `I32F32` scale: a non-final waypoint is
+/// consumed when the unit is closer than this.
+const HALF_TILE_SQ: i64 = (Fx::HALF.to_bits() * Fx::HALF.to_bits()) >> 32;
+
+/// The separation push on a *moving* unit is capped at `speed / MOVING_PUSH_DIV`
+/// so the steering direction always keeps at least half the weight.
+const MOVING_PUSH_DIV: i32 = 2;
+
+/// The separation push on a unit *without an order* is capped at
+/// `speed / IDLE_PUSH_DIV`: parked units yield slowly to a crowd passing
+/// through instead of jamming it (`IDLE_PUSH_DIV = inf`) or being flung
+/// tiles away from where they arrived (`IDLE_PUSH_DIV = 2`). Measured on
+/// the 500-unit crossing: 1/8 keeps 95% of arrived units within 3 tiles of
+/// their goal while 99% still arrive.
+const IDLE_PUSH_DIV: i32 = 8;
+
+/// Per-kind movement parameters, indexed by `UnitKindId`.
+struct KindParams {
+    /// Final-arrival radius; the linear slowdown starts at twice this.
+    arrive: Fx,
+    /// Separation margin added to the sum of radii.
+    separation: Fx,
+}
+
+fn kind_params(rules: &Rules) -> Vec<KindParams> {
+    rules
+        .units
+        .iter()
+        .map(|k| KindParams {
+            arrive: crate::state::fx_from_x100(k.arrive_radius_tiles_x100),
+            separation: crate::state::fx_from_x100(k.separation_tiles_x100),
+        })
+        .collect()
+}
+
+/// Length of a vector: the integer square root of its squared length,
+/// exact to one `I32F32` bit (`isqrt(len_sq << 32)` where `len_sq` is the
+/// `I32F32`-scaled square, so the result is `len << 32`). Deterministic;
+/// no floats.
+fn length(v: FxVec2) -> Fx {
+    let sq = u128::try_from(v.length_sq_i64()).expect("squared length is non-negative");
+    let bits = (sq << 32).isqrt();
+    Fx::from_bits(i64::try_from(bits).expect("length fits I32F32"))
+}
+
+/// `b - a`.
+fn sub(a: FxVec2, b: FxVec2) -> FxVec2 {
+    FxVec2::new(b.x - a.x, b.y - a.y)
+}
+
+/// `v * k / d` componentwise (multiply first for precision). `d > 0`.
+fn rescale(v: FxVec2, k: Fx, d: Fx) -> FxVec2 {
+    FxVec2::new(v.x * k / d, v.y * k / d)
+}
+
+/// `true` when `p` lies inside the map on a passable tile.
+fn walkable(map: &Map, p: FxVec2) -> bool {
+    p.x >= Fx::ZERO
+        && p.y >= Fx::ZERO
+        && p.x < Fx::from_int(i32::from(map.width()))
+        && p.y < Fx::from_int(i32::from(map.height()))
+        && map.passable(map.tile_of(p))
+}
+
+/// Move from `from` by `v`, never entering a blocked tile: the full step,
+/// else the x-only step, else the y-only step (sliding along walls), else
+/// stay. Returns the new position and whether the unit moved at all.
+fn slide(map: &Map, from: FxVec2, v: FxVec2) -> (FxVec2, bool) {
+    if v == FxVec2::ZERO {
+        return (from, false);
+    }
+    let full = from + v;
+    let candidates = [
+        full,
+        FxVec2::new(full.x, from.y),
+        FxVec2::new(from.x, full.y),
+    ];
+    for c in candidates {
+        if c != from && walkable(map, c) {
+            return (c, true);
+        }
+    }
+    (from, false)
+}
+
 /// Advance every unit with an order by one tick (see the module docs).
 /// `grid` was rebuilt from `units` at the start of this tick. Emits
 /// [`SimEvent::UnitArrived`] when an order completes. Repath requests are
 /// not issued here; the function returns the ids of units that need one
-/// (blocked next waypoint, or `tick >= repath_at`), in id order, and
-/// `Sim::step` pushes the `PathRequest`s.
+/// (blocked next waypoint, `tick >= repath_at`, or a unit whose every
+/// candidate step was blocked by terrain), in id order, and `Sim::step`
+/// pushes the `PathRequest`s.
+///
+/// Decisions where the design is silent (all deterministic, no state added):
+///
+/// - The final waypoint is `path.last()` (the component-corrected goal
+///   tile), not `order.goal`, so a unit in another component than the click
+///   still arrives. Arrival is `dist <= arrive_radius`; the linear slowdown
+///   applies inside `2 * arrive_radius`, and a step is never longer than the
+///   remaining distance, so a unit cannot overshoot its waypoint.
+/// - A non-final waypoint is consumed when the unit is within half a tile of
+///   it *or* is already closer to the following waypoint than the waypoint
+///   itself is (the unit was pushed past it; steering back would be a
+///   detour that stalls a crowd). This second rule is what lets 500 units
+///   flow through the 8-tile water gap at about one unit per tick.
+/// - Separation pushes a unit away from each neighbour closer than
+///   `radius_a + radius_b + separation` by the penetration depth along the
+///   centre line; the sum is capped at `speed / 2` for moving units and
+///   `speed / 8` for units without an order, which also take part so a
+///   parked block yields to a crowd. Two coincident units push along the x
+///   axis, the higher id eastward. Units later in id order see earlier
+///   units' updated positions.
+/// - A step that would enter a blocked tile (or leave the map) slides along
+///   the wall (x-only, then y-only) and otherwise stays put.
+/// - `facing` is the normalised velocity of the last tick the unit moved
+///   (`v / |v|`, exact to one `I32F32` bit); it is untouched while standing
+///   or while being pushed without an order.
+/// - Circle correction is one pass over every unit (orders or not) in
+///   `(a, b)` id order with `a < b`; coincident pairs separate along the x
+///   axis. More passes were measured to slow the crowd, not help it.
 pub fn step(
     units: &mut BTreeMap<UnitId, Unit>,
     map: &Map,
@@ -132,8 +253,180 @@ pub fn step(
     tick: u32,
     events: &mut Vec<SimEvent>,
 ) -> Vec<UnitId> {
-    let _ = (units, map, grid, rules, tick, events);
-    todo!("M1 movement: step (implementer B)")
+    let params = kind_params(rules);
+    let max_radius = units.values().map(|u| u.radius).max().unwrap_or(Fx::ZERO);
+    let max_speed = units.values().map(|u| u.speed).max().unwrap_or(Fx::ZERO);
+    let max_sep = params
+        .iter()
+        .map(|p| p.separation)
+        .max()
+        .unwrap_or(Fx::ZERO);
+    // Grid cells hold start-of-tick positions; widen the query by the
+    // largest move a unit can make this tick so no neighbour is missed.
+    let query_radius = max_radius + max_radius + max_sep + max_speed;
+    let ids: Vec<UnitId> = units.keys().copied().collect();
+    let mut repath = Vec::new();
+
+    for id in &ids {
+        let u = &units[id];
+        let p = &params[usize::from(u.kind.0)];
+
+        // 1. Arrival steering (units with a path). Units without an order,
+        //    or waiting for their path, have no desired velocity but still
+        //    take part in separation below, so a moving crowd can shove a
+        //    parked unit aside instead of jamming against it.
+        let mut desired = FxVec2::ZERO;
+        let mut next: Option<usize> = None;
+        let mut needs_repath = false;
+        if let Some(order) = &u.order
+            && !order.path.is_empty()
+        {
+            let last = order.path.len() - 1;
+            let mut i = usize::try_from(order.next).expect("fits").min(last);
+            while i < last {
+                let here = map.center_of(order.path[i]);
+                let ahead = map.center_of(order.path[i + 1]);
+                // Consumed when within half a tile, or once the unit is
+                // already closer to the following waypoint than this one
+                // is (it has been passed; steering back would be a detour).
+                if u.pos.dist_sq_i64(here) < HALF_TILE_SQ
+                    || u.pos.dist_sq_i64(ahead) < here.dist_sq_i64(ahead)
+                {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let target = map.center_of(order.path[i]);
+            let delta = sub(u.pos, target);
+            let dist = length(delta);
+            if i == last && dist <= p.arrive {
+                let u = units.get_mut(id).expect("exists");
+                u.order = None;
+                events.push(SimEvent::UnitArrived { unit: *id });
+                continue;
+            }
+            let mut mag = u.speed;
+            if i == last {
+                let slow = p.arrive + p.arrive;
+                if dist < slow {
+                    mag = u.speed * dist / slow;
+                }
+            }
+            mag = mag.min(dist);
+            if dist > Fx::ZERO {
+                desired = rescale(delta, mag, dist);
+            }
+            needs_repath = !map.passable(order.path[i]) || tick >= order.repath_at;
+            next = Some(i);
+        }
+
+        // 2. Separation.
+        let mut push = FxVec2::ZERO;
+        for nb in grid.neighbors(u.pos, query_radius) {
+            if nb == *id {
+                continue;
+            }
+            let Some(o) = units.get(&nb) else {
+                continue;
+            };
+            let thresh = u.radius + o.radius + p.separation;
+            if u.pos.dist_sq_i64(o.pos) >= (thresh * thresh).to_bits() {
+                continue;
+            }
+            let away = sub(o.pos, u.pos);
+            let d = length(away);
+            if d == Fx::ZERO {
+                let dir = if *id > nb { thresh } else { -thresh };
+                push.x += dir;
+            } else {
+                push += rescale(away, thresh - d, d);
+            }
+        }
+
+        // 3. Integrate with the speed clamp. The push is capped first (see
+        //    `MOVING_PUSH_DIV` / `IDLE_PUSH_DIV`) so the desired direction
+        //    always keeps at least half the weight: in a dense crowd the sum
+        //    of pushes would otherwise drown the steering and stall the flow.
+        let plen = length(push);
+        let push_cap = if u.order.is_some() {
+            u.speed.div_int(MOVING_PUSH_DIV)
+        } else {
+            u.speed.div_int(IDLE_PUSH_DIV)
+        };
+        if plen > push_cap {
+            push = rescale(push, push_cap, plen);
+        }
+        let mut v = desired + push;
+        let vlen = length(v);
+        if vlen > u.speed {
+            v = rescale(v, u.speed, vlen);
+        }
+        let (new_pos, moved) = slide(map, u.pos, v);
+        let Some(next) = next else {
+            // No path: only the push applies, facing is kept.
+            units.get_mut(id).expect("exists").pos = new_pos;
+            continue;
+        };
+        let blocked = v != FxVec2::ZERO && !moved;
+        let facing = if vlen > Fx::ZERO {
+            Some(FxVec2::new(v.x / vlen, v.y / vlen))
+        } else {
+            None
+        };
+
+        let u = units.get_mut(id).expect("exists");
+        u.pos = new_pos;
+        if let Some(f) = facing {
+            u.facing = f;
+        }
+        if let Some(order) = &mut u.order {
+            order.next = u32::try_from(next).expect("fits");
+        }
+        if needs_repath || blocked {
+            repath.push(*id);
+        }
+    }
+
+    // 4. Circle-vs-circle correction in (a, b) id order.
+    let pair_radius = max_radius + max_radius + max_speed;
+    for a_id in &ids {
+        let (mut a_pos, a_r) = {
+            let a = &units[a_id];
+            (a.pos, a.radius)
+        };
+        for b_id in grid.neighbors(a_pos, pair_radius) {
+            if b_id <= *a_id {
+                continue;
+            }
+            let Some(b) = units.get(&b_id) else {
+                continue;
+            };
+            let sum = a_r + b.radius;
+            if a_pos.dist_sq_i64(b.pos) >= (sum * sum).to_bits() {
+                continue;
+            }
+            let away = sub(b.pos, a_pos);
+            let d = length(away);
+            let shift = if d == Fx::ZERO {
+                // Coincident: the lower id (a) moves west, the higher east.
+                FxVec2::new(-sum.div_int(2), Fx::ZERO)
+            } else {
+                rescale(away, (sum - d).div_int(2), d)
+            };
+            let a_new = a_pos + shift;
+            let b_new = FxVec2::new(b.pos.x - shift.x, b.pos.y - shift.y);
+            if walkable(map, a_new) {
+                a_pos = a_new;
+            }
+            if walkable(map, b_new) {
+                units.get_mut(&b_id).expect("exists").pos = b_new;
+            }
+        }
+        units.get_mut(a_id).expect("exists").pos = a_pos;
+    }
+
+    repath
 }
 
 /// Targets for `n` units ordered to `click`, one per unit, in the order the
@@ -145,8 +438,21 @@ pub fn step(
 /// target; if the map has no passable tile at all the result repeats
 /// `click`. Length is always `n`.
 pub fn group_targets(map: &Map, click: FxVec2, n: usize) -> Vec<FxVec2> {
-    let _ = (map, click, n);
-    todo!("M1 movement: group_targets (implementer B)")
+    let Some(start) = map.nearest_passable(map.tile_of(click), None) else {
+        return vec![click; n];
+    };
+    let comp = map.component_of(start);
+    let mut out: Vec<FxVec2> = map
+        .spiral(start)
+        .filter(|t| map.passable(*t) && map.component_of(*t) == comp)
+        .take(n)
+        .map(|t| map.center_of(t))
+        .collect();
+    let Some(&last) = out.last() else {
+        return vec![click; n];
+    };
+    out.resize(n, last);
+    out
 }
 
 #[cfg(test)]
@@ -196,5 +502,224 @@ mod tests {
         assert_eq!(n, vec![UnitId(1)]);
         grid.rebuild(&BTreeMap::new());
         assert!(grid.is_empty());
+    }
+
+    fn rules() -> Rules {
+        Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap()
+    }
+
+    /// Run `step` for `ticks` ticks on a fresh grid each tick, like `Sim::step`.
+    fn run(
+        units: &mut BTreeMap<UnitId, Unit>,
+        map: &Map,
+        rules: &Rules,
+        ticks: u32,
+    ) -> (Vec<SimEvent>, Vec<UnitId>) {
+        let mut grid = SpatialGrid::new(map);
+        let mut events = Vec::new();
+        let mut repath = Vec::new();
+        for t in 0..ticks {
+            grid.rebuild(units);
+            repath = step(units, map, &grid, rules, t, &mut events);
+        }
+        (events, repath)
+    }
+
+    fn order(path: Vec<crate::ids::Tile>, map: &Map) -> crate::state::MoveOrder {
+        crate::state::MoveOrder {
+            goal: map.center_of(*path.last().unwrap()),
+            path,
+            next: 0,
+            repath_at: u32::MAX,
+        }
+    }
+
+    #[test]
+    fn length_is_exact_integer_sqrt() {
+        assert_eq!(length(FxVec2::from_ints(3, 4)), Fx::from_int(5));
+        assert_eq!(length(FxVec2::from_ints(0, -7)), Fx::from_int(7));
+        assert_eq!(length(FxVec2::ZERO), Fx::ZERO);
+        // sqrt(2) to 32 fractional bits, truncated.
+        assert_eq!(length(FxVec2::from_ints(1, 1)).to_bits(), 6_074_000_999);
+    }
+
+    #[test]
+    fn unit_walks_its_path_and_arrives_once() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let map = Map::open(16, 16);
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 2, 2);
+        u.pos = map.center_of(Tile::new(2, 2));
+        let path: Vec<Tile> = (2..=8).map(|x| Tile::new(x, 2)).collect();
+        u.order = Some(order(path, &map));
+        units.insert(UnitId(1), u);
+        // 6 tiles at 0.09 per tick is 67 ticks; the arrive radius saves a few.
+        let (events, repath) = run(&mut units, &map, &rules, 100);
+        let arrived = events
+            .iter()
+            .filter(|e| matches!(e, SimEvent::UnitArrived { unit } if *unit == UnitId(1)))
+            .count();
+        assert_eq!(arrived, 1);
+        assert!(repath.is_empty());
+        let u = &units[&UnitId(1)];
+        assert!(u.order.is_none());
+        let goal = map.center_of(Tile::new(8, 2));
+        assert!(
+            u.pos.dist_sq_i64(goal)
+                <= (Fx::from_ratio(25, 100) * Fx::from_ratio(25, 100)).to_bits()
+        );
+        // Facing is unit-length-ish: `v / |v|` with `|v|` truncated to one
+        // I32F32 bit, so the x component may exceed 1 by a few bits.
+        assert_eq!(u.facing.y, Fx::ZERO, "facing east");
+        assert!(u.facing.x >= Fx::ONE && u.facing.x < Fx::ONE + Fx::from_ratio(1, 1000));
+        // It never left row 2 and moved at most `speed` per tick: check a
+        // fresh unit's first step exactly.
+        let mut one = BTreeMap::new();
+        let mut v = unit(2, 0, 0);
+        v.pos = map.center_of(Tile::new(0, 0));
+        v.order = Some(order(vec![Tile::new(0, 0), Tile::new(5, 0)], &map));
+        one.insert(UnitId(2), v);
+        run(&mut one, &map, &rules, 1);
+        let moved = one[&UnitId(2)].pos;
+        assert_eq!(moved.y, Fx::HALF);
+        assert_eq!(moved.x, Fx::HALF + Fx::from_ratio(9, 100));
+    }
+
+    #[test]
+    fn waypoint_is_consumed_when_passed_sideways() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let map = Map::open(16, 16);
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 0, 0);
+        // Heading for waypoint (3,3) but pushed to (4.8, 4.0): closer to
+        // (4,3) than (3,3) is, and then closer to (9,3) than (4,3) is, so
+        // both are consumed and the unit must not walk back west.
+        u.pos = FxVec2::new(Fx::from_ratio(48, 10), Fx::from_int(4));
+        let mut o = order(
+            vec![
+                Tile::new(2, 3),
+                Tile::new(3, 3),
+                Tile::new(4, 3),
+                Tile::new(9, 3),
+            ],
+            &map,
+        );
+        o.next = 1;
+        u.order = Some(o);
+        units.insert(UnitId(1), u);
+        run(&mut units, &map, &rules, 1);
+        let u = &units[&UnitId(1)];
+        assert_eq!(u.order.as_ref().unwrap().next, 3);
+        assert!(u.pos.x > Fx::from_ratio(48, 10), "moving east, not back");
+        // Directly south of (4,3) at exactly one tile the rule does not fire
+        // (equal distances), so the unit steers to (3,3) as before.
+        let mut units = BTreeMap::new();
+        let mut v = unit(2, 0, 0);
+        v.pos = FxVec2::new(Fx::from_ratio(45, 10), Fx::from_ratio(45, 10));
+        let mut o = order(
+            vec![Tile::new(3, 3), Tile::new(4, 3), Tile::new(9, 3)],
+            &map,
+        );
+        o.next = 0;
+        v.order = Some(o);
+        units.insert(UnitId(2), v);
+        run(&mut units, &map, &rules, 1);
+        assert_eq!(units[&UnitId(2)].order.as_ref().unwrap().next, 0);
+    }
+
+    #[test]
+    fn units_never_enter_blocked_tiles_and_report_a_blocked_step() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let mut map = Map::open(8, 8);
+        for y in 0..8 {
+            map.set_blocked(Tile::new(4, y), true);
+        }
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 3, 3);
+        // Start just west of the wall, steering straight into it.
+        u.pos = FxVec2::new(Fx::from_ratio(395, 100), Fx::from_ratio(35, 10));
+        u.order = Some(order(vec![Tile::new(3, 3), Tile::new(6, 3)], &map));
+        units.insert(UnitId(1), u);
+        let (_, repath) = run(&mut units, &map, &rules, 5);
+        let u = &units[&UnitId(1)];
+        assert!(map.passable(map.tile_of(u.pos)));
+        assert!(u.pos.x < Fx::from_int(4));
+        assert_eq!(
+            repath,
+            vec![UnitId(1)],
+            "a fully blocked step asks for a repath"
+        );
+    }
+
+    #[test]
+    fn coincident_units_separate_deterministically_along_x() {
+        let rules = rules();
+        let map = Map::open(8, 8);
+        let mut units = BTreeMap::new();
+        let mut a = unit(1, 3, 3);
+        let mut b = unit(2, 3, 3);
+        a.pos = map.center_of(crate::ids::Tile::new(3, 3));
+        b.pos = a.pos;
+        units.insert(UnitId(1), a);
+        units.insert(UnitId(2), b);
+        run(&mut units, &map, &rules, 1);
+        let (a, b) = (&units[&UnitId(1)], &units[&UnitId(2)]);
+        assert!(a.pos.x < b.pos.x, "lower id west, higher id east");
+        assert_eq!(a.pos.y, b.pos.y);
+        // Circle correction alone resolves the whole overlap in one pass.
+        let sum = a.radius + b.radius;
+        assert!(a.pos.dist_sq_i64(b.pos) >= (sum * sum).to_bits());
+        // Idle units keep their facing.
+        assert_eq!(a.facing, FxVec2::from_ints(1, 0));
+    }
+
+    #[test]
+    fn group_targets_correct_the_click_skip_blocked_tiles_and_pad() {
+        use crate::ids::Tile;
+        let mut map = Map::open(8, 8);
+        map.set_blocked(Tile::new(3, 3), true);
+        map.set_blocked(Tile::new(4, 3), true);
+        // Click on a blocked tile: the BFS tries E (4,3), blocked, then SE
+        // (4,4), so the spiral starts at (4,4): centre, east, south-east,
+        // south. Ring 1 continues with (3,5), (3,4) and then (3,3) and
+        // (4,3), which are skipped as blocked.
+        let t = group_targets(&map, FxVec2::from_ints(3, 3), 8);
+        assert_eq!(
+            t,
+            vec![
+                map.center_of(Tile::new(4, 4)),
+                map.center_of(Tile::new(5, 4)),
+                map.center_of(Tile::new(5, 5)),
+                map.center_of(Tile::new(4, 5)),
+                map.center_of(Tile::new(3, 5)),
+                map.center_of(Tile::new(3, 4)),
+                map.center_of(Tile::new(5, 3)),
+                map.center_of(Tile::new(6, 4)),
+            ]
+        );
+        // A wall splits the map; targets stay in the click's component and
+        // pad with the last one when the component runs out.
+        let mut w = Map::open(4, 4);
+        for y in 0..4 {
+            w.set_blocked(Tile::new(2, y), true);
+        }
+        let t = group_targets(&w, FxVec2::from_ints(3, 0), 10);
+        assert_eq!(t.len(), 10);
+        assert!(
+            t.iter().all(|p| p.x > Fx::from_int(3)),
+            "east component only"
+        );
+        assert_eq!(t[4..], vec![t[3]; 6][..], "padded with the last target");
+        // No passable tile at all: the click repeats.
+        let mut b = Map::open(2, 2);
+        for i in 0..4 {
+            b.set_blocked(b.tile_at(i), true);
+        }
+        let click = FxVec2::from_ints(1, 1);
+        assert_eq!(group_targets(&b, click, 3), vec![click; 3]);
+        assert!(group_targets(&map, FxVec2::from_ints(0, 0), 0).is_empty());
     }
 }

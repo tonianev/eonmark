@@ -5,6 +5,7 @@
 
 use proptest::prelude::*;
 use sim::pathing::{AStarSearch, PathRequest, Pathing, SearchStatus, path_cost};
+use sim::scenarios;
 use sim::{
     Command, FxVec2, Map, MatchSetup, PlayerCommand, PlayerId, Rules, Sim, SimView, Tile, UnitId,
     UnitKindId,
@@ -12,8 +13,8 @@ use sim::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const WEST: FxVec2 = FxVec2::from_ints(24, 64);
-const EAST: FxVec2 = FxVec2::from_ints(103, 64);
+const WEST: FxVec2 = scenarios::WEST;
+const EAST: FxVec2 = scenarios::EAST;
 
 struct NoAi;
 
@@ -76,33 +77,30 @@ fn move_all(owner: u8, seq: u32, sim: &Sim, target: FxVec2) -> PlayerCommand {
     )
 }
 
-/// The fixed M1 scenario: 500 Yeomen spawned at the west start on tick 0,
-/// ordered to the east start on tick 5, a Stop for every third unit at tick
-/// 400, then idle until `ticks`.
-fn move_500_commands(sim: &Sim, tick: u32) -> Vec<PlayerCommand> {
-    match tick {
-        0 => vec![spawn(0, 0, WEST, 500)],
-        5 => vec![move_all(0, 1, sim, EAST)],
-        400 => {
-            let units = sim
-                .view()
-                .units()
-                .filter(|u| u.id.0.is_multiple_of(3))
-                .map(|u| u.id)
-                .collect();
-            vec![PlayerCommand::new(PlayerId(0), 2, Command::Stop { units })]
-        }
-        _ => Vec::new(),
-    }
+/// The fixed M1 scenario (`sim::scenarios::move_500`): 500 Yeomen spawned at
+/// the west start on tick 0, ordered to the east start on tick 5, a Stop for
+/// every third unit at tick 400, then idle until `ticks`. The scenario is
+/// pure data, so the same stream drives `sim-cli record` and the fixtures.
+fn move_500_commands(tick: u32) -> Vec<PlayerCommand> {
+    let (_, stream) = scenarios::move_500(&load_rules());
+    scenarios::commands_at(&stream, tick).to_vec()
 }
 
+/// Run `move_500` with its seed replaced by `seed` for `ticks` ticks.
 fn run_move_500(seed: u64, ticks: u32) -> u64 {
-    let mut sim = scenario(seed);
-    for t in 0..ticks {
-        let cmds = move_500_commands(&sim, t);
-        sim.step(&cmds);
+    let rules = load_rules();
+    let (mut setup, stream) = scenarios::move_500(&rules);
+    setup.seed = seed;
+    scenarios::run(setup, rules, &stream, ticks).hash()
+}
+
+/// The scenario's command stream, pre-expanded per tick for a run.
+struct Script(scenarios::Stream);
+
+impl Script {
+    fn at(&self, tick: u32) -> &[PlayerCommand] {
+        scenarios::commands_at(&self.0, tick)
     }
-    sim.hash()
 }
 
 /// Load `fixtures/<name>.eonreplay`, verify it, and compare the final hash to
@@ -125,7 +123,6 @@ fn golden(name: &str) {
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn same_seed_same_hash_two_threads() {
     let seq_a = run_move_500(42, 600);
     let seq_b = run_move_500(42, 600);
@@ -141,47 +138,109 @@ fn same_seed_same_hash_two_threads() {
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn snapshot_restore_matches_uninterrupted_including_spawns() {
-    let mut a = scenario(7);
-    for t in 0..300 {
-        let cmds = move_500_commands(&a, t);
-        a.step(&cmds);
+    // `sim::scenarios::snapshot_restore`: 200 units crossing; a snapshot at
+    // tick 300; a DebugSpawn of 50 more units issued during tick 301 in
+    // BOTH runs (ids must continue identically, no slot reuse, spiral
+    // placement must agree), their own move order, a Stop at 600; 1200 ticks.
+    let rules = load_rules();
+    let (setup, stream) = scenarios::snapshot_restore(&rules);
+    let script = Script(stream);
+    let snap_tick = scenarios::SNAPSHOT_RESTORE_SNAPSHOT_TICK;
+    assert!(
+        !script.at(scenarios::SNAPSHOT_RESTORE_SPAWN_TICK).is_empty(),
+        "the stream spawns after the snapshot"
+    );
+    let mut a = Sim::new(setup.clone(), rules.clone(), Box::new(NoAi));
+    for t in 0..snap_tick {
+        a.step(script.at(t));
     }
     let snap = a.snapshot();
-    let mut b = scenario(7);
+    let mut b = Sim::new(setup, rules, Box::new(NoAi));
     b.restore(&snap).unwrap();
     assert_eq!(a.hash(), b.hash());
     assert_eq!(a.sub_hashes(), b.sub_hashes());
-    // Spawn 50 more units after the restore in both sims: ids must continue
-    // identically (no slot reuse) and the spiral placement must agree.
-    let extra = spawn(1, 0, EAST, 50);
-    a.step(std::slice::from_ref(&extra));
-    b.step(std::slice::from_ref(&extra));
-    for t in 301..1200 {
-        let cmds = move_500_commands(&a, t);
-        a.step(&cmds);
-        b.step(&cmds);
+    assert_eq!(a.view().unit_count(), 200);
+    assert!(
+        a.view().units().filter(|u| u.order.is_some()).count() > 150,
+        "most units are still moving at the snapshot"
+    );
+    for t in snap_tick..scenarios::SNAPSHOT_RESTORE_TICKS {
+        let cmds = script.at(t);
+        a.step(cmds);
+        b.step(cmds);
         assert_eq!(a.hash(), b.hash(), "diverged at tick {t}");
     }
-    assert_eq!(a.view().unit_count(), 550);
+    assert_eq!(a.sub_hashes(), b.sub_hashes());
+    assert_eq!(a.view().unit_count(), 250);
+    assert_eq!(a.view().units().last().map(|u| u.id), Some(UnitId(250)));
+    let arrived = a
+        .drain_events()
+        .iter()
+        .filter(|e| matches!(e, sim::SimEvent::UnitArrived { .. }))
+        .count();
+    assert!(arrived > 0, "some units arrived during the run");
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
+fn small_group_arrives_on_distinct_tiles() {
+    // Nine units spawned around the west start walk the clear row-64
+    // corridor to the east start: every order completes with a
+    // `UnitArrived` event, and the spiral targets keep them on nine distinct
+    // tiles around the click, never on a blocked tile.
+    let mut sim = scenario(5);
+    let delay = sim.setup().cmd_delay;
+    sim.step(&[spawn(0, 0, WEST, 9)]);
+    for _ in 0..delay {
+        sim.step(&[]);
+    }
+    let mv = move_all(0, 1, &sim, EAST);
+    sim.step(std::slice::from_ref(&mv));
+    sim.drain_events();
+    // 79 tiles at 0.09 tiles per tick is under 900 ticks; allow for jams.
+    for _ in 0..1200 {
+        sim.step(&[]);
+    }
+    let mut arrived: Vec<UnitId> = sim
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            sim::SimEvent::UnitArrived { unit } => Some(unit),
+            _ => None,
+        })
+        .collect();
+    arrived.sort();
+    arrived.dedup();
+    assert_eq!(arrived, (1..=9).map(UnitId).collect::<Vec<_>>());
+    let map = sim.view().map();
+    let mut tiles: Vec<Tile> = sim.view().units().map(|u| map.tile_of(u.pos)).collect();
+    for u in sim.view().units() {
+        assert!(u.order.is_none(), "{:?} still has an order", u.id);
+        assert!(
+            map.passable(map.tile_of(u.pos)),
+            "{:?} on a blocked tile",
+            u.id
+        );
+        let d = u.pos.dist_sq_i64(EAST);
+        assert!(d < (4 * 4) << 32, "{:?} ended {d} from the click", u.id);
+    }
+    tiles.sort();
+    tiles.dedup();
+    assert_eq!(tiles.len(), 9, "one unit per target tile");
+}
+
+#[test]
 fn restore_rebuilds_caches() {
     let mut a = scenario(3);
     for t in 0..200 {
-        let cmds = move_500_commands(&a, t);
-        a.step(&cmds);
+        a.step(&move_500_commands(t));
     }
     let snap = a.snapshot();
     // `b` has a warm path cache and a stale spatial grid from its own run;
     // restore must rebuild components and the grid and clear the cache.
     let mut b = scenario(99);
     for t in 0..150 {
-        let cmds = move_500_commands(&b, t);
-        b.step(&cmds);
+        b.step(&move_500_commands(t));
     }
     b.restore(&snap).unwrap();
     assert!(
@@ -278,7 +337,6 @@ proptest! {
     })]
 
     #[test]
-    #[ignore = "M1 implementation pending"]
     fn proptest_random_commands_are_deterministic(seed in any::<u64>(), ticks in 50u32..300) {
         let stream = random_commands(seed, ticks);
         let a = run_with(seed, &stream, true);
@@ -287,7 +345,6 @@ proptest! {
     }
 
     #[test]
-    #[ignore = "M1 implementation pending"]
     fn path_cache_is_transparent(seed in any::<u64>(), ticks in 50u32..300) {
         let stream = random_commands(seed, ticks);
         let on = run_with(seed, &stream, true);

@@ -64,13 +64,13 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `lib.rs` | `Sim`, `MatchSetup`, `PlayerId`, `Command`, `PlayerCommand`, `SimView`, `AiController`, `SIM_VERSION` | M0 (skeleton), grows every sim milestone |
 | `fx.rs` | `Fx(I32F32)` newtype, `FxVec2`, `dist_sq_i64` | M0 (types), M1 (vector math) |
 | `ids.rs` | `PlayerId`, monotonic `UnitId` and `BuildingId` from `IdGen`, kind ids, `Tile` | M0 |
-| `map.rs` | 128x128 tiles, `u8` cost grid, `cost_grid_generation`, connected components | M1 (the RON map loader is `rules::map` from M0) |
-| `command.rs` | The full `Command` enum, `PlayerCommand`, `sort_commands` | M0 (enum and sorting); handlers M1 (Move, Stop), M3a (Build, Train, Gather, Cancel, SetRally), M4a (Research, AdvanceAge, Attack, AttackMove) |
-| `state.rs` | `Sim`, `MatchSetup`, `State`, `step`, `tick`, `hash`, `snapshot`/`restore`, the command delay queue | M0 (skeleton); `sub_hashes`, events and subsystem ticks from M1 |
-| `pathing.rs` | In-house A* with `resume(budget)`, request queue, generation-keyed cache | M1 |
-| `movement.rs` | Arrival steering, spatial-grid separation, circle push, spiral group offsets | M1 |
-| `replay.rs` | `MatchSetup` header, tick batches, hash records, reader | M1 (writer thread lives in `game`) |
-| `hash.rs` | `hash_value`: xxh3 over postcard | M0; per-subsystem sub-hashes M1 |
+| `map.rs` | `Map`: 128x128 tiles, `u8` cost grid (1 passable, 255 blocked), `cost_grid_generation`, `set_blocked` with eager component rebuild, `neighbors8` (no corner cutting), `nearest_passable` BFS, `spiral`; hashed state with derived components | M1 (done; the RON map loader is `rules::map` from M0) |
+| `command.rs` | The full `Command` enum, `PlayerCommand`, `sort_commands` | M0 (enum and sorting); handlers M1 (Move, Stop, DebugSpawn; done), M3a (Build, Train, Gather, Cancel, SetRally), M4a (Research, AdvanceAge, Attack, AttackMove) |
+| `state.rs` | `Sim`, `MatchSetup` (with `debug_commands`, `scenario`), `State`, `Unit`, `MoveOrder`, `SimEvent`, `RejectReason`, `SubHashes`, `step`, `tick`, `hash`, `sub_hashes`, `snapshot`/`restore` with `rebuild_derived`, `drain_events`, the command delay queue | M0 (skeleton); M1 (done: sub-hashes, events, Move/Stop/DebugSpawn handlers, pathing and movement ticks) |
+| `pathing.rs` | In-house A* `AStarSearch::resume(map, &mut budget)`, `Pathing` request queue sorted by `(requested_tick, UnitId)`, hashed active search, transparent generation-keyed `PathCache` | M1 (done) |
+| `movement.rs` | `SpatialGrid` (2x2 tiles, derived), `step` (arrival steering, separation, circle correction, repath triggers), `group_targets` (component-aware spiral offsets) | M1 (done) |
+| `replay.rs` | `.eonreplay` v1: `MAGIC`, header, `TickBatch`, `HashRecord` with sub-hashes, `ReplayWriter`, truncation-tolerant `ReplayReader`, `verify` with the four `VerifyOutcome`s | M1 (done; the writer thread lives in `game`, M2) |
+| `hash.rs` | `hash_value`: xxh3 over postcard | M0; per-subsystem sub-hashes M1 (done) |
 | `ai_hook.rs` | `AiController` trait, `SimView` | M0 |
 | `economy.rs` | Integer micro-unit income, Yield Cap, gather slots, ramping costs, pop cap, idle-worker seeking | M3a |
 | `town.rs` | Founding, radius growth, Town limit, annexation state machine | M3a, M5a |
@@ -81,18 +81,20 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `attrition.rs` | `SupplyGrid`, Harrying levels, immunities | M5a |
 | `visibility.rs` | Per-player `u8` grid (0 unexplored, 1 explored, 2 visible), hashed | M7 |
 | `influence.rs` | 4x4-tile influence maps, derived and unhashed | M6 |
-| `tests/` | Determinism, economy, territory, tech, combat, attrition tests; golden fixtures under `tests/fixtures/` | M1 onward |
-| `benches/` | criterion benches `step_500_units`, `territory_recompute`, `astar_budget` | M1, M3a |
+| `tests/` | `m0.rs`, `m1.rs` (determinism, snapshot/restore, proptests, path oracle, goldens); fixtures `move_500_short`, `move_500`, `group_spiral`, `snapshot_restore` under `tests/fixtures/` with `.hash` siblings; economy, territory, tech, combat, attrition tests later | M1 (done) onward |
+| `benches/` | criterion benches `step_500_units`, `astar_budget` (M1, done), `territory_recompute` (M3a) | M1, M3a |
 
 State layout is not an ECS. Units and buildings live in `BTreeMap<UnitId, Unit>` and `BTreeMap<BuildingId, Building>` with the `IdGen` allocator (`IdGen::unit()`, `IdGen::building()`), itself hashed state. Iteration is always id order or sorted order with an id tiebreak. Derived structures (influence maps, spatial grid, connected components, path cache) are rebuilt, never hashed.
 
 At M0 the crate holds `Fx` and `FxVec2`, every id type and the `IdGen` allocator, the full `Command` enum with `sort_commands`, `MatchSetup` (including player slots), `SimView`, the `AiController` trait, and a `Sim` whose hashed state is `{ tick, seed, rng: Pcg32, ids, players, units, buildings, pending, commands_applied }`. `step` queues the tick's commands for `tick + cmd_delay`, runs the AI and queues its commands the same way, then applies everything due this tick in `(player, seq)` order; only `Surrender` has a real handler, and every other command advances the RNG once so the hash already depends on the command stream. `hash`, `snapshot` and `restore` are the real scheme (xxh3 over postcard, `restore` calls a `rebuild_derived` that is empty until M1). Subsystem ticks start in M1.
 
+At M1 the hashed state gains `map` and `pathing` (queue plus the active A* search; the cache is `serde(skip)`). `Sim::step` runs queue -> AI -> apply -> `Pathing::service` under `path_budget_expansions` -> `SpatialGrid::rebuild` and `movement::step` -> `tick += 1`. `Move` assigns `group_targets` and issues path requests, `Stop` clears the order and cancels the request, and `DebugSpawn` (accepted only when `MatchSetup.debug_commands` is true) places units on a square spiral of passable tiles. `sub_hashes()` returns nine named hashes (`units`, `buildings`, `economy`, `territory`, `tech`, `pathing`, `rng`, `map`, `meta`), `drain_events()` hands out `UnitSpawned`, `UnitArrived`, `PathUnreachable` and `CommandRejected`, and `rebuild_derived()` rebuilds components and the spatial grid and clears the path cache. Unit stats come from `data/rules/units.ron` and are converted once at spawn (`speed` in tiles per tick, `radius` in tiles).
+
 ### `crates/rules/`
 
 Schema, loader and validator for everything under `data/`. `Rules::load(dir)` reads the RON files, checks every cross-reference, converts authored units to ticks and integers exactly once, and computes `rules_hash`. Errors name the file path and field. The clippy ban list applies here too, so a float can never enter through data.
 
-At M0: `lib.rs` (the `Rules` struct with the full v0.1 field set from `rules.ron`, a validator, `ticks_from_ds` and `rules_hash`), `resources.rs` (the four resources) and `map.rs` (`MapDef`, the tile-row map loader and symmetry validator). `Rules::load` attaches resources and every map under `data/maps/` to the struct, so `rules_hash` covers all three. Content tables (units, buildings, techs, ages, factions, visuals, AI data) arrive with their milestones (M2, M3a, M4a, M5b).
+At M0: `lib.rs` (the `Rules` struct with the full v0.1 field set from `rules.ron`, a validator, `ticks_from_ds` and `rules_hash`), `resources.rs` (the four resources) and `map.rs` (`MapDef`, the tile-row map loader and symmetry validator). `Rules::load` attaches resources and every map under `data/maps/` to the struct, so `rules_hash` covers all three. M1 adds `units.rs` (`UnitKind` with the `_x100` movement fields, `Units::validate`, `Rules::unit_kind(u16)` and `unit_kind_by_id(&str)`; `units.ron` is attached by `load` and is part of `rules_hash`). The remaining content tables (buildings, techs, ages, factions, visuals, AI data) arrive with their milestones (M2, M3a, M4a, M5b).
 
 ### `crates/ai/`
 
@@ -136,13 +138,14 @@ Headless tooling that runs on an Ubuntu CI runner with no GPU.
 | `selftest --ticks N --seed S` | Runs the scripted match twice on two threads and compares hashes | M0 |
 | `data-check [dir]` | Loads and validates everything under `data/` | M0 |
 | `hash-dump --ticks N --seed S` | Prints the whole-state hash after every tick of the scripted match | M0 |
-| `hash-dump <replay> --every N` | Prints per-tick sub-hashes of a replay for bisecting | M1 |
-| `verify <replay>` | Re-simulates a replay and reports one of four outcomes | M1 |
-| `bench` | Timing runs with `--units`, `--ticks`, `--combat`, `--bots`, `--territory` | M1 |
-| `fuzz --ticks N` | Random command streams | M1 |
+| `hash-dump <replay> --every N` | Re-simulates a replay and prints `tick hash units buildings economy territory tech pathing rng map meta` every N ticks, for bisecting | M1 (done) |
+| `verify <replay>` | Re-simulates a replay and prints exactly one of `OK final_hash=0x... ticks=N`, `DIVERGED at tick N (subsystem: X)`, `SIM VERSION MISMATCH (...)`, `RULES CHANGED since recording (...)`; exit 0 only for OK | M1 (done) |
+| `bench --units N --ticks T` / `bench --astar --budget B` | Mean and p95 step time plus arrival percentage for N movers crossing the map, or the cost of one saturated A* tick (wall clock is allowed in sim-cli, not in sim) | M1 (done); `--combat`, `--bots`, `--territory` later |
+| `fuzz --ticks N --seed S --cases C` | Seeded random command streams run twice and compared | M1 (done) |
+| `record --scenario <name> --ticks N --out <file> [--hash-every-tick]` | Records a scripted scenario (`move_500`, `move_500_short`, `group_spiral`, `snapshot_restore`) to an `.eonreplay`; the goldens are made with it | M1 (done) |
 | `play-bots` | Seeded bot-vs-bot games in parallel with a CSV summary | M5b |
 
-A global `--data <dir>` flag (default `data`) selects the data directory. Subcommands that have not landed yet exit with code 2 and print `not implemented until <milestone>`.
+A global `--data <dir>` flag (default `data`) selects the data directory. Subcommands that have not landed yet exit with code 2 and print `not implemented until <milestone>`. Scenario command streams are defined once, in an engine-free crate, and shared by `record` and the tests in `crates/sim/tests/m1.rs`, so a fixture and the test that checks it can never disagree about the input.
 
 ### `data/`
 
@@ -162,7 +165,7 @@ Arrives M7, except the font and UI pack which may land earlier with the HUD (M3b
 
 ### `.github/`
 
-`ci.yml` runs five jobs: `check` on macOS (fmt, clippy, nextest, doc, machete, typos, asset and trademark gates, single-Bevy check, headless smoke run), `headless` on Ubuntu (sim, rules, ai and sim-cli tests, data-check, boundary check, headless smoke run; `verify` from M1), `game-linux` on Ubuntu (compile-only clippy of the game crate), `deny` (cargo-deny) and `hash-parity` (diffs the final hash produced on each OS). `release-check.yml` builds release and bundles on pushes to main. `release.yml` publishes on tags. Dependabot ignores Bevy and the two egui crates for minor and major bumps. See [RELEASING.md](RELEASING.md).
+`ci.yml` runs five jobs: `check` on macOS (fmt, clippy, nextest, doc, machete, typos, asset and trademark gates, single-Bevy check, headless smoke run, `sim-cli verify --release` of the `move_500` fixture), `headless` on Ubuntu (sim, rules, ai and sim-cli tests with `PROPTEST_CASES=256`, data-check, selftest, `verify --release` of the `move_500`, `group_spiral` and `snapshot_restore` fixtures, engine boundary check, `pathfinding`-is-dev-only check, headless smoke run), `game-linux` on Ubuntu (compile-only clippy of the game crate), `deny` (cargo-deny) and `hash-parity` (diffs the 200-tick smoke line and the `move_500` `OK final_hash=...` line produced on each OS). `release-check.yml` builds release and bundles on pushes to main. `release.yml` publishes on tags. Dependabot ignores Bevy and the two egui crates for minor and major bumps. See [RELEASING.md](RELEASING.md).
 
 ### `docs/`
 

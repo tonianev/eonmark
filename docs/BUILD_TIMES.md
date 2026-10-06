@@ -22,6 +22,7 @@ This document records measured build, test and CI wall times on the development 
 | `cargo build -p game --profile ci` | 2026-10-05 | same | 142 (2 min 22 s wall, 1731 s CPU) | The profile every CI Bevy compile uses. Near-cold: `target/ci` held only clippy metadata. |
 | `cargo clippy -p game --features dev --all-targets` | 2026-10-05 | same | 18-20 (0.8 warm) | Dependencies already checked; the higher figure when `rules` needed re-checking. |
 | `cargo test -p sim` | 2026-10-05 | same | 0.93 (0.15 warm) | After `touch crates/sim/src/lib.rs`, rebuild plus run, 14 tests. Budget: under 10 s for the non-ignored suite (sim at `opt-level = 3`). |
+| `cargo test -p sim` (M1 suite: determinism, snapshot/restore, proptests at 32 cases, path oracle, short goldens) | filled at integration | same | filled at integration | Budget: under 10 s for the non-ignored suite. Long goldens are `#[ignore]` and verified by `sim-cli verify --release` in CI. |
 | `cargo test -p rules` | 2026-10-05 | same | 0.01 run (about 5 compile, cold crate) | 15 tests. |
 | `cargo clippy -p sim -p rules -p ai -p sim-cli --all-targets` | 2026-10-05 | same | 0.37 | Warm. |
 | `cargo run -q -p sim-cli -- data-check data` | 2026-10-05 | same | 1.8 | Warm target dir, debug profile. |
@@ -55,8 +56,8 @@ Append a row whenever a bench acceptance passes. Budgets come from the design.
 
 | Bench | Milestone | Date | Mean (ms) | p95 (ms) | Budget | Notes |
 |---|---|---|---|---|---|---|
-| `step_500_units` (500 movers crossing the map, release) | M1 | TBD (M1) | TBD (M1) | TBD (M1) | mean < 5, p95 < 10 | |
-| `astar_budget` (saturated per-tick A* budget) | M1 | TBD (M1) | TBD (M1) | | < 2 | Default budget 4000 expansions; tune in `rules.ron` |
+| `step_500_units` (500 movers crossing the map, release; `sim-cli bench --units 500 --ticks 1200`) | M1 | filled at integration | filled at integration | filled at integration | mean < 5, p95 < 10 | Also reports the arrival percentage within 3 tiles of the component-corrected goal (gate: >= 99 %). criterion twin: `cargo bench -p sim --bench step_500_units` |
+| `astar_budget` (one saturated 4000-expansion A* tick, release; `sim-cli bench --astar --budget 4000`) | M1 | filled at integration | | | < 2 | Default budget 4000 expansions, cache 1024 entries; tune in `rules.ron` (good first issue). criterion twin: `cargo bench -p sim --bench astar_budget` |
 | `territory_recompute` (incremental) | M3a | TBD (M3a) | TBD (M3a) | | < 2 | |
 | `step` with 200 vs 200 fighting | M4a | TBD (M4a) | TBD (M4a) | TBD (M4a) | mean < 5, p95 < 10 | |
 | AI think time per tick | M5b | TBD (M5b) | TBD (M5b) | | < 0.5 | |

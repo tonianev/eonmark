@@ -132,7 +132,7 @@ The reader tolerates truncation. It decodes records with `postcard::take_from_by
 | `tick_rate_hz` | `u32` | Loaded | 20. |
 | `cmd_delay` | `u32` | Loaded | Ticks between issue and application. |
 | `players` | `Vec<PlayerSlot>` | Loaded | Slot id and `is_ai` per player, in id order. `MatchSetup::skirmish` makes slot 0 human and slot 1 the AI; `MatchSetup::scenario` makes two human slots. |
-| `debug_commands` | `bool` | Loaded | Whether `Command::DebugSpawn` is accepted. `false` for `skirmish`; `true` for `scenario` (fixtures, benches, tests). A `DebugSpawn` in a match with `false` is rejected with `CommandRejected { reason: DebugCommandsDisabled }`, advances the RNG like any other rejected command and is still part of the hash. |
+| `debug_commands` | `bool` | Loaded | Whether `Command::DebugSpawn` is accepted. `false` for `skirmish`; `true` for `scenario` (fixtures, benches, tests). A `DebugSpawn` in a match with `false` is rejected with `CommandRejected { reason: DebugCommandsDisabled }` and spawns nothing; like every applied or rejected command it still increments `commands_applied` (hashed in `meta`), so the hash reflects the full command stream. Only the not-yet-implemented commands draw from the RNG on rejection. |
 
 AI difficulty ids (M6) and faction ids (M9) are added to the header when those systems arrive. The same struct is the future lockstep handshake payload.
 

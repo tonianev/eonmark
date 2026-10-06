@@ -121,7 +121,7 @@ A Bevy-free sim that spawns units on the plains_1v1 tile map, moves them along b
 - [x] `cargo run -p sim-cli --release -- bench --units 500 --ticks 1200` reports mean step < 5 ms and p95 < 10 ms on the dev Mac while 500 units cross the map, and `bench --units 500 --ticks 2400` reports >= 99% within 3 tiles of their (component-corrected) goal with 0 units still moving or displaced at the end (amended 2026-10-06, owner to confirm: the original clause measured arrival at tick 1200, but the crossing itself is 87 tiles at the data speed of 1.8 tiles/s, about 970 ticks before any ford queueing, so no pathing quality could satisfy it; the gate first held at tick 1624 and 100% held from tick 1800 to 2400; `--arrival-curve` prints the curve); `bench --astar --budget 4000` reports the per-tick cost of a saturated budget < 2 ms; numbers appended to `docs/BUILD_TIMES.md`.
 - [x] A scripted sim-cli recording killed with `kill -9` at tick ~600 leaves a file that `verify` accepts (exit 0, reports ticks verified).
 - [x] `cargo run -p sim-cli -- hash-dump <replay> --every 1` prints per-tick sub-hashes for units, pathing, rng; `docs/DETERMINISM.md` explains bisecting with it.
-- [ ] CI hash-parity job is green: ubuntu-24.04 and macos-26 final hashes of `move_500` are byte-identical.
+- [x] CI hash-parity job is green: ubuntu-24.04 and macos-26 final hashes of `move_500` are byte-identical. (Observed on PR #19, 2026-10-06: `OK final_hash=0xc9d94eca7bde8f2e ticks=1200` on both runners.)
 - [x] `cargo tree -p sim -e normal` lists only fixed, serde, postcard, xxhash-rust, rand_pcg, ron, rules and their transitive deps (no slotmap, no pathfinding).
 
 ### Good first issues

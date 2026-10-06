@@ -20,6 +20,7 @@
 //! | [`pathing`] | budgeted resumable A*, request queue, transparent cache |
 //! | [`movement`] | `SpatialGrid`, movement step, group targets |
 //! | [`replay`] | `.eonreplay` writer, reader, `verify` |
+//! | [`scenarios`] | scripted M1 command streams shared by tests, benches, `record` and fixtures |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
@@ -34,6 +35,7 @@ pub mod map;
 pub mod movement;
 pub mod pathing;
 pub mod replay;
+pub mod scenarios;
 pub mod state;
 
 pub use ai_hook::{AiController, SimView};

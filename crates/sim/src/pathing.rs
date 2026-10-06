@@ -180,8 +180,25 @@ impl AStarSearch {
     /// Start a search from `from` to `to` on `map`: arrays sized to the map,
     /// the start pushed with `g = 0`, `f = octile(from, to)`.
     pub fn new(map: &Map, from: Tile, to: Tile) -> AStarSearch {
-        let _ = (map, from, to);
-        todo!("M1 pathing: AStarSearch::new (implementer A)")
+        // TEMP(movement): replaced by the pathing branch at integration.
+        let n = map.len();
+        let mut open = BinaryHeap::new();
+        open.push(Node {
+            f: octile(from, to),
+            g: 0,
+            tile: u32::try_from(map.idx(from)).expect("fits"),
+        });
+        let mut g = vec![G_UNVISITED; n];
+        g[map.idx(from)] = 0;
+        AStarSearch {
+            from,
+            to,
+            open,
+            closed: vec![false; n],
+            g,
+            parent: vec![NO_PARENT; n],
+            expansions: 0,
+        }
     }
 
     /// Pop and expand nodes until the goal is popped (`Found`), the heap is
@@ -190,8 +207,58 @@ impl AStarSearch {
     /// The found path runs start -> goal inclusive, reconstructed through
     /// `parent` and reversed.
     pub fn resume(&mut self, map: &Map, budget: &mut u32) -> SearchStatus {
-        let _ = (map, budget);
-        todo!("M1 pathing: AStarSearch::resume (implementer A)")
+        // TEMP(movement): replaced by the pathing branch at integration.
+        // Plain budgeted A* so movement can be exercised on real paths.
+        let goal = u32::try_from(map.idx(self.to)).expect("fits");
+        loop {
+            if self.open.is_empty() {
+                return SearchStatus::Exhausted;
+            }
+            if *budget == 0 {
+                return SearchStatus::Suspended;
+            }
+            let Some(node) = self.open.pop() else {
+                return SearchStatus::Exhausted;
+            };
+            let t = usize::try_from(node.tile).expect("fits");
+            if self.closed[t] || node.g > self.g[t] {
+                continue;
+            }
+            self.closed[t] = true;
+            self.expansions += 1;
+            *budget -= 1;
+            if node.tile == goal {
+                let mut path = Vec::new();
+                let mut cur = goal;
+                loop {
+                    path.push(map.tile_at(usize::try_from(cur).expect("fits")));
+                    let p = self.parent[usize::try_from(cur).expect("fits")];
+                    if p == NO_PARENT {
+                        break;
+                    }
+                    cur = p;
+                }
+                path.reverse();
+                return SearchStatus::Found(path);
+            }
+            let tile = map.tile_at(t);
+            for nb in map.neighbors8(tile) {
+                let j = map.idx(nb);
+                if self.closed[j] {
+                    continue;
+                }
+                let ng = node.g + step_cost(tile, nb);
+                if ng < self.g[j] {
+                    self.g[j] = ng;
+                    self.parent[j] = node.tile;
+                    self.open.push(Node {
+                        f: ng + octile(nb, self.to),
+                        g: ng,
+                        tile: u32::try_from(j).expect("fits"),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -380,8 +447,55 @@ impl Pathing {
         budget: u32,
         tick: u32,
     ) -> Vec<(UnitId, Option<Vec<Tile>>)> {
-        let _ = (map, budget, tick);
-        todo!("M1 pathing: Pathing::service (implementer A)")
+        // TEMP(movement): replaced by the pathing branch at integration.
+        // Minimal queue driver: goal correction, no cache, suspension.
+        let _ = tick;
+        let mut budget = budget;
+        let mut done = Vec::new();
+        loop {
+            if budget == 0 {
+                break;
+            }
+            let (req, mut search) = match self.active.take() {
+                Some(a) => a,
+                None => {
+                    if self.queue.is_empty() {
+                        break;
+                    }
+                    let req = self.queue.remove(0);
+                    let from = if map.passable(req.from) {
+                        req.from
+                    } else {
+                        match map.nearest_passable(req.from, None) {
+                            Some(t) => t,
+                            None => {
+                                done.push((req.unit, None));
+                                continue;
+                            }
+                        }
+                    };
+                    let Some(goal) = map.nearest_passable(req.to, Some(map.component_of(from)))
+                    else {
+                        done.push((req.unit, None));
+                        continue;
+                    };
+                    if from == goal {
+                        done.push((req.unit, Some(Vec::new())));
+                        continue;
+                    }
+                    (req, AStarSearch::new(map, from, goal))
+                }
+            };
+            match search.resume(map, &mut budget) {
+                SearchStatus::Found(path) => done.push((req.unit, Some(path))),
+                SearchStatus::Exhausted => done.push((req.unit, None)),
+                SearchStatus::Suspended => {
+                    self.active = Some((req, search));
+                    break;
+                }
+            }
+        }
+        done
     }
 
     /// Drop every cache entry (grid change, restore, or the transparency test).

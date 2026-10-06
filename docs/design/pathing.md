@@ -56,7 +56,7 @@ Per-search arrays, sized to the map:
 | Array | Type | Meaning |
 | --- | --- | --- |
 | `g` | `Vec<u32>`, `u32::MAX` = unvisited | best known cost to each tile |
-| `parent` | `Vec<u16>` | tile index of the predecessor on the best path (16384 tiles fit in u16) |
+| `parent` | `Vec<u32>`, `u32::MAX` = none | tile index of the predecessor on the best path (u32 to match `Node.tile`; 16384 tiles would fit in u16, but one index type keeps the serialised search simple) |
 | `closed` | `Vec<bool>` or a bitset | tile has been expanded |
 
 Resumable API. A search is a struct holding the heap, the three arrays and an expansion counter. Its only entry point is:
@@ -81,6 +81,14 @@ Each tick the pathing step walks the queue in order with a budget of `path_budge
 3. Otherwise call `resume(remaining_budget)` on the request's search, creating it on first contact. `Found` stores the path on the unit and in the cache. `Exhausted` cannot happen after step 1 but is handled defensively by clearing the unit's order and emitting `SimEvent::CommandRejected { reason: Unreachable }`. `Suspended` leaves the request at its position in the queue and ends the tick's pathing work, because the budget is gone.
 
 A unit whose request is still queued or suspended waits in place. It does not drift toward the goal, so the state at the end of the tick is a pure function of the inputs.
+
+Implementation notes (M1, `pathing.rs`). Where the implementation is more specific than the steps above:
+
+- Step 1 also corrects the start: a unit standing on a blocked tile (possible once buildings write into the grid) searches from `nearest_passable(start, any component)`. When the whole map is blocked the request completes as unreachable.
+- Step 3's `Exhausted` is reported to `Sim::step` as `None`, which clears the unit's order and emits `SimEvent::PathUnreachable { unit }` (there is no `seq` for an asynchronous failure, so `CommandRejected { Unreachable }` stays reserved for synchronous rejects).
+- `resume` checks the budget before each expansion, so a zero budget suspends without touching the heap; an empty heap is `Exhausted` even when the budget is already zero. Stale heap entries are popped for free.
+- A request whose `requested_tick` is later than the current tick stays queued; the queue is sorted, so the walk stops at the first such request. `Sim::step` never creates one.
+- `Pathing::service_budgeted` is `service` with the budget passed by reference, so tests can assert the exact remainder a cache hit leaves.
 
 Snapshot and restore. The request queue is hashed sim state (it has its own sub-hash, `pathing`). A suspended search also carries progress that decides on which tick a path appears. The design does not say how that progress is saved; the conservative choice is to store only the request plus its `expansions_done` counter, and on `restore()` rebuild the search by running `resume(expansions_done)` against the restored grid. The A* is deterministic, so this reproduces the exact heap and arrays. Serialising the full heap is an acceptable alternative if the implementer prefers it; either way the M1 test `snapshot_restore_matches_uninterrupted_including_spawns` must pass with 500 movers.
 
@@ -116,7 +124,7 @@ When the click tile itself is blocked, or lies in a component none of the ordere
 
 ## BFS nearest-passable fallback
 
-`nearest_passable(from: Tile, component: u16) -> Tile` performs a breadth-first search over the 8-neighbourhood with a fixed neighbour order (east, south-east, south, south-west, west, north-west, north, north-east) and returns the first tile whose cost is 1 and whose component id equals `component`. Because the neighbour order is fixed and the queue is FIFO, the result is the same on every machine. The search is bounded by the map, so it always terminates; on a map with no passable tile in the component it returns `from`, which callers treat as "no path".
+`Map::nearest_passable(from: Tile, component: Option<u16>) -> Option<Tile>` performs a breadth-first search over the 8-neighbourhood with a fixed neighbour order (east, south-east, south, south-west, west, north-west, north, north-east) and returns the first tile whose cost is 1 and whose component id equals `component` (any component when `None`). Because the neighbour order is fixed and the queue is FIFO, the result is the same on every machine. The search is bounded by the map, so it always terminates; on a map with no passable tile in the component it returns `None`, which callers treat as "no path".
 
 ## Movement step
 

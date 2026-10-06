@@ -4,7 +4,7 @@
 //! (pathing tests: A; movement, state and goldens: B and C).
 
 use proptest::prelude::*;
-use sim::pathing::{AStarSearch, PathRequest, SearchStatus, path_cost};
+use sim::pathing::{AStarSearch, PathRequest, Pathing, SearchStatus, path_cost};
 use sim::{
     Command, FxVec2, Map, MatchSetup, PlayerCommand, PlayerId, Rules, Sim, SimView, Tile, UnitId,
     UnitKindId,
@@ -258,9 +258,22 @@ fn run_with(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> Vec<u64> {
     hashes
 }
 
+/// Proptest case count: `PROPTEST_CASES` when set, else 256 in CI and 32
+/// locally (docs/ROADMAP.md, M1).
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if std::env::var_os("CI").is_some() {
+            256
+        } else {
+            32
+        })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: if std::env::var_os("CI").is_some() { 256 } else { 32 },
+        cases: proptest_cases(),
         .. ProptestConfig::default()
     })]
 
@@ -309,7 +322,6 @@ fn oracle(map: &Map, from: Tile, to: Tile) -> Option<(Vec<Tile>, u32)> {
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn path_exists_iff_connected() {
     use rand_core::{Rng, SeedableRng};
     let mut rng = rand_pcg::Pcg32::seed_from_u64(11);
@@ -323,8 +335,12 @@ fn path_exists_iff_connected() {
         }
         maps.push(m);
     }
-    for map in &maps {
-        for _ in 0..40 {
+    // 200 passable pairs on the plains map, 100 across the four random maps.
+    let pairs_per_map = [200usize, 25, 25, 25, 25];
+    let mut disconnected = 0;
+    for (map, pairs) in maps.iter().zip(pairs_per_map) {
+        let mut checked = 0;
+        while checked < pairs {
             let rnd = |rng: &mut rand_pcg::Pcg32| {
                 Tile::new(
                     u16::try_from(rng.next_u32() % u32::from(map.width())).unwrap(),
@@ -335,6 +351,10 @@ fn path_exists_iff_connected() {
             let b = rnd(&mut rng);
             if !map.passable(a) || !map.passable(b) {
                 continue;
+            }
+            checked += 1;
+            if map.component_of(a) != map.component_of(b) {
+                disconnected += 1;
             }
             let ours = search_full(map, a, b);
             let theirs = oracle(map, a, b);
@@ -350,6 +370,97 @@ fn path_exists_iff_connected() {
                 }
             }
         }
+    }
+    assert!(
+        disconnected > 0,
+        "the random maps must exercise the unreachable branch"
+    );
+}
+
+/// Shared plains map for the Pathing-level transparency proptest (loading
+/// `data/` per case would dominate the run time).
+fn shared_plains() -> &'static Map {
+    static MAP: std::sync::OnceLock<Map> = std::sync::OnceLock::new();
+    MAP.get_or_init(plains)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: proptest_cases(),
+        .. ProptestConfig::default()
+    })]
+
+    /// The transparent-cache rule at the `Pathing` level (the `Sim`-level
+    /// `path_cache_is_transparent` above needs movement to land): the same
+    /// request stream through a cache-enabled and a cache-disabled `Pathing`
+    /// completes the same requests with the same paths on every tick, leaves
+    /// the same budget remainder, and serialises to the same hashed bytes.
+    #[test]
+    fn path_cache_is_transparent_at_the_pathing_level(
+        seed in any::<u64>(),
+        ticks in 20u32..120,
+        budget in 20u32..1500,
+    ) {
+        use rand_core::{Rng, SeedableRng};
+        let map = shared_plains();
+        let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
+        let rnd_tile = |rng: &mut rand_pcg::Pcg32| {
+            Tile::new(
+                u16::try_from(rng.next_u32() % 128).unwrap(),
+                u16::try_from(rng.next_u32() % 128).unwrap(),
+            )
+        };
+        // A small pool of start/goal pairs so cache hits are frequent, mixed
+        // with fresh pairs so misses, suspensions and evictions all happen.
+        let pool: Vec<(Tile, Tile)> = (0..6).map(|_| (rnd_tile(&mut rng), rnd_tile(&mut rng))).collect();
+        let mut on = Pathing::new(16, true);
+        let mut off = Pathing::new(16, false);
+        let mut next_unit = 1u32;
+        let mut hits_possible = 0u32;
+        for tick in 0..ticks {
+            for _ in 0..(rng.next_u32() % 4) {
+                let (from, to) = if rng.next_u32() % 10 < 7 {
+                    pool[(rng.next_u32() % 6) as usize]
+                } else {
+                    (rnd_tile(&mut rng), rnd_tile(&mut rng))
+                };
+                // Mostly fresh units; sometimes re-request for an existing one
+                // (replaces its earlier request or active search).
+                let unit = if rng.next_u32() % 5 == 0 && next_unit > 1 {
+                    UnitId(1 + rng.next_u32() % (next_unit - 1))
+                } else {
+                    next_unit += 1;
+                    UnitId(next_unit - 1)
+                };
+                let req = PathRequest { requested_tick: tick, unit, from, to };
+                on.request(req);
+                off.request(req);
+            }
+            if rng.next_u32() % 8 == 0 && next_unit > 1 {
+                let unit = UnitId(1 + rng.next_u32() % (next_unit - 1));
+                on.cancel(unit);
+                off.cancel(unit);
+            }
+            if !on.cache.is_empty() {
+                hits_possible += 1;
+            }
+            let mut ra = budget;
+            let mut rb = budget;
+            let a = on.service_budgeted(map, &mut ra, tick);
+            let b = off.service_budgeted(map, &mut rb, tick);
+            prop_assert_eq!(&a, &b, "completed requests differ at tick {}", tick);
+            prop_assert_eq!(ra, rb, "budget remainder differs at tick {}", tick);
+            prop_assert_eq!(
+                postcard::to_allocvec(&on).unwrap(),
+                postcard::to_allocvec(&off).unwrap(),
+                "hashed pathing state differs at tick {}",
+                tick
+            );
+            prop_assert!(on.cache.len() <= 16);
+        }
+        prop_assert!(off.cache.is_empty());
+        // Not every seed warms the cache, but most do.
+        let _ = hits_possible;
     }
 }
 

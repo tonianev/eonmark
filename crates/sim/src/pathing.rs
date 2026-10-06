@@ -180,8 +180,25 @@ impl AStarSearch {
     /// Start a search from `from` to `to` on `map`: arrays sized to the map,
     /// the start pushed with `g = 0`, `f = octile(from, to)`.
     pub fn new(map: &Map, from: Tile, to: Tile) -> AStarSearch {
-        let _ = (map, from, to);
-        todo!("M1 pathing: AStarSearch::new (implementer A)")
+        let n = map.len();
+        let start = map.idx(from);
+        let mut g = vec![G_UNVISITED; n];
+        g[start] = 0;
+        let mut open = BinaryHeap::new();
+        open.push(Node {
+            f: octile(from, to),
+            g: 0,
+            tile: tile_index(start),
+        });
+        AStarSearch {
+            from,
+            to,
+            open,
+            closed: vec![false; n],
+            g,
+            parent: vec![NO_PARENT; n],
+            expansions: 0,
+        }
     }
 
     /// Pop and expand nodes until the goal is popped (`Found`), the heap is
@@ -189,10 +206,72 @@ impl AStarSearch {
     /// Decrements `*budget` by one per expansion. Skipped stale pops are free.
     /// The found path runs start -> goal inclusive, reconstructed through
     /// `parent` and reversed.
+    ///
+    /// An empty heap is reported as `Exhausted` even when `*budget` is zero;
+    /// a zero budget with work left suspends without expanding anything.
     pub fn resume(&mut self, map: &Map, budget: &mut u32) -> SearchStatus {
-        let _ = (map, budget);
-        todo!("M1 pathing: AStarSearch::resume (implementer A)")
+        let goal = tile_index(map.idx(self.to));
+        loop {
+            let Some(&top) = self.open.peek() else {
+                return SearchStatus::Exhausted;
+            };
+            let i = top.tile as usize;
+            if self.closed[i] {
+                // Stale entry: a better `g` already closed this tile.
+                self.open.pop();
+                continue;
+            }
+            if *budget == 0 {
+                return SearchStatus::Suspended;
+            }
+            self.open.pop();
+            self.closed[i] = true;
+            self.expansions += 1;
+            *budget -= 1;
+            if top.tile == goal {
+                return SearchStatus::Found(self.reconstruct(map));
+            }
+            let here = map.tile_at(i);
+            for nb in map.neighbors8(here) {
+                let j = map.idx(nb);
+                if self.closed[j] {
+                    continue;
+                }
+                let ng = top.g + step_cost(here, nb);
+                if ng < self.g[j] {
+                    self.g[j] = ng;
+                    self.parent[j] = top.tile;
+                    self.open.push(Node {
+                        f: ng + octile(nb, self.to),
+                        g: ng,
+                        tile: tile_index(j),
+                    });
+                }
+            }
+        }
     }
+
+    /// Walk `parent` from the goal back to the start and reverse.
+    fn reconstruct(&self, map: &Map) -> Vec<Tile> {
+        let mut path = Vec::new();
+        let mut i = tile_index(map.idx(self.to));
+        loop {
+            path.push(map.tile_at(i as usize));
+            let p = self.parent[i as usize];
+            if p == NO_PARENT {
+                break;
+            }
+            i = p;
+        }
+        path.reverse();
+        debug_assert_eq!(path.first(), Some(&self.from));
+        path
+    }
+}
+
+/// Row-major index as the `u32` stored in [`Node::tile`] and `parent`.
+fn tile_index(i: usize) -> u32 {
+    u32::try_from(i).expect("tile index fits u32")
 }
 
 /// A unit's outstanding request for a path.
@@ -374,14 +453,132 @@ impl Pathing {
     /// unit's order and emits an event). Clears the cache first when
     /// `map.cost_grid_generation()` differs from the generation the cache
     /// was filled under (compare against the stored keys' third element).
+    ///
+    /// Requests whose `requested_tick` is later than `tick` are left queued
+    /// (the queue is sorted, so the walk stops at the first one).
     pub fn service(
         &mut self,
         map: &Map,
         budget: u32,
         tick: u32,
     ) -> Vec<(UnitId, Option<Vec<Tile>>)> {
-        let _ = (map, budget, tick);
-        todo!("M1 pathing: Pathing::service (implementer A)")
+        let mut remaining = budget;
+        self.service_budgeted(map, &mut remaining, tick)
+    }
+
+    /// [`Pathing::service`] with the budget passed by reference: on return
+    /// `*remaining` holds the expansions left unspent this tick (always zero
+    /// after a suspension). Tests use it to assert that the cache charges
+    /// exactly what the real search would have; `Sim::step` calls `service`.
+    pub fn service_budgeted(
+        &mut self,
+        map: &Map,
+        remaining: &mut u32,
+        tick: u32,
+    ) -> Vec<(UnitId, Option<Vec<Tile>>)> {
+        let generation = map.cost_grid_generation();
+        if self
+            .cache
+            .by_key
+            .keys()
+            .next()
+            .is_some_and(|k| k.2 != generation)
+        {
+            self.cache.clear();
+        }
+        let mut done = Vec::new();
+
+        // 1. The suspended search goes first; it already owns the queue head.
+        if let Some((req, search)) = self.active.as_mut() {
+            match search.resume(map, remaining) {
+                SearchStatus::Found(path) => {
+                    let key = (
+                        tile_index(map.idx(search.from)),
+                        tile_index(map.idx(search.to)),
+                        generation,
+                    );
+                    self.cache.insert(
+                        key,
+                        CacheEntry {
+                            path: path.clone(),
+                            expansions_used: search.expansions,
+                        },
+                    );
+                    done.push((req.unit, Some(path)));
+                    self.active = None;
+                }
+                SearchStatus::Exhausted => {
+                    done.push((req.unit, None));
+                    self.active = None;
+                }
+                SearchStatus::Suspended => return done,
+            }
+        }
+
+        // 2. Queued requests in (requested_tick, UnitId) order.
+        let mut consumed = 0;
+        while consumed < self.queue.len() {
+            let req = self.queue[consumed];
+            if req.requested_tick > tick {
+                break;
+            }
+            consumed += 1;
+
+            // Correct the start (a unit standing on a blocked tile) and the
+            // goal (blocked, or in another component).
+            let start = if map.passable(req.from) {
+                req.from
+            } else if let Some(s) = map.nearest_passable(req.from, None) {
+                s
+            } else {
+                done.push((req.unit, None));
+                continue;
+            };
+            let Some(goal) = map.nearest_passable(req.to, Some(map.component_of(start))) else {
+                done.push((req.unit, None));
+                continue;
+            };
+            if start == goal {
+                done.push((req.unit, Some(Vec::new())));
+                continue;
+            }
+
+            // Transparent cache: honour a hit only when the real search would
+            // also have completed within this tick's remaining budget.
+            let key = (
+                tile_index(map.idx(start)),
+                tile_index(map.idx(goal)),
+                generation,
+            );
+            if let Some(entry) = self.cache.get(key)
+                && entry.expansions_used <= *remaining
+            {
+                *remaining -= entry.expansions_used;
+                done.push((req.unit, Some(entry.path.clone())));
+                continue;
+            }
+
+            let mut search = AStarSearch::new(map, start, goal);
+            match search.resume(map, remaining) {
+                SearchStatus::Found(path) => {
+                    self.cache.insert(
+                        key,
+                        CacheEntry {
+                            path: path.clone(),
+                            expansions_used: search.expansions,
+                        },
+                    );
+                    done.push((req.unit, Some(path)));
+                }
+                SearchStatus::Exhausted => done.push((req.unit, None)),
+                SearchStatus::Suspended => {
+                    self.active = Some((req, search));
+                    break;
+                }
+            }
+        }
+        self.queue.drain(..consumed);
+        done
     }
 
     /// Drop every cache entry (grid change, restore, or the transparency test).
@@ -507,6 +704,350 @@ mod tests {
         assert!(!p.has_request(UnitId(2)));
         assert_eq!(p.outstanding(), 2);
         assert!(!p.is_idle());
+    }
+
+    /// A serpentine maze: every odd row but the last is a wall with a
+    /// one-tile gap at alternating ends, so the only route winds through
+    /// every lane. The last row is always open.
+    fn serpentine(w: u16, h: u16) -> Map {
+        let mut m = Map::open(w, h);
+        for y in (1..h - 1).step_by(2) {
+            let gap = if (y / 2) % 2 == 0 { w - 1 } else { 0 };
+            for x in 0..w {
+                if x != gap {
+                    m.set_blocked(Tile::new(x, y), true);
+                }
+            }
+        }
+        m
+    }
+
+    fn run_full(map: &Map, from: Tile, to: Tile) -> (SearchStatus, u32) {
+        let mut s = AStarSearch::new(map, from, to);
+        let mut budget = u32::MAX;
+        let status = s.resume(map, &mut budget);
+        (status, s.expansions)
+    }
+
+    #[test]
+    fn new_pushes_the_start_and_a_trivial_search_is_one_expansion() {
+        let m = Map::open(8, 8);
+        let s = AStarSearch::new(&m, Tile::new(2, 3), Tile::new(5, 3));
+        assert_eq!(s.open.len(), 1);
+        assert_eq!(
+            s.open.peek(),
+            Some(&Node {
+                f: 30,
+                g: 0,
+                tile: 26
+            })
+        );
+        assert_eq!(s.g[26], 0);
+        assert!(s.g.iter().filter(|&&g| g != G_UNVISITED).count() == 1);
+        assert!(s.parent.iter().all(|&p| p == NO_PARENT));
+        assert_eq!(s.expansions, 0);
+
+        let (status, expansions) = run_full(&m, Tile::new(2, 3), Tile::new(2, 3));
+        assert_eq!(status, SearchStatus::Found(vec![Tile::new(2, 3)]));
+        assert_eq!(expansions, 1);
+
+        let (status, _) = run_full(&m, Tile::new(0, 0), Tile::new(3, 3));
+        let SearchStatus::Found(p) = status else {
+            panic!("{status:?}");
+        };
+        assert_eq!(p.len(), 4, "pure diagonal");
+        assert_eq!(path_cost(&p), 42);
+        assert_eq!((p[0], p[3]), (Tile::new(0, 0), Tile::new(3, 3)));
+    }
+
+    #[test]
+    fn budget_suspends_and_resumes_to_the_same_path() {
+        let m = serpentine(16, 16);
+        let from = Tile::new(0, 0);
+        let to = Tile::new(15, 15);
+        let (full, full_expansions) = run_full(&m, from, to);
+        let SearchStatus::Found(full_path) = full else {
+            panic!("{full:?}");
+        };
+        assert!(full_expansions > 100, "maze forces a long search");
+
+        // Zero budget: suspended, nothing expanded, heap untouched.
+        let mut s = AStarSearch::new(&m, from, to);
+        let before = s.clone();
+        let mut zero = 0;
+        assert_eq!(s.resume(&m, &mut zero), SearchStatus::Suspended);
+        assert_eq!(s, before);
+
+        // One expansion per call reaches the identical path and count.
+        let mut calls = 0;
+        let found = loop {
+            let mut one = 1;
+            calls += 1;
+            match s.resume(&m, &mut one) {
+                SearchStatus::Suspended => {
+                    assert_eq!(one, 0, "a suspended call spends its budget");
+                }
+                SearchStatus::Found(p) => break p,
+                SearchStatus::Exhausted => panic!("reachable"),
+            }
+        };
+        assert_eq!(found, full_path);
+        assert_eq!(s.expansions, full_expansions);
+        assert_eq!(calls, full_expansions);
+
+        // A budget larger than needed is only partially spent.
+        let mut s = AStarSearch::new(&m, from, to);
+        let mut big = full_expansions + 1000;
+        assert_eq!(s.resume(&m, &mut big), SearchStatus::Found(full_path));
+        assert_eq!(big, 1000);
+    }
+
+    #[test]
+    fn exhausted_when_the_goal_is_walled_off() {
+        let mut m = Map::open(8, 8);
+        for y in 0..8 {
+            m.set_blocked(Tile::new(4, y), true);
+        }
+        let (status, expansions) = run_full(&m, Tile::new(0, 0), Tile::new(7, 7));
+        assert_eq!(status, SearchStatus::Exhausted);
+        assert_eq!(expansions, 32, "the whole start component is expanded");
+        // Exhausted is reported even when the budget is already zero.
+        let mut s = AStarSearch::new(&m, Tile::new(0, 0), Tile::new(7, 7));
+        let mut b = 40;
+        assert_eq!(s.resume(&m, &mut b), SearchStatus::Exhausted);
+        let mut zero = 0;
+        assert_eq!(s.resume(&m, &mut zero), SearchStatus::Exhausted);
+    }
+
+    #[test]
+    fn mid_search_snapshot_restore_is_byte_exact() {
+        let m = serpentine(24, 24);
+        let from = Tile::new(0, 0);
+        let to = Tile::new(23, 23);
+        let mut a = AStarSearch::new(&m, from, to);
+        let mut k = 97;
+        assert_eq!(a.resume(&m, &mut k), SearchStatus::Suspended);
+        assert_eq!(a.expansions, 97);
+        let bytes = postcard::to_allocvec(&a).unwrap();
+        let mut b: AStarSearch = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(a, b, "heap array order, arrays and counter restore exactly");
+        assert_eq!(postcard::to_allocvec(&b).unwrap(), bytes);
+        assert_eq!(crate::hash::hash_value(&a), crate::hash::hash_value(&b));
+
+        // Step both in lockstep: every intermediate state stays identical.
+        loop {
+            let (mut ba, mut bb) = (7, 7);
+            let ra = a.resume(&m, &mut ba);
+            let rb = b.resume(&m, &mut bb);
+            assert_eq!(ra, rb);
+            assert_eq!(ba, bb);
+            assert_eq!(a, b);
+            assert_eq!(
+                postcard::to_allocvec(&a).unwrap(),
+                postcard::to_allocvec(&b).unwrap()
+            );
+            match ra {
+                SearchStatus::Suspended => {}
+                SearchStatus::Found(p) => {
+                    let (full, _) = run_full(&m, from, to);
+                    assert_eq!(full, SearchStatus::Found(p));
+                    break;
+                }
+                SearchStatus::Exhausted => panic!("maze is connected"),
+            }
+        }
+    }
+
+    fn req(tick: u32, unit: u32, from: Tile, to: Tile) -> PathRequest {
+        PathRequest {
+            requested_tick: tick,
+            unit: UnitId(unit),
+            from,
+            to,
+        }
+    }
+
+    #[test]
+    fn service_corrects_start_and_goal_and_completes_trivial_requests() {
+        // Column 4 is a wall; (6,2) is a blocked island on the right.
+        let mut m = Map::open(8, 8);
+        for y in 0..8 {
+            m.set_blocked(Tile::new(4, y), true);
+        }
+        m.set_blocked(Tile::new(6, 2), true);
+        let mut p = Pathing::new(8, true);
+        // Goal in the other component: corrected to the nearest passable tile
+        // of the start's component (BFS from (7,7): E, SE, S, SW, W ... first
+        // left-side tile is reached at (3,7)).
+        p.request(req(0, 1, Tile::new(0, 0), Tile::new(7, 7)));
+        // Goal blocked: corrected to (7,2) (east first).
+        p.request(req(0, 2, Tile::new(5, 0), Tile::new(6, 2)));
+        // Start == goal: empty path, no expansions.
+        p.request(req(0, 3, Tile::new(1, 1), Tile::new(1, 1)));
+        // Start blocked: corrected to (5,3) (east of the wall), then a path.
+        p.request(req(0, 4, Tile::new(4, 3), Tile::new(7, 3)));
+        let mut remaining = 1000;
+        let done = p.service_budgeted(&m, &mut remaining, 0);
+        assert_eq!(done.len(), 4);
+        assert_eq!(done[0].0, UnitId(1));
+        let p1 = done[0].1.as_ref().unwrap();
+        assert_eq!(p1.first(), Some(&Tile::new(0, 0)));
+        assert_eq!(p1.last(), Some(&Tile::new(3, 7)));
+        let p2 = done[1].1.as_ref().unwrap();
+        assert_eq!(p2.last(), Some(&Tile::new(7, 2)));
+        assert_eq!(done[2], (UnitId(3), Some(vec![])));
+        let p4 = done[3].1.as_ref().unwrap();
+        assert_eq!(p4.first(), Some(&Tile::new(5, 3)));
+        assert_eq!(p4.last(), Some(&Tile::new(7, 3)));
+        assert!(p.is_idle());
+        assert!(remaining < 1000 && remaining > 900);
+        assert_eq!(p.cache.len(), 3, "three real searches cached");
+
+        // A fully blocked map: nothing reachable.
+        let mut b = Map::open(2, 2);
+        for i in 0..4 {
+            b.set_blocked(b.tile_at(i), true);
+        }
+        let mut q = Pathing::new(8, true);
+        q.request(req(0, 9, Tile::new(0, 0), Tile::new(1, 1)));
+        assert_eq!(q.service(&b, 10, 0), vec![(UnitId(9), None)]);
+    }
+
+    #[test]
+    fn service_suspends_across_ticks_and_shares_one_budget() {
+        let m = serpentine(16, 16);
+        let far = Tile::new(15, 15);
+        let (_, full) = run_full(&m, Tile::new(0, 0), far);
+        let mut p = Pathing::new(8, false);
+        p.request(req(0, 2, Tile::new(0, 0), far));
+        p.request(req(0, 1, Tile::new(0, 0), Tile::new(3, 0)));
+        p.request(req(1, 3, Tile::new(0, 0), Tile::new(1, 0)));
+        // Tick 0: unit 1 (same tick, lower id) completes with 4 expansions,
+        // unit 2 takes the rest and suspends; unit 3 (tick 1) is not touched.
+        let mut remaining = 20;
+        let done = p.service_budgeted(&m, &mut remaining, 0);
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, UnitId(1));
+        assert_eq!(remaining, 0);
+        let active = p.active.as_ref().expect("suspended");
+        assert_eq!(active.0.unit, UnitId(2));
+        assert_eq!(active.1.expansions, 16);
+        assert_eq!(p.queue.len(), 1);
+        assert!(p.has_request(UnitId(2)) && p.has_request(UnitId(3)));
+        // Later ticks: the active search resumes first and charges the shared
+        // budget before the queue is touched.
+        let mut ticks = 1;
+        let mut total_remaining = 0;
+        let done = loop {
+            let mut r = 20;
+            let d = p.service_budgeted(&m, &mut r, ticks);
+            total_remaining += r;
+            if !d.is_empty() {
+                break d;
+            }
+            ticks += 1;
+        };
+        assert_eq!(done[0].0, UnitId(2));
+        let path = done[0].1.as_ref().unwrap();
+        assert_eq!(path.last(), Some(&far));
+        // `full - 16` expansions remained after tick 0, 20 per tick.
+        assert_eq!(ticks, (full - 16).div_ceil(20));
+        assert_eq!(done.len(), 2, "unit 3 finishes in the same tick");
+        assert_eq!(done[1].0, UnitId(3));
+        assert_eq!(total_remaining, 20 * ticks - (full - 16) - 2);
+        assert!(p.is_idle());
+        assert!(p.cache.is_empty(), "disabled cache stores nothing");
+    }
+
+    #[test]
+    fn service_leaves_future_requests_queued() {
+        let m = Map::open(8, 8);
+        let mut p = Pathing::new(8, true);
+        p.request(req(5, 1, Tile::new(0, 0), Tile::new(1, 0)));
+        assert!(p.service(&m, 100, 4).is_empty());
+        assert_eq!(p.queue.len(), 1);
+        assert_eq!(p.service(&m, 100, 5).len(), 1);
+        assert!(p.is_idle());
+    }
+
+    #[test]
+    fn cache_hit_charges_expansions_and_is_ignored_when_it_does_not_fit() {
+        let m = serpentine(16, 16);
+        let from = Tile::new(0, 0);
+        let to = Tile::new(15, 4);
+        let (_, cost) = run_full(&m, from, to);
+        assert!(cost > 10);
+        let mut p = Pathing::new(8, true);
+        p.request(req(0, 1, from, to));
+        let mut r = cost + 5;
+        let first = p.service_budgeted(&m, &mut r, 0);
+        assert_eq!(r, 5);
+        let key = (
+            0,
+            u32::from(to.y) * 16 + u32::from(to.x),
+            m.cost_grid_generation(),
+        );
+        assert_eq!(p.cache.get(key).unwrap().expansions_used, cost);
+
+        // Fits: the hit completes the request and charges exactly `cost`.
+        p.request(req(1, 2, from, to));
+        let mut r = cost;
+        let hit = p.service_budgeted(&m, &mut r, 1);
+        assert_eq!(hit[0].1, first[0].1);
+        assert_eq!(r, 0);
+        assert!(p.is_idle());
+
+        // Does not fit: the hit is ignored and a real search suspends with
+        // exactly the same state a cache-less run reaches.
+        p.request(req(2, 3, from, to));
+        let mut r = cost - 1;
+        assert!(p.service_budgeted(&m, &mut r, 2).is_empty());
+        assert_eq!(r, 0);
+        let active = p.active.clone().expect("real search suspended");
+        assert_eq!(active.1.expansions, cost - 1);
+        let mut plain = Pathing::new(8, false);
+        plain.request(req(2, 3, from, to));
+        let mut r = cost - 1;
+        assert!(plain.service_budgeted(&m, &mut r, 2).is_empty());
+        assert_eq!(plain.active, Some(active));
+        assert_eq!(
+            postcard::to_allocvec(&p).unwrap(),
+            postcard::to_allocvec(&plain).unwrap()
+        );
+        // Both finish on the next tick with one more expansion.
+        let mut r = 10;
+        let a = p.service_budgeted(&m, &mut r, 3);
+        let mut r2 = 10;
+        let b = plain.service_budgeted(&m, &mut r2, 3);
+        assert_eq!(a, b);
+        assert_eq!((r, r2), (9, 9));
+        assert_eq!(a[0].1, first[0].1);
+    }
+
+    #[test]
+    fn cache_cleared_on_generation_change() {
+        let mut m = Map::open(8, 8);
+        let mut p = Pathing::new(8, true);
+        p.request(req(0, 1, Tile::new(0, 0), Tile::new(7, 0)));
+        p.service(&m, 100, 0);
+        assert_eq!(p.cache.len(), 1);
+        assert!(p.cache.get((0, 7, 0)).is_some());
+        // A no-op write keeps the generation and the cache.
+        assert!(!m.set_blocked(Tile::new(3, 3), false));
+        p.request(req(1, 2, Tile::new(0, 0), Tile::new(7, 0)));
+        p.service(&m, 100, 1);
+        assert_eq!(p.cache.len(), 1);
+        // A real change clears it on the next service and re-keys new entries.
+        assert!(m.set_blocked(Tile::new(3, 3), true));
+        p.request(req(2, 3, Tile::new(0, 0), Tile::new(7, 0)));
+        p.service(&m, 100, 2);
+        assert_eq!(p.cache.len(), 1);
+        assert!(p.cache.get((0, 7, 0)).is_none(), "old generation gone");
+        assert!(p.cache.get((0, 7, 1)).is_some());
+        // Even with nothing queued the stale cache is dropped.
+        m.set_blocked(Tile::new(3, 4), true);
+        assert!(p.service(&m, 100, 3).is_empty());
+        assert!(p.cache.is_empty());
     }
 
     #[test]

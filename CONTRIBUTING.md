@@ -116,7 +116,7 @@ error: use of a disallowed type `f32`
   = note: `-D clippy::disallowed-types` implied by `-D warnings`
 ```
 
-The same holds for `-p rules` and `-p ai`. Use `sim::Fx` for fractional values and `BTreeMap` or `BTreeSet` for collections.
+The same holds for `-p rules` and `-p ai`. Put the line inside an existing function body (a new undocumented `pub fn` adds a second, unrelated `missing documentation` error) and test one crate at a time: `sim` and `ai` depend on `rules`, so if all three carry the line only the `rules` error is reported. Use `sim::Fx` for fractional values and `BTreeMap` or `BTreeSet` for collections.
 
 ## Bevy policy
 

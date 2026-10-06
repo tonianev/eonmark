@@ -108,7 +108,7 @@ The only Bevy crate and the `eonmark` binary. Bevy ECS is used here for presenta
 |---|---|---|
 | `main.rs` | Entry point: dispatches to `headless` or `app` | M0 |
 | `cli.rs` | Flags `--headless-run <ticks>`, `--exit-after-seconds <s>`, `--seed <u64>`, `--data-dir <path>`; data-dir resolution (flag, `$EONMARK_DATA`, checkout `data/`, `<exe dir>/data`) | M0 |
-| `app.rs` | Windowed app: 1280x800 window, `SimHandle` non-send resource, `FixedUpdate` driver at `tick_rate_hz`, window-title tick/hash readout | M0; states `Menu`, `Skirmish`, `Paused`, `GameOver` in M2 |
+| `app.rs` | Windowed app: 1280x800 window titled Eonmark, `SimHandle` non-send resource, `FixedUpdate` driver at `tick_rate_hz` | M0; states `Menu`, `Skirmish`, `Paused`, `GameOver` in M2 |
 | `sim_driver.rs` | `FixedUpdate` driver at 20 Hz, `InputSource` trait (Local, Replay), `PendingCommands`, replay writer thread, 8-ticks-per-frame cap | M2 |
 | `present.rs` | `UnitId -> Entity` mirror, prev/current interpolation, `Visual` to primitive or glTF | M2 (primitives), M7 (glTF) |
 | `camera.rs` | Pitch-locked perspective RTS camera: WASD and arrow pan, edge scroll, trackpad `Pixel` pan, wheel `Line` zoom, `PinchGesture` zoom | M0 (pan, zoom, pinch), M2 (finished with selection and orders) |
@@ -125,7 +125,7 @@ The only Bevy crate and the `eonmark` binary. Bevy ECS is used here for presenta
 
 Features: `dev` (dynamic linking, dev tools, egui panels; never shipped) and `ci_testing` (owner screenshot capture; not used in CI). The crate must keep compiling on Linux; CI enforces this with a compile-only clippy job. Running on Linux is unsupported.
 
-At M0: a window titled Eonmark, a flat matte ground plane with a grid, a directional light, a pan/zoom/pinch camera, a `FixedUpdate` sim driver whose tick and hash appear in the window title, `--headless-run <ticks>`, and an FPS overlay, inspector and sim panel under `dev`.
+At M0: a window titled Eonmark, a flat matte ground plane with a grid, a directional light, a pan/zoom/pinch camera, a `FixedUpdate` sim driver, `--headless-run <ticks>`, and an FPS overlay, inspector and a sim panel (seed, tick, hash) under `dev`.
 
 ### `crates/sim-cli/`
 

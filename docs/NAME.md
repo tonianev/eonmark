@@ -1,41 +1,60 @@
 # The name
 
-This document records why the project is called Eonmark, which availability checks were done on 2026-10-05 and what they found, which checks remain for the owner, and the runner-up names in case a trademark search rejects the primary. It also states the rule that no placeholder crates are published. The only place the inspiration's title appears is [design/prior-art.md](design/prior-art.md) and the one disclaimed sentence in [README.md](../README.md); this file does not name it.
+This document records why the project is called Eonmark, which availability and trademark checks were done, what they found, the runner-up names in case a conflict ever appears, and the rule that no placeholder crates are published. The only places the inspiration's title appears are [design/prior-art.md](design/prior-art.md) and the one disclaimed sentence in [README.md](../README.md); this file does not name it.
 
 ## Why Eonmark
 
-"Eon" for the ages a match moves through. "Mark" for a borderland, as in Denmark or the medieval marches. The two signature systems of the game, tech-gated ages and territory borders, in one calm word. It is short, pronounceable, spelled as it sounds, and has no existing meaning in software or games that we could find.
+"Eon" for the ages a match moves through. "Mark" for a borderland, as in Denmark or the medieval marches. The two signature systems of the game, tech-gated ages and territory borders, in one calm word. It is short, pronounceable, spelled as it sounds, and no software product, game or trademark using it was found in the checks below.
 
 Where it appears: the repository `tonianev/eonmark`, the binary `eonmark`, the bundle identifier `com.tonianev.eonmark`, the window title, the `.app` name and the GitHub topics. The workspace crates are named `sim`, `rules`, `ai`, `game` and `sim-cli`; none of them is published.
 
-## Checked on 2026-10-05
+## Checks
 
-| Where | Query | Result |
+First pass 2026-10-05 (planning), full pass 2026-10-06 (M0 close). Register searches were run in a browser and the result pages saved under [name/](name/). Command-line checks list the exact command so they can be re-run.
+
+### Trademark registers (2026-10-06)
+
+| Register | Query | Result | Evidence |
+|---|---|---|---|
+| USPTO Trademark Search (tmsearch.uspto.gov), all classes incl. 9 and 41 | Wordmark contains `eonmark` | No results found. Live 0, Dead 0. | [name/uspto-eonmark-2026-10-06.jpg](name/uspto-eonmark-2026-10-06.jpg) |
+| USPTO Trademark Search, all classes | Wordmark contains `eon mark` | No results found. | same session, not saved |
+| EUIPO eSearch plus | `eonmark` (contains) | 1 result: EUTM 001862671 `EYEONMARKET`, word mark, Intel Corporation, Nice classes 35, 38, 42, status "Application withdrawn", last publication 2015. A substring hit in unrelated classes; not a conflict. Designs 0, Owners 0, Representatives 0. | [name/euipo-eonmark-2026-10-06.jpg](name/euipo-eonmark-2026-10-06.jpg) |
+| WIPO Global Brand Database (branddb.wipo.int) | Brand name contains `eonmark` | No results found (76.9 million records, 89 sources). | [name/wipo-eonmark-2026-10-06.jpg](name/wipo-eonmark-2026-10-06.jpg) |
+
+No live or dead mark in class 9 (software, downloadable games) or class 41 (entertainment services, online games) anywhere. The stop rule did not fire.
+
+### Platforms and registries
+
+| Where | Command or query | Result 2026-10-05 | Result 2026-10-06 |
+|---|---|---|---|
+| crates.io | `curl -s -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/eonmark` | 404 | 404 (also `eonmark-sim` 404, `eonmark-rules` 404) |
+| Steam store | `https://store.steampowered.com/search/?term=eonmark` | 0 results | 0 result rows; JSON endpoint `items: []` |
+| itch.io search | `https://itch.io/search?q=eonmark` | 0 results | 0 games named eonmark (two unrelated fuzzy hits) |
+| itch.io slug | `curl -s -o /dev/null -w '%{http_code}' https://eonmark.itch.io` | not checked | 404, free (`itch.io/profile/eonmark` 404) |
+| GitHub repository search | `gh api 'search/repositories?q=eonmark+in:name'` | only an unrelated `eonmarket` repository | `tonianev/eonmark` (this project) and the same unrelated `eonmarket-catalogue` |
+| GitHub user or organization | `gh api users/eonmark`, `gh api orgs/eonmark` | free | 404, 404, free |
+| GitHub repository `tonianev/eonmark` | `gh repo view` | free | created 2026-10-05, public |
+
+### Domains (2026-10-06, registry RDAP via rdap.org, cross-checked with whois)
+
+| Domain | Result | Notes |
 |---|---|---|
-| crates.io | `eonmark` | 404, no crate |
-| Steam store search | `eonmark` | 0 results |
-| itch.io search | `eonmark` | 0 results |
-| GitHub repository search | `eonmark` | Only an unrelated repository named `eonmarket` |
-| GitHub user or organization | `eonmark` | Free |
-| GitHub repository | `tonianev/eonmark` | Free |
+| `eonmark.com` | Registered | Registered 2026-04-17 by DropCatch.com 716 LLC, parked and listed for sale through HugeDomains, expires 2027-04-17. A drop-catch registration, which suggests the name had an earlier, expired owner. Not used by any product. |
+| `eonmark.dev` | Not registered | Google Registry RDAP 404 |
+| `eonmark.games` | Not registered | Identity Digital RDAP 404 |
+| `eonmark.io` | Not registered | whois.nic.io: not found |
 
-## Remaining for the owner
+Recommendation: use `eonmark.dev` as the project domain and register it before the v0.1.0 announcement (M8). `eonmark.com` is parked by a reseller and is not worth buying for an open-source game; a prominent `.dev` plus the GitHub repository is enough for discoverability. Registering a domain needs the owner's account and payment, so it is an owner task listed in [ROADMAP.md](ROADMAP.md) under M8.
 
-These checks need a human, a browser, and in some cases an account. Record the date and save a screenshot of each result page; link the screenshot in the Evidence column. Do them before M0 closes; the M0 acceptance list in [ROADMAP.md](ROADMAP.md) requires it.
+### Remaining for the owner
 
-| Check | Where | What to look for | Date | Result | Evidence |
-|---|---|---|---|---|---|
-| USPTO trademark search, class 9 | tmsearch.uspto.gov | Live marks for "eonmark" or close spellings in class 9 (software, downloadable games) | | | |
-| USPTO trademark search, class 41 | tmsearch.uspto.gov | Live marks in class 41 (entertainment services, online games) | | | |
-| EUIPO eSearch plus | euipo.europa.eu | EU trade marks for "eonmark" | | | |
-| WIPO Global Brand Database | branddb.wipo.int | International registrations for "eonmark" | | | |
-| Domain `eonmark.com` | any registrar | Available or parked | | | |
-| Domain `eonmark.dev` | any registrar | Available or parked | | | |
-| Domain `eonmark.games` | any registrar | Available or parked | | | |
-| itch.io slug | itch.io | `eonmark.itch.io` or the project slug `eonmark` free | | | |
-| GitHub user or org `eonmark` | github.com | Still free at the time of the public launch | | | |
+| Task | When | Why |
+|---|---|---|
+| Register `eonmark.dev` (or `.games`) | Before M8 | Name protection comes from the repository, the domain and the itch.io page |
+| Re-run the four register and platform checks and append a dated row | At M8, before the public announcement | A conflict can appear at any time; the M0 result is a snapshot |
+| Create the itch.io page `eonmark.itch.io` | M8 | Claims the slug; releases are published there and on GitHub |
 
-A trademark hit in class 9 or 41 for games or software is a stop: switch to a runner-up before the repository goes public. A hit in an unrelated class (clothing, cosmetics) is noted and does not block.
+A trademark hit in class 9 or 41 for games or software is a stop: switch to a runner-up before announcing. A hit in an unrelated class (clothing, cosmetics) is noted and does not block.
 
 ## Runner-up names
 
@@ -43,7 +62,7 @@ In order of preference. Each was checked on crates.io, Steam and GitHub on 2026-
 
 | Name | Rationale | Status |
 |---|---|---|
-| Marchfall | "March" is a frontier province; slightly martial; second choice if the trademark search rejects Eonmark | crates.io 404, Steam 0, GitHub 0 |
+| Marchfall | "March" is a frontier province; slightly martial; second choice if a trademark conflict ever appears | crates.io 404, Steam 0, GitHub 0 |
 | Hearthmarch | Hearth (towns as anchors) plus march (border land); warm and calm; longer to type | crates.io 404, Steam 0, GitHub 0 |
 | Boundstone | Boundary stones mark borders; a GitHub org `boundstone` and an unrelated repository already exist, so the slug is contested | crates.io 404, Steam 0, itch 0 |
 | Cadastre | The land register of parcel ownership; thematically exact but a generic GIS term with many unrelated repositories and an existing Rust strategy game using the word | crates.io 404, Steam 0 |

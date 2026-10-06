@@ -15,13 +15,21 @@
 //!    is consumed when the unit is within the kind's `waypoint_radius` of
 //!    it, or once the unit is closer to the following waypoint than the
 //!    waypoint itself is; the final one when within the arrive radius,
-//!    which clears the order and emits [`SimEvent::UnitArrived`].
+//!    which clears the order, records the final waypoint's centre as the
+//!    unit's [`Post`] and emits [`SimEvent::UnitArrived`].
+//!    Return to post: an arrived unit (no order, a post) that has been
+//!    pushed farther than the kind's `return_to_post_radius` from its post
+//!    steers straight back to it with the same arrival steering, no path
+//!    request, until it is within the arrive radius again (`Post::returning`
+//!    carries the hysteresis across ticks). If terrain blocks the straight
+//!    line the post becomes a `MoveOrder` and the unit requests a path like
+//!    an ordinary move.
 //! 2. Separation from neighbours read from the grid: for each neighbour
 //!    closer than `radius_a + radius_b + separation`, accumulate a push-away
 //!    vector of the penetration depth. Compare with `dist_sq_i64`, never a
 //!    square root. The sum is capped at `speed / separation_push_moving_div`
-//!    (moving) or `speed / separation_push_idle_div` (no order) so steering
-//!    keeps the upper hand.
+//!    (an order, or returning to post) or `speed / separation_push_idle_div`
+//!    (parked) so steering keeps the upper hand.
 //! 3. Integrate: `pos += clamp(desired + separation, speed)`, sliding along
 //!    a blocked tile's wall (x-only, then y-only) instead of entering it.
 //! 4. After every unit has moved, circle-vs-circle correction over
@@ -41,7 +49,7 @@
 use crate::fx::{Fx, FxVec2};
 use crate::ids::UnitId;
 use crate::map::Map;
-use crate::state::{SimEvent, Unit};
+use crate::state::{MoveOrder, Post, SimEvent, Unit};
 use rules::Rules;
 use std::collections::BTreeMap;
 
@@ -141,6 +149,8 @@ struct KindParams {
     waypoint_sq: i64,
     /// Separation margin added to the sum of radii.
     separation: Fx,
+    /// An arrived unit pushed farther than this from its post walks back.
+    return_radius: Fx,
 }
 
 fn kind_params(rules: &Rules) -> Vec<KindParams> {
@@ -154,9 +164,28 @@ fn kind_params(rules: &Rules) -> Vec<KindParams> {
                 slowdown: crate::state::fx_from_x100(k.arrive_slowdown_radius_tiles_x100),
                 waypoint_sq: (waypoint * waypoint).to_bits(),
                 separation: crate::state::fx_from_x100(k.separation_tiles_x100),
+                return_radius: crate::state::fx_from_x100(k.return_to_post_radius_tiles_x100),
             }
         })
         .collect()
+}
+
+/// Velocity of magnitude `speed` from `pos` toward `target`, scaled down
+/// linearly inside `slowdown` of it and never longer than the remaining
+/// distance, so the unit stops on the target instead of overshooting.
+/// Returns the velocity and the distance. Zero velocity at the target.
+fn arrival_steer(pos: FxVec2, target: FxVec2, speed: Fx, slowdown: Fx) -> (FxVec2, Fx) {
+    let delta = sub(pos, target);
+    let dist = length(delta);
+    if dist == Fx::ZERO {
+        return (FxVec2::ZERO, dist);
+    }
+    let mut mag = speed;
+    if dist < slowdown {
+        mag = speed * dist / slowdown;
+    }
+    mag = mag.min(dist);
+    (rescale(delta, mag, dist), dist)
 }
 
 /// `speed / div` for a `rules.ron` divisor (validated `> 0`).
@@ -246,6 +275,16 @@ fn slide(map: &Map, from: FxVec2, v: FxVec2) -> (FxVec2, bool) {
 ///   500-unit crossing, 8 keeps 95% of arrived units within 3 tiles of
 ///   their goal. Two coincident units push along the x axis, the higher id
 ///   eastward. Units later in id order see earlier units' updated positions.
+/// - Return to post (`SIM_VERSION` 3) closes the remaining gap: a parked
+///   unit pushed more than `return_to_post_radius_tiles_x100` (one tile)
+///   from the centre it arrived at walks back with the normal arrival
+///   steering and the moving push cap, and is parked again (idle cap) once
+///   within the arrive radius. Posts of a group order are distinct spiral
+///   tiles, so a block that has converged holds still: the 100-unit
+///   convergence test asserts a constant hash over its last 100 ticks.
+///   Two units that share one post (a spiral cut by the map edge pads with
+///   the last target) jostle around it; that is the documented padding
+///   case, not the normal one.
 /// - A step that would enter a blocked tile (or leave the map) slides along
 ///   the wall (x-only, then y-only) and otherwise stays put.
 /// - `facing` is the normalised velocity of the last tick the unit moved
@@ -282,52 +321,69 @@ pub fn step(
         let u = &units[id];
         let p = &params[usize::from(u.kind.0)];
 
-        // 1. Arrival steering (units with a path). Units without an order,
+        // 1. Arrival steering (units with a path), or the walk back to the
+        //    post (arrived units pushed away from it). Units without either,
         //    or waiting for their path, have no desired velocity but still
         //    take part in separation below, so a moving crowd can shove a
         //    parked unit aside instead of jamming against it.
         let mut desired = FxVec2::ZERO;
         let mut next: Option<usize> = None;
         let mut needs_repath = false;
-        if let Some(order) = &u.order
-            && !order.path.is_empty()
-        {
-            let last = order.path.len() - 1;
-            let mut i = usize::try_from(order.next).expect("fits").min(last);
-            while i < last {
-                let here = map.center_of(order.path[i]);
-                let ahead = map.center_of(order.path[i + 1]);
-                // Consumed when within the waypoint radius, or once the
-                // unit is already closer to the following waypoint than
-                // this one is (it has been passed; steering back would be
-                // a detour).
-                if u.pos.dist_sq_i64(here) < p.waypoint_sq
-                    || u.pos.dist_sq_i64(ahead) < here.dist_sq_i64(ahead)
-                {
-                    i += 1;
-                } else {
-                    break;
+        // `Some(active)` for a unit holding a post: whether it walks back
+        // this tick, which becomes its new `Post::returning`.
+        let mut returning: Option<bool> = None;
+        if let Some(order) = &u.order {
+            if !order.path.is_empty() {
+                let last = order.path.len() - 1;
+                let mut i = usize::try_from(order.next).expect("fits").min(last);
+                while i < last {
+                    let here = map.center_of(order.path[i]);
+                    let ahead = map.center_of(order.path[i + 1]);
+                    // Consumed when within the waypoint radius, or once the
+                    // unit is already closer to the following waypoint than
+                    // this one is (it has been passed; steering back would
+                    // be a detour).
+                    if u.pos.dist_sq_i64(here) < p.waypoint_sq
+                        || u.pos.dist_sq_i64(ahead) < here.dist_sq_i64(ahead)
+                    {
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
+                let target = map.center_of(order.path[i]);
+                let slowdown = if i == last { p.slowdown } else { Fx::ZERO };
+                let (v, dist) = arrival_steer(u.pos, target, u.speed, slowdown);
+                if i == last && dist <= p.arrive {
+                    let u = units.get_mut(id).expect("exists");
+                    u.order = None;
+                    u.post = Some(Post {
+                        goal: target,
+                        returning: false,
+                    });
+                    events.push(SimEvent::UnitArrived { unit: *id });
+                    continue;
+                }
+                desired = v;
+                needs_repath = !map.passable(order.path[i]) || tick >= order.repath_at;
+                next = Some(i);
             }
-            let target = map.center_of(order.path[i]);
-            let delta = sub(u.pos, target);
+        } else if let Some(post) = u.post {
+            // Return to post: start walking back once pushed beyond the
+            // kind's return radius, keep walking until back within the
+            // arrive radius (the gap between the two is the hysteresis that
+            // stops a unit on the boundary from dithering).
+            let delta = sub(u.pos, post.goal);
             let dist = length(delta);
-            if i == last && dist <= p.arrive {
-                let u = units.get_mut(id).expect("exists");
-                u.order = None;
-                events.push(SimEvent::UnitArrived { unit: *id });
-                continue;
+            let active = if post.returning {
+                dist > p.arrive
+            } else {
+                dist > p.return_radius
+            };
+            if active {
+                desired = arrival_steer(u.pos, post.goal, u.speed, p.slowdown).0;
             }
-            let mut mag = u.speed;
-            if i == last && dist < p.slowdown {
-                mag = u.speed * dist / p.slowdown;
-            }
-            mag = mag.min(dist);
-            if dist > Fx::ZERO {
-                desired = rescale(delta, mag, dist);
-            }
-            needs_repath = !map.passable(order.path[i]) || tick >= order.repath_at;
-            next = Some(i);
+            returning = Some(active);
         }
 
         // 2. Separation.
@@ -356,9 +412,12 @@ pub fn step(
         // 3. Integrate with the speed clamp. The push is capped first (the
         //    `separation_push_*_div` rules) so the desired direction always
         //    keeps the upper hand: in a dense crowd the sum of pushes would
-        //    otherwise drown the steering and stall the flow.
+        //    otherwise drown the steering and stall the flow. A unit walking
+        //    back to its post counts as moving only while it is outside the
+        //    arrive radius; once back it yields like any parked unit, so two
+        //    neighbours cannot shove each other back and forth forever.
         let plen = length(push);
-        let cap = if u.order.is_some() {
+        let cap = if u.order.is_some() || returning == Some(true) {
             push_cap(u.speed, moving_div)
         } else {
             push_cap(u.speed, idle_div)
@@ -372,11 +431,6 @@ pub fn step(
             v = rescale(v, u.speed, vlen);
         }
         let (new_pos, moved) = slide(map, u.pos, v);
-        let Some(next) = next else {
-            // No path: only the push applies, facing is kept.
-            units.get_mut(id).expect("exists").pos = new_pos;
-            continue;
-        };
         let blocked = v != FxVec2::ZERO && !moved;
         let facing = if vlen > Fx::ZERO {
             Some(FxVec2::new(v.x / vlen, v.y / vlen))
@@ -386,14 +440,45 @@ pub fn step(
 
         let u = units.get_mut(id).expect("exists");
         u.pos = new_pos;
-        if let Some(f) = facing {
-            u.facing = f;
-        }
-        if let Some(order) = &mut u.order {
-            order.next = u32::try_from(next).expect("fits");
-        }
-        if needs_repath || blocked {
-            repath.push(*id);
+        match (next, returning) {
+            (Some(next), _) => {
+                if let Some(f) = facing {
+                    u.facing = f;
+                }
+                if let Some(order) = &mut u.order {
+                    order.next = u32::try_from(next).expect("fits");
+                }
+                if needs_repath || blocked {
+                    repath.push(*id);
+                }
+            }
+            (None, Some(active)) => {
+                if let Some(post) = &mut u.post {
+                    post.returning = active;
+                }
+                if active {
+                    if let Some(f) = facing {
+                        u.facing = f;
+                    }
+                    if blocked {
+                        // Terrain lies between the unit and its post: path
+                        // there like an ordinary move (`Sim::step` turns
+                        // the returned id into the `PathRequest`); arriving
+                        // makes it a post again.
+                        let goal = u.post.take().expect("returning units hold a post").goal;
+                        u.order = Some(MoveOrder {
+                            goal,
+                            path: Vec::new(),
+                            next: 0,
+                            repath_at: tick + rules.repath_interval_ticks(),
+                        });
+                        repath.push(*id);
+                    }
+                }
+            }
+            // No path and no post (or no order yet): only the push applied
+            // and the facing is kept.
+            (None, None) => {}
         }
     }
 
@@ -479,6 +564,7 @@ mod tests {
             radius: Fx::from_ratio(35, 100),
             speed: Fx::from_ratio(9, 100),
             order: None,
+            post: None,
         }
     }
 
@@ -661,6 +747,117 @@ mod tests {
             vec![UnitId(1)],
             "a fully blocked step asks for a repath"
         );
+    }
+
+    #[test]
+    fn arrival_records_a_post() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let map = Map::open(16, 16);
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 2, 2);
+        u.pos = map.center_of(Tile::new(2, 2));
+        u.order = Some(order(vec![Tile::new(2, 2), Tile::new(4, 2)], &map));
+        units.insert(UnitId(1), u);
+        run(&mut units, &map, &rules, 60);
+        let u = &units[&UnitId(1)];
+        assert!(u.order.is_none());
+        assert_eq!(
+            u.post,
+            Some(Post {
+                goal: map.center_of(Tile::new(4, 2)),
+                returning: false
+            })
+        );
+    }
+
+    #[test]
+    fn displaced_unit_returns_to_post_and_parks_again() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let map = Map::open(16, 16);
+        let goal = map.center_of(Tile::new(8, 8));
+        let post = Some(Post {
+            goal,
+            returning: false,
+        });
+        // Pushed 0.9 tiles: inside the return radius (1 tile), stays put.
+        let mut units = BTreeMap::new();
+        let mut near = unit(1, 0, 0);
+        near.pos = FxVec2::new(goal.x + Fx::from_ratio(9, 10), goal.y);
+        near.post = post;
+        units.insert(UnitId(1), near);
+        let before = units[&UnitId(1)].pos;
+        let (events, repath) = run(&mut units, &map, &rules, 5);
+        assert!(events.is_empty() && repath.is_empty());
+        assert_eq!(units[&UnitId(1)].pos, before);
+        assert_eq!(units[&UnitId(1)].post, post);
+        // Pushed 1.5 tiles east: walks back west at full speed, faces west,
+        // is `returning` while outside the arrive radius and parked again
+        // (returning cleared) once inside it, where it stays.
+        let mut units = BTreeMap::new();
+        let mut far = unit(2, 0, 0);
+        far.pos = FxVec2::new(goal.x + Fx::from_ratio(3, 2), goal.y);
+        far.post = post;
+        units.insert(UnitId(2), far);
+        run(&mut units, &map, &rules, 1);
+        let u = &units[&UnitId(2)];
+        assert_eq!(
+            u.pos.x,
+            goal.x + Fx::from_ratio(3, 2) - Fx::from_ratio(9, 100)
+        );
+        assert_eq!(u.pos.y, goal.y);
+        assert!(u.post.unwrap().returning);
+        assert!(
+            u.facing.x < Fx::ZERO && u.facing.y == Fx::ZERO,
+            "faces west"
+        );
+        // 1.25 tiles to the arrive radius at 0.09 per tick is 14 ticks; the
+        // slowdown inside half a tile adds a few.
+        let (events, repath) = run(&mut units, &map, &rules, 40);
+        assert!(events.is_empty(), "no UnitArrived for a return");
+        assert!(repath.is_empty());
+        let u = &units[&UnitId(2)];
+        let arrive = Fx::from_ratio(25, 100);
+        assert!(u.pos.dist_sq_i64(goal) <= (arrive * arrive).to_bits());
+        assert!(!u.post.unwrap().returning, "parked again");
+        let settled = u.pos;
+        run(&mut units, &map, &rules, 20);
+        assert_eq!(units[&UnitId(2)].pos, settled, "a parked unit holds still");
+    }
+
+    #[test]
+    fn returning_unit_blocked_by_terrain_asks_for_a_path() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let mut map = Map::open(8, 8);
+        for y in 0..8 {
+            map.set_blocked(Tile::new(4, y), true);
+        }
+        let goal = map.center_of(Tile::new(6, 3));
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 3, 3);
+        // Against the west face of the wall, post on the far side.
+        u.pos = FxVec2::new(Fx::from_ratio(395, 100), Fx::from_ratio(35, 10));
+        u.post = Some(Post {
+            goal,
+            returning: false,
+        });
+        units.insert(UnitId(1), u);
+        let (events, repath) = run(&mut units, &map, &rules, 1);
+        assert!(events.is_empty());
+        assert_eq!(
+            repath,
+            vec![UnitId(1)],
+            "the blocked return asks for a path"
+        );
+        let u = &units[&UnitId(1)];
+        assert!(u.post.is_none());
+        let order = u.order.as_ref().expect("the post became an order");
+        assert_eq!(order.goal, goal);
+        assert!(order.path.is_empty(), "waiting for the path");
+        assert_eq!(order.repath_at, rules.repath_interval_ticks());
+        assert!(map.passable(map.tile_of(u.pos)));
     }
 
     #[test]

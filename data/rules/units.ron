@@ -3,6 +3,8 @@
 // scaled by 100 (180 = 1.80 tiles per second). The sim converts speed to
 // tiles per tick and radii to fixed-point exactly once, at spawn.
 // Combat stats, costs and trainer buildings arrive in M3a / M4a.
+// return_to_post_radius_tiles_x100: an arrived unit pushed farther than this
+// from the tile centre it arrived at walks straight back (100 = one tile).
 (
   units: [
     (
@@ -14,6 +16,7 @@
       arrive_slowdown_radius_tiles_x100: 50,
       waypoint_radius_tiles_x100: 50,
       separation_tiles_x100: 10,
+      return_to_post_radius_tiles_x100: 100,
     ),
   ],
 )

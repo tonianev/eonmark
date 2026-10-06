@@ -352,6 +352,10 @@ mod tests {
                 .arrive_slowdown_radius_tiles_x100,
             50
         );
+        assert_eq!(
+            rules.unit_kind(0).unwrap().return_to_post_radius_tiles_x100,
+            100
+        );
         assert_eq!(rules.yield_cap(0), 70);
         assert_eq!(rules.yield_cap(99), 200);
         assert_eq!(rules.pop_cap(2), 75);
@@ -482,7 +486,11 @@ mod tests {
         let dir = copied_data_dir("rules-version-zero");
         let path = dir.join("rules/rules.ron");
         let text = std::fs::read_to_string(&path).unwrap();
-        let text = text.replacen("rules_version: 2,", "rules_version: 0,", 1);
+        let text = text.replacen("rules_version: 3,", "rules_version: 0,", 1);
+        assert!(
+            text.contains("rules_version: 0,"),
+            "repo rules_version moved"
+        );
         std::fs::write(&path, text).unwrap();
         let err = Rules::load(&dir).unwrap_err();
         let msg = err.to_string();

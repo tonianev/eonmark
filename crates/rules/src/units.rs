@@ -34,6 +34,17 @@ pub struct UnitKind {
     /// Extra margin added to the sum of two radii before separation pushes
     /// neighbours apart, in tiles times 100.
     pub separation_tiles_x100: u32,
+    /// An arrived unit that is pushed farther than this from its post (the
+    /// tile centre it arrived at) walks straight back to it, in tiles times
+    /// 100 (`100` is one tile). At least `arrive_radius_tiles_x100`; `100`
+    /// when the field is absent.
+    #[serde(default = "default_return_to_post_radius_tiles_x100")]
+    pub return_to_post_radius_tiles_x100: u32,
+}
+
+/// Default for [`UnitKind::return_to_post_radius_tiles_x100`]: one tile.
+fn default_return_to_post_radius_tiles_x100() -> u32 {
+    100
 }
 
 /// Contents of `data/rules/units.ron`.
@@ -126,6 +137,17 @@ impl Units {
                 ));
             }
             bounded("separation_tiles_x100", u.separation_tiles_x100)?;
+            positive(
+                "return_to_post_radius_tiles_x100",
+                u.return_to_post_radius_tiles_x100,
+            )?;
+            if u.return_to_post_radius_tiles_x100 < u.arrive_radius_tiles_x100 {
+                return Err(Error::invalid(
+                    path,
+                    &field("return_to_post_radius_tiles_x100"),
+                    "must be >= arrive_radius_tiles_x100",
+                ));
+            }
         }
         Ok(())
     }
@@ -155,6 +177,7 @@ mod tests {
             arrive_slowdown_radius_tiles_x100: 50,
             waypoint_radius_tiles_x100: 50,
             separation_tiles_x100: 10,
+            return_to_post_radius_tiles_x100: 100,
         }
     }
 
@@ -200,6 +223,29 @@ mod tests {
             err.contains("units[0].arrive_slowdown_radius_tiles_x100"),
             "{err}"
         );
+        let mut u = sample();
+        u.units[0].return_to_post_radius_tiles_x100 = 0;
+        let err = u.validate(Path::new("u.ron")).unwrap_err().to_string();
+        assert!(
+            err.contains("units[0].return_to_post_radius_tiles_x100"),
+            "{err}"
+        );
+        let mut u = sample();
+        u.units[0].return_to_post_radius_tiles_x100 = 24;
+        let err = u.validate(Path::new("u.ron")).unwrap_err().to_string();
+        assert!(
+            err.contains("units[0].return_to_post_radius_tiles_x100")
+                && err.contains(">= arrive_radius_tiles_x100"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn return_to_post_radius_defaults_to_one_tile() {
+        let text = r#"(units: [(id: "yeoman", name: "Yeoman", speed_tiles_per_s_x100: 180, radius_tiles_x100: 35, arrive_radius_tiles_x100: 25, arrive_slowdown_radius_tiles_x100: 50, waypoint_radius_tiles_x100: 50, separation_tiles_x100: 10)])"#;
+        let u = crate::parse_ron::<Units>(Path::new("u.ron"), text).unwrap();
+        assert_eq!(u.units[0].return_to_post_radius_tiles_x100, 100);
+        u.validate(Path::new("u.ron")).unwrap();
     }
 
     #[test]

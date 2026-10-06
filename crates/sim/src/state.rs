@@ -33,7 +33,11 @@ use std::collections::{BTreeMap, BTreeSet};
 ///
 /// 2: `Pathing::service` stops walking the queue once the tick's budget is
 /// spent instead of parking a zero-expansion search as `active`.
-pub const SIM_VERSION: u32 = 2;
+///
+/// 3: an arrived unit keeps a [`Post`] (`Unit::post`, new hashed state) and
+/// walks straight back to it when pushed farther than its kind's
+/// `return_to_post_radius_tiles_x100`.
+pub const SIM_VERSION: u32 = 3;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +148,20 @@ pub struct MoveOrder {
     pub repath_at: u32,
 }
 
+/// Where an arrived unit stands: set when a [`MoveOrder`] completes, cleared
+/// by a new order or a Stop. A unit pushed farther than its kind's
+/// `return_to_post_radius_tiles_x100` from `goal` walks straight back
+/// (`returning`) until it is within the arrive radius again; see
+/// `movement::step`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Post {
+    /// Centre of the final waypoint the unit arrived at (the
+    /// component-corrected goal tile).
+    pub goal: FxVec2,
+    /// `true` while the unit is walking back after a displacement.
+    pub returning: bool,
+}
+
 /// A unit. Combat fields arrive in M4a.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
@@ -164,6 +182,9 @@ pub struct Unit {
     pub speed: Fx,
     /// Current movement order, if any.
     pub order: Option<MoveOrder>,
+    /// The spot an arrived unit holds, if any (`None` while it has an order
+    /// or after a Stop).
+    pub post: Option<Post>,
 }
 
 /// A building. M0 placeholder: fields are filled by M3a (construction).
@@ -587,6 +608,7 @@ impl Sim {
                         next: 0,
                         repath_at,
                     });
+                    u.post = None;
                     let from = self.state.map.tile_of(u.pos);
                     let to = self.state.map.tile_of(goal);
                     self.state.pathing.request(PathRequest {
@@ -606,6 +628,7 @@ impl Sim {
                 for unit in stopped {
                     if let Some(u) = self.state.units.get_mut(&unit) {
                         u.order = None;
+                        u.post = None;
                     }
                     self.state.pathing.cancel(unit);
                 }
@@ -653,6 +676,7 @@ impl Sim {
                             radius,
                             speed,
                             order: None,
+                            post: None,
                         },
                     );
                     self.events.push(SimEvent::UnitSpawned { unit: id });

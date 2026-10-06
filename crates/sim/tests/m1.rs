@@ -229,6 +229,79 @@ fn small_group_arrives_on_distinct_tiles() {
 }
 
 #[test]
+fn return_to_post_converges_100_units_and_settles() {
+    // 100 units spawned in a block at the west start converge on one click
+    // 15 tiles east. The front ranks arrive first and are shoved by the
+    // ranks behind; return to post (`units.ron`,
+    // `return_to_post_radius_tiles_x100`) walks them back. After 3000
+    // ticks every unit is within 3 tiles of its own spiral target and the
+    // block holds still: the `units` sub-hash is constant over the last 100
+    // ticks (no perpetual motion between neighbours; the whole-state hash
+    // cannot be constant because it covers the tick counter) and pathing is
+    // idle (no returning unit is stuck asking for paths).
+    let click = FxVec2::from_ints(39, 64);
+    let mut sim = scenario(21);
+    let delay = sim.setup().cmd_delay;
+    sim.step(&[spawn(0, 0, WEST, 100)]);
+    for _ in 0..delay {
+        sim.step(&[]);
+    }
+    let mv = move_all(0, 1, &sim, click);
+    sim.step(std::slice::from_ref(&mv));
+    for _ in 0..delay {
+        sim.step(&[]);
+    }
+    // The Move has applied: capture each unit's own spiral target.
+    let goals: BTreeMap<UnitId, FxVec2> = sim
+        .view()
+        .units()
+        .map(|u| (u.id, u.order.as_ref().expect("ordered").goal))
+        .collect();
+    assert_eq!(goals.len(), 100);
+    let total = 3000u32;
+    let settle = 100u32;
+    let mut hashes = Vec::with_capacity(settle as usize);
+    for t in sim.tick()..total {
+        sim.step(&[]);
+        if t >= total - settle {
+            hashes.push(sim.sub_hashes().units);
+        }
+    }
+    assert_eq!(hashes.len(), settle as usize);
+    assert!(
+        sim.view().pathing().is_idle(),
+        "pathing is idle once settled"
+    );
+    let map = sim.view().map();
+    let mut worst = 0i64;
+    for u in sim.view().units() {
+        assert!(u.order.is_none(), "{:?} still has an order", u.id);
+        let post = u.post.expect("every unit arrived and holds a post");
+        assert_eq!(post.goal, goals[&u.id], "{:?} holds its own target", u.id);
+        assert!(!post.returning, "{:?} is still walking back", u.id);
+        assert!(map.passable(map.tile_of(u.pos)));
+        worst = worst.max(u.pos.dist_sq_i64(goals[&u.id]));
+    }
+    assert!(
+        worst <= (3 * 3) << 32,
+        "worst unit is {worst} (I32F32-scaled squared tiles) from its goal"
+    );
+    assert!(
+        hashes.iter().all(|h| *h == hashes[0]),
+        "the block must hold still over the last {settle} ticks"
+    );
+    let arrived = sim
+        .drain_events()
+        .iter()
+        .filter(|e| matches!(e, sim::SimEvent::UnitArrived { .. }))
+        .count();
+    assert!(
+        arrived >= 100,
+        "every unit arrived at least once: {arrived}"
+    );
+}
+
+#[test]
 fn restore_rebuilds_caches() {
     let mut a = scenario(3);
     for t in 0..200 {

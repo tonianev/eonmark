@@ -16,13 +16,16 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
-Recorded 2026-10-06 at `rules_version` 2, `SIM_VERSION` 2 (first creation was
-at 1/1 the same day; the bump moved the movement constants into `rules.ron` and
-`units.ron`, added the replay clean-exit trailer and stopped `Pathing::service`
-from parking a zero-expansion search; every final hash is unchanged from the
-first recording, only the intermediate `pathing` sub-hashes of saturated ticks
-and the header differ):
-`cargo run -p sim-cli --release -- record --scenario <name> --out crates/sim/tests/fixtures/<name>.eonreplay`.
+Recorded 2026-10-06 at `rules_version` 3, `SIM_VERSION` 3 (return to post:
+an arrived unit keeps a `Post` and walks back to it when pushed more than
+`return_to_post_radius_tiles_x100` away; `Unit.post` joined the serialised
+state, so every hash changed, including `move_500_short`, whose 300 ticks see
+no arrival). Earlier recordings the same day: 1/1 (first creation) and 2/2
+(movement constants moved into `rules.ron` and `units.ron`, replay clean-exit
+trailer, `Pathing::service` no longer parks a zero-expansion search; final
+hashes unchanged from 1/1). Command:
+`cargo run -p sim-cli --release -- record --scenario <name> --out crates/sim/tests/fixtures/<name>.eonreplay`,
+then the printed `final_hash` goes into `<name>.hash`.
 
 Regeneration policy (docs/DETERMINISM.md, "Golden fixtures"): fixtures change
 only in a commit that bumps `rules_version` in `data/rules/rules.ron` with a

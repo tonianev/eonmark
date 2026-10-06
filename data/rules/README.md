@@ -37,7 +37,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 1 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 3 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -88,8 +88,8 @@ one kind, `yeoman` (index 0). Combat stats, costs and trainer buildings are
 added in M3a / M4a, each with a validator rule. How the movement fields are
 used is specified in `docs/design/pathing.md` ("Movement step"): speed is
 converted once at spawn to tiles per tick (`x100 / (100 * tick_rate_hz)`),
-the radius to fixed-point tiles; the arrive and separation radii are read per
-tick.
+the radius to fixed-point tiles; the arrive, separation and return-to-post
+radii are read per tick.
 
 | Field | Meaning | Yeoman |
 |-------|---------|--------|
@@ -101,10 +101,12 @@ tick.
 | `arrive_slowdown_radius_tiles_x100` | Arrival steering slows the unit linearly inside this radius of its final waypoint; at least the arrive radius | 50 |
 | `waypoint_radius_tiles_x100` | A non-final waypoint counts as reached within this radius (50 = half a tile) | 50 |
 | `separation_tiles_x100` | Margin added to the sum of two radii before separation pushes neighbours apart | 10 |
+| `return_to_post_radius_tiles_x100` | An arrived unit pushed farther than this from the tile centre it arrived at (its post) walks straight back to it and is parked again once within the arrive radius; at least the arrive radius; `100` (one tile) when the field is absent | 100 |
 
 Validation: at least one kind, ids unique and lowercase, `speed_tiles_per_s_x100 > 0`,
 `radius_tiles_x100 > 0`, `waypoint_radius_tiles_x100 > 0`,
-`arrive_slowdown_radius_tiles_x100 >= arrive_radius_tiles_x100`, every `_x100`
+`arrive_slowdown_radius_tiles_x100 >= arrive_radius_tiles_x100`,
+`return_to_post_radius_tiles_x100 > 0` and `>= arrive_radius_tiles_x100`, every `_x100`
 field at most 100000. Errors name the file and `units[i].<field>`.
 
 ## Worked example: slower attrition
@@ -122,7 +124,7 @@ Then bump `rules_version` (replays recorded under the old value will report
 cargo run -p sim-cli -- data-check data
 ```
 
-Expected output starts with `OK rules_version=3` (the repository is at 2). A typo such as
+Expected output starts with `OK rules_version=4` (the repository is at 3). A typo such as
 `attrition_interval_s` fails with the file path, the span and the field:
 
 ```text

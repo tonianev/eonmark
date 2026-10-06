@@ -9,7 +9,7 @@ disallowed-types = [
   { path = "std::time::SystemTime", reason = "wall clock is not simulation state" },
 ]
 disallowed-methods = [
-  { path = "rand::random", reason = "all randomness comes from the Pcg32 stored in Sim" },
-  { path = "rand::thread_rng", reason = "all randomness comes from the Pcg32 stored in Sim" },
-  { path = "rand::rng", reason = "all randomness comes from the Pcg32 stored in Sim" },
+  { path = "rand::random", reason = "all randomness comes from the Pcg32 stored in Sim", allow-invalid = true },
+  { path = "rand::thread_rng", reason = "all randomness comes from the Pcg32 stored in Sim", allow-invalid = true },
+  { path = "rand::rng", reason = "all randomness comes from the Pcg32 stored in Sim", allow-invalid = true },
 ]

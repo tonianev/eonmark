@@ -3,7 +3,7 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  rules_version: 1,
+  rules_version: 3,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",
@@ -34,4 +34,11 @@
   // Pathfinding (M1). Expansions shared by all requests per tick; cache entries.
   path_budget_expansions: 4000,
   path_cache_entries: 1024,
+
+  // Movement (M1). A moving unit repaths every repath_interval_ds (30 ds =
+  // 60 ticks); the separation push is capped at speed / div so steering keeps
+  // the upper hand (moving) and parked units yield slowly to a crowd (idle).
+  repath_interval_ds: 30,
+  separation_push_moving_div: 2,
+  separation_push_idle_div: 8,
 )

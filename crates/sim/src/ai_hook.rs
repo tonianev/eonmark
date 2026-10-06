@@ -6,7 +6,9 @@
 //! same delay queue as a human's.
 
 use crate::command::Command;
-use crate::ids::PlayerId;
+use crate::ids::{PlayerId, UnitId};
+use crate::map::Map;
+use crate::pathing::Pathing;
 use crate::state::{Building, Player, State, Unit};
 use rules::Rules;
 
@@ -50,6 +52,26 @@ impl<'a> SimView<'a> {
     /// Units in id order.
     pub fn units(&self) -> impl Iterator<Item = &'a Unit> + 'a {
         self.state.units.values()
+    }
+
+    /// One unit, if it exists.
+    pub fn unit(&self, id: UnitId) -> Option<&'a Unit> {
+        self.state.units.get(&id)
+    }
+
+    /// Number of units.
+    pub fn unit_count(&self) -> usize {
+        self.state.units.len()
+    }
+
+    /// The tile map (cost grid, generation, components).
+    pub fn map(&self) -> &'a Map {
+        &self.state.map
+    }
+
+    /// The pathing subsystem (queue, active search, cache statistics).
+    pub fn pathing(&self) -> &'a Pathing {
+        &self.state.pathing
     }
 
     /// Buildings in id order.

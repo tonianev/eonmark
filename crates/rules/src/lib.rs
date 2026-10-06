@@ -11,6 +11,7 @@
 //! |------|--------|
 //! | `rules/rules.ron` | [`Rules`] (the fields that are not `skip_deserializing`) |
 //! | `rules/resources.ron` | [`Resources`] |
+//! | `rules/units.ron` | [`Units`] |
 //! | `maps/*.ron` | [`map::MapDef`] |
 //!
 //! Every error names the file and, when the data parsed, the field.
@@ -19,6 +20,7 @@
 
 pub mod map;
 pub mod resources;
+pub mod units;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 pub use map::{MapDef, Symmetry, Terrain, TilePos};
 pub use resources::{Resource, Resources};
+pub use units::{UnitKind, Units};
 
 /// Errors produced while loading or validating rules data.
 #[derive(Debug, thiserror::Error)]
@@ -141,9 +144,22 @@ pub struct Rules {
     pub path_budget_expansions: u32,
     /// Entries kept in the bounded path cache.
     pub path_cache_entries: u32,
+    /// Deciseconds between periodic repaths while a unit is moving
+    /// (`30` = 60 ticks at 20 Hz). Convert with [`Rules::repath_interval_ticks`].
+    pub repath_interval_ds: u32,
+    /// The separation push on a moving unit is capped at `speed / this`, so
+    /// the steering direction keeps at least that share of the weight.
+    pub separation_push_moving_div: u32,
+    /// The separation push on a unit without an order is capped at
+    /// `speed / this`: parked units yield slowly to a passing crowd.
+    pub separation_push_idle_div: u32,
     /// Contents of `rules/resources.ron`. Attached by [`Rules::load`].
     #[serde(skip_deserializing)]
     pub resources: Resources,
+    /// Unit kinds from `rules/units.ron` in `UnitKindId` order. Attached by
+    /// [`Rules::load`].
+    #[serde(skip_deserializing)]
+    pub units: Vec<UnitKind>,
     /// Every map under `maps/`, keyed by name. Attached by [`Rules::load`].
     #[serde(skip_deserializing)]
     pub maps: BTreeMap<String, MapDef>,
@@ -162,6 +178,11 @@ impl Rules {
         rules
             .resources
             .validate(&resources_path, rules.yield_cap_table.len())?;
+
+        let units_path = dir.join("rules").join("units.ron");
+        let units: Units = load_ron(&units_path)?;
+        units.validate(&units_path)?;
+        rules.units = units.units;
 
         rules.maps = map::load_dir(&dir.join("maps"))?;
         if !rules.maps.contains_key(&rules.default_map) {
@@ -232,6 +253,12 @@ impl Rules {
         positive("vision.town_tiles", self.vision.town_tiles)?;
         positive("path_budget_expansions", self.path_budget_expansions)?;
         positive("path_cache_entries", self.path_cache_entries)?;
+        positive("repath_interval_ds", self.repath_interval_ds)?;
+        positive(
+            "separation_push_moving_div",
+            self.separation_push_moving_div,
+        )?;
+        positive("separation_push_idle_div", self.separation_push_idle_div)?;
         Ok(())
     }
 
@@ -253,6 +280,11 @@ impl Rules {
         self.ticks_from_ds(self.annexation_ds)
     }
 
+    /// Ticks between periodic repaths while a unit is moving.
+    pub fn repath_interval_ticks(&self) -> u32 {
+        self.ticks_from_ds(self.repath_interval_ds)
+    }
+
     /// Yield cap for a Trade level, clamped to the last table entry.
     pub fn yield_cap(&self, trade_level: u32) -> u32 {
         let idx = (trade_level as usize).min(self.yield_cap_table.len() - 1);
@@ -269,7 +301,17 @@ impl Rules {
         self.maps.get(name)
     }
 
-    /// Content hash of the loaded rules (match rules, resources and maps);
+    /// The unit kind at index `kind` (the sim's `UnitKindId.0`), if it exists.
+    pub fn unit_kind(&self, kind: u16) -> Option<&UnitKind> {
+        self.units.get(usize::from(kind))
+    }
+
+    /// The unit kind with the given id string, if it exists.
+    pub fn unit_kind_by_id(&self, id: &str) -> Option<&UnitKind> {
+        self.units.iter().find(|u| u.id == id)
+    }
+
+    /// Content hash of the loaded rules (match rules, resources, units and maps);
     /// stored in replay headers so a changed RON file is reported as
     /// `RULES CHANGED` instead of a sim divergence.
     pub fn rules_hash(&self) -> u64 {
@@ -291,10 +333,29 @@ mod tests {
         let rules = Rules::load(data_dir()).expect("data/ loads");
         assert_eq!(rules.tick_rate_hz, 20);
         assert_eq!(rules.resources.resources.len(), 4);
+        assert_eq!(rules.units.len(), 1);
+        assert_eq!(rules.unit_kind(0).unwrap().id, "yeoman");
+        assert_eq!(rules.unit_kind(0).unwrap().speed_tiles_per_s_x100, 180);
+        assert!(rules.unit_kind(1).is_none());
+        assert!(rules.unit_kind_by_id("yeoman").is_some());
         assert!(rules.map("plains_1v1").is_some());
         assert_eq!(rules.ticks_from_ds(32), 64);
         assert_eq!(rules.attrition_interval_ticks(), 64);
         assert_eq!(rules.annexation_ticks(), 1200);
+        assert_eq!(rules.repath_interval_ticks(), 60);
+        assert_eq!(rules.separation_push_moving_div, 2);
+        assert_eq!(rules.separation_push_idle_div, 8);
+        assert_eq!(
+            rules
+                .unit_kind(0)
+                .unwrap()
+                .arrive_slowdown_radius_tiles_x100,
+            50
+        );
+        assert_eq!(
+            rules.unit_kind(0).unwrap().return_to_post_radius_tiles_x100,
+            100
+        );
         assert_eq!(rules.yield_cap(0), 70);
         assert_eq!(rules.yield_cap(99), 200);
         assert_eq!(rules.pop_cap(2), 75);
@@ -314,6 +375,31 @@ mod tests {
         let mut c = Rules::load(data_dir()).unwrap();
         c.maps.clear();
         assert_ne!(a.rules_hash(), c.rules_hash(), "maps are part of the hash");
+        let mut d = Rules::load(data_dir()).unwrap();
+        d.units[0].speed_tiles_per_s_x100 += 1;
+        assert_ne!(
+            a.rules_hash(),
+            d.rules_hash(),
+            "units.ron is part of the hash"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_unit_speed_naming_file_and_field() {
+        let dir = copied_data_dir("unit-speed-zero");
+        let path = dir.join("rules/units.ron");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let text = text.replacen(
+            "speed_tiles_per_s_x100: 180,",
+            "speed_tiles_per_s_x100: 0,",
+            1,
+        );
+        std::fs::write(&path, text).unwrap();
+        let err = Rules::load(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("units.ron"), "{msg}");
+        assert!(msg.contains("units[0].speed_tiles_per_s_x100"), "{msg}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -351,6 +437,23 @@ mod tests {
         r.town_radius_grown_tiles = 1;
         let err = r.validate_match_rules(Path::new("x.ron")).unwrap_err();
         assert!(err.to_string().contains("town_radius_grown_tiles"), "{err}");
+        for (field, set) in [
+            (
+                "repath_interval_ds",
+                (|r: &mut Rules| r.repath_interval_ds = 0) as fn(&mut Rules),
+            ),
+            ("separation_push_moving_div", |r| {
+                r.separation_push_moving_div = 0
+            }),
+            ("separation_push_idle_div", |r| {
+                r.separation_push_idle_div = 0
+            }),
+        ] {
+            let mut r = Rules::load(data_dir()).unwrap();
+            set(&mut r);
+            let err = r.validate_match_rules(Path::new("x.ron")).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
     }
 
     fn copy_dir(src: &Path, dst: &Path) {
@@ -383,7 +486,11 @@ mod tests {
         let dir = copied_data_dir("rules-version-zero");
         let path = dir.join("rules/rules.ron");
         let text = std::fs::read_to_string(&path).unwrap();
-        let text = text.replacen("rules_version: 1,", "rules_version: 0,", 1);
+        let text = text.replacen("rules_version: 3,", "rules_version: 0,", 1);
+        assert!(
+            text.contains("rules_version: 0,"),
+            "repo rules_version moved"
+        );
         std::fs::write(&path, text).unwrap();
         let err = Rules::load(&dir).unwrap_err();
         let msg = err.to_string();
@@ -424,6 +531,11 @@ mod tests {
         std::fs::copy(
             data_dir().join("rules/resources.ron"),
             dir.join("rules/resources.ron"),
+        )
+        .unwrap();
+        std::fs::copy(
+            data_dir().join("rules/units.ron"),
+            dir.join("rules/units.ron"),
         )
         .unwrap();
         let err = Rules::load(&dir).unwrap_err();

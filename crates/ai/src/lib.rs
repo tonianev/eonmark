@@ -22,10 +22,15 @@ impl AiController for Passive {
 
 /// A bot that issues a fixed list of `(tick, command)` pairs, in list order
 /// within a tick. Used by `sim-cli selftest` and `hash-dump`.
+///
+/// `think` is a pure function of the view: it looks the tick up in the
+/// sorted script and keeps no cursor, so a sim restored to an earlier or a
+/// later tick gets exactly that tick's commands (a cursor would skip the
+/// commands already issued once, making the controller's output depend on
+/// the host's history rather than on the hashed state).
 #[derive(Debug, Clone)]
 pub struct Scripted {
     script: Vec<(u32, Command)>,
-    next: usize,
 }
 
 impl Scripted {
@@ -33,7 +38,7 @@ impl Scripted {
     /// caller may list entries in any order.
     pub fn new(mut script: Vec<(u32, Command)>) -> Scripted {
         script.sort_by_key(|(tick, _)| *tick);
-        Scripted { script, next: 0 }
+        Scripted { script }
     }
 
     /// The fixed script used by `sim-cli selftest`: a Stop every 10 ticks, a
@@ -65,28 +70,25 @@ impl Scripted {
         Scripted::new(script)
     }
 
-    /// Entries not yet issued.
-    pub fn remaining(&self) -> usize {
-        self.script.len() - self.next
+    /// Number of script entries.
+    pub fn len(&self) -> usize {
+        self.script.len()
+    }
+
+    /// `true` when the script is empty.
+    pub fn is_empty(&self) -> bool {
+        self.script.is_empty()
     }
 }
 
 impl AiController for Scripted {
     fn think(&mut self, _player: PlayerId, view: &SimView<'_>) -> Vec<Command> {
-        let mut out = Vec::new();
-        while let Some((tick, cmd)) = self.script.get(self.next) {
-            if *tick > view.tick {
-                break;
-            }
-            // Entries for ticks already past (possible after a restore to an
-            // earlier tick is never done, but after one to a later tick) are
-            // skipped rather than replayed late.
-            if *tick == view.tick {
-                out.push(cmd.clone());
-            }
-            self.next += 1;
-        }
-        out
+        let start = self.script.partition_point(|(t, _)| *t < view.tick);
+        let end = self.script.partition_point(|(t, _)| *t <= view.tick);
+        self.script[start..end]
+            .iter()
+            .map(|(_, cmd)| cmd.clone())
+            .collect()
     }
 }
 
@@ -157,7 +159,8 @@ mod tests {
             ),
         ];
         let bot = Scripted::new(script);
-        assert_eq!(bot.remaining(), 2);
+        assert_eq!(bot.len(), 2);
+        assert!(!bot.is_empty());
         let mut sim = Sim::new(MatchSetup::skirmish(&r, 3), r, Box::new(bot));
         let delay = sim.setup().cmd_delay;
         for _ in 0..(5 + delay) {
@@ -171,11 +174,45 @@ mod tests {
     }
 
     #[test]
+    fn scripted_is_a_pure_function_of_the_tick_after_restore() {
+        // Two sims with their own Scripted controllers: `a` runs straight
+        // through; `b` is restored to a's tick-3 snapshot after it already
+        // issued the tick-5 Surrender once, and must issue it again.
+        let r = rules();
+        let script = vec![(5, Command::Surrender)];
+        let setup = MatchSetup::skirmish(&r, 3);
+        let mut a = Sim::new(
+            setup.clone(),
+            r.clone(),
+            Box::new(Scripted::new(script.clone())),
+        );
+        let mut b = Sim::new(setup, r, Box::new(Scripted::new(script)));
+        for _ in 0..3 {
+            a.step(&[]);
+            b.step(&[]);
+        }
+        let snap = a.snapshot();
+        for _ in 0..10 {
+            b.step(&[]);
+        }
+        assert!(b.view().player(PlayerId(1)).unwrap().surrendered);
+        b.restore(&snap).unwrap();
+        assert!(!b.view().player(PlayerId(1)).unwrap().surrendered);
+        for _ in 0..10 {
+            a.step(&[]);
+            b.step(&[]);
+            assert_eq!(a.hash(), b.hash());
+        }
+        assert!(a.view().player(PlayerId(1)).unwrap().surrendered);
+        assert!(b.view().player(PlayerId(1)).unwrap().surrendered);
+    }
+
+    #[test]
     fn selftest_script_is_deterministic() {
         let a = Scripted::selftest();
         let b = Scripted::selftest();
         assert_eq!(a.script, b.script);
-        assert!(a.remaining() > 100);
+        assert!(a.len() > 100);
         let total: usize = (0..1000).map(|t| selftest_human_commands(t).len()).sum();
         assert_eq!(total, 143 + 20);
         for t in 0..1000 {

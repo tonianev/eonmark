@@ -55,6 +55,13 @@ ci:
     scripts/check_assets.sh
     step naming policy
     scripts/check_trademark.sh
+    step fixture policy
+    # CI diffs against the PR base; locally the merge base with main stands in.
+    if git rev-parse --verify -q main >/dev/null && [ "$(git rev-parse HEAD)" != "$(git rev-parse main)" ]; then
+      scripts/check_fixture_policy.sh "$(git merge-base main HEAD)"
+    else
+      echo "skip: on main (fixture policy compares a branch against its base)"
+    fi
 
     step exactly one Bevy
     test "$(cargo tree -i bevy_ecs --depth 0 | wc -l | tr -d ' ')" -eq 1
@@ -93,13 +100,27 @@ data-check:
 bots *ARGS:
     @echo "bots: available from M5b (sim-cli play-bots)"
 
-# Sim benchmarks (available from M1).
+# Sim benchmarks: `just bench` runs the 500-mover crossing, `just bench --astar --budget 4000` one saturated A* tick.
 bench *ARGS:
-    @echo "bench: available from M1 (sim-cli bench)"
+    cargo run -p sim-cli --locked --release -- bench {{ARGS}}
 
-# Verify replay fixtures (available from M1).
+# Verify replay fixtures in release: every golden under crates/sim/tests/fixtures/, or the files given.
 verify *ARGS:
-    @echo "verify: available from M1 (sim-cli verify)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ $# -eq 0 ]; then set -- crates/sim/tests/fixtures/*.eonreplay; fi
+    for f in "$@"; do
+      printf '%s: ' "$f"
+      cargo run -q -p sim-cli --locked --release -- verify "$f"
+    done
+
+# Golden fixtures change only with a rules_version bump; compares HEAD against BASE (default: merge base with main).
+fixture-policy BASE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="{{BASE}}"
+    if [ -z "$base" ]; then base="$(git merge-base main HEAD)"; fi
+    scripts/check_fixture_policy.sh "$base"
 
 # Build the release binary and assemble dist/Eonmark.app, zip and SHA256SUMS.
 bundle VERSION="":

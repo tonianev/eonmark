@@ -17,6 +17,8 @@ sim.workspace = true
 rules.workspace = true
 ai.workspace = true
 clap.workspace = true
+rand_pcg.workspace = true
+rand_core.workspace = true
 
 [lints]
 workspace = true

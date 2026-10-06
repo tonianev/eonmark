@@ -7,6 +7,7 @@ This document explains how Eonmark's game data is authored: where the files live
 - Every gameplay number is RON under `data/`. There are no tuning constants in Rust. If a value is needed and no field exists, add the field, a `data-check` rule and a line in `data/rules/README.md`.
 - Integers only. The `rules`, `sim` and `ai` crates ban `f32` and `f64` through `clippy.toml`, so a RON float literal has nowhere to go and fails to parse.
 - Distances are tiles, in fields ending in `_tiles`. One tile is one metre in the renderer and `Fx::ONE` in the sim.
+- Fractional tiles and rates are scaled integers, with the scale in the field name: fields ending in `_x100` hold hundredths (`speed_tiles_per_s_x100: 180` is 1.8 tiles per second, `radius_tiles_x100: 35` is 0.35 tiles). The sim converts them to `Fx` exactly once; speeds become tiles per tick (`x100 / (100 * tick_rate_hz)`) at spawn. The validator caps every `_x100` field at `100000` (`rules::units::MAX_X100`).
 - Durations are authored in deciseconds, in fields ending in `_ds`. The one conversion is `Rules::ticks_from_ds`: `ticks = round(ds * tick_rate_hz / 10)`, rounding to nearest with halves up. At 20 Hz one decisecond is exactly two ticks: `32` ds is 64 ticks, `600` ds is 1200 ticks. The validator does not require a whole tick count; pick values that give one when you can. The exceptions are `tick_rate_hz` and `cmd_delay_ticks` in `rules.ron`, which define the clock itself.
 - Conversion happens in one place. Authored values stay in `Rules` as integers; the sim reads them only through tick and `Fx` accessors such as `Rules::attrition_interval_ticks()` and `Rules::annexation_ticks()`, which call `Rules::ticks_from_ds`. No other code converts.
 - Rates are per 30 seconds. "10 Grain per 30 s" is written as `10` in a field documented as per-30-s.
@@ -74,7 +75,7 @@ Cross-reference checks run after parsing: every unit has a trainer building and 
 cargo run -p sim-cli -- data-check data/
 ```
 
-Exit code 0 prints one line such as `OK rules_version=1 rules_hash=0xfbd6ae4c125b88a2 resources=4 maps=plains_1v1`. Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
+Exit code 0 prints one line such as `OK rules_version=1 rules_hash=0xd834a23f66683801 resources=4 maps=plains_1v1` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
 
 | Variant | Format | Example cause |
 |---|---|---|
@@ -91,7 +92,7 @@ The same loader runs at game start, so a broken file is caught before a window o
 | `data/rules/rules.ron` | `rules_version`, `tick_rate_hz`, `cmd_delay_ticks`, `default_map`, the Yield Cap table, pop cap base and per-Arms-level, Town radii, growth threshold and limit, supply radius, attrition interval and annexation timer (`_ds`), vision radii, path budget and cache size | M0 (full v0.1 field set; values for later milestones are validated but unused until then). Ramping parameters, Harrying doubling, the age-gap table, the 45-minute cap and late-game pressure knobs are added by M3a, M4a and M5a |
 | `data/rules/resources.ron` | Grain, Lumber, Ore, Lore: id, display name, gathering buildings, role, `yield_capped`, `stockpile_cap` | M0 |
 | `data/rules/buildings.ron` | The eight building kinds: costs, build time, slots, border push, hp | M3a |
-| `data/rules/units.ron` | Yeoman and Scribe; then the six military kinds with stats and counter table | M3a, M4a |
+| `data/rules/units.ron` | Unit kinds; the list index is the `UnitKindId`. M1: `yeoman` (index 0) with the movement fields `speed_tiles_per_s_x100: 180`, `radius_tiles_x100: 35`, `arrive_radius_tiles_x100: 25`, `arrive_slowdown_radius_tiles_x100: 50`, `waypoint_radius_tiles_x100: 50`, `separation_tiles_x100: 10`, `return_to_post_radius_tiles_x100: 100` (the last one `#[serde(default)]` to 100: an arrived unit pushed farther than this from its post walks back; schema `crates/rules/src/units.rs`, `deny_unknown_fields`; validation: at least one kind, unique lowercase ids, speed, radius, waypoint radius and return radius > 0, slowdown radius and return radius >= arrive radius, every `_x100` at most 100000, errors name `units[i].<field>`). Scribe, costs and trainers in M3a; the six military kinds with combat stats and the counter table in M4a | M1, M3a, M4a |
 | `data/rules/techs.ron` | Twelve techs as `Modifier` lists across four lines | M4a |
 | `data/rules/ages.ron` | Hearth, Masonry, Charter: tech-count gates and costs | M4a |
 | `data/rules/factions.ron` | Freeholders with an empty `Modifier` list; second faction as pure data | M4a, M9 |

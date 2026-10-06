@@ -11,7 +11,7 @@ This document is the contract that makes Eonmark's simulation reproducible: the 
 5. All randomness comes from the single `Pcg32` stored in `Sim`. It is part of the hashed state. The seed comes from the replay header.
 6. Commands are sorted by `(player_id, client_seq)` before application. A command issued during tick N applies at tick N + `cmd_delay` in every mode: live, replay and any future network mode.
 7. No trigonometry. Units store a facing vector; heading is derived render-side in `f32`. Squared distances use `dist_sq_i64`. Overflow in the sim crate panics in release (`overflow-checks = true`) rather than wrapping silently.
-8. Derived caches (influence maps, spatial grid, path cache, component ids) are never hashed. The path cache key includes `cost_grid_generation` and the whole cache is cleared on any cost-grid mutation. `restore()` rebuilds every derived structure before returning. A property test runs the sim with the path cache disabled and enabled and asserts identical hashes.
+8. Derived caches (influence maps, spatial grid, path cache, component ids) are never hashed. The path request queue and the active (suspended) A* search are hashed state, serialised in full. The path cache key includes `cost_grid_generation`, the whole cache is cleared on any cost-grid mutation and on `restore()`, and a hit is honoured only when it can charge the budget exactly as the real search would have (the transparent-cache rule in [design/pathing.md](design/pathing.md)). `restore()` rebuilds every derived structure before returning. A property test runs the sim with the path cache disabled and enabled and asserts identical hashes on every tick.
 9. Golden fixtures regenerate only in a commit that bumps `rules_version` with a one-line reason. `verify` fails fast on `sim_version` mismatch and reports `RULES CHANGED since recording` on `rules_hash` mismatch.
 10. Tests from M1: same seed and commands twice (sequentially and on two threads) give identical hashes; snapshot at tick 300 then continue to 1200 equals the uninterrupted run, including spawning 50 units after the restore; restore, clear caches, step one tick matches; proptest random command streams; cross-OS final hash equality of fixtures in CI (ubuntu-24.04 against macos-26).
 
@@ -69,29 +69,56 @@ The cost grid carries a `u32` `cost_grid_generation` that increments on every ch
 
 `snapshot()` serializes every hashed field verbatim with postcard. `restore()` deserializes them and then eagerly rebuilds influence maps, the spatial grid, the supply grid and connected components, and clears the path cache, before returning. No derived structure is lazily rebuilt, so the first `step` after restore sees the same inputs as the uninterrupted run. The command delay queue (`pending`, a `BTreeMap` keyed by application tick) is hashed state, so a snapshot carries in-flight commands and a restore applies them on the right tick.
 
+### The active A* search is hashed, the cache is not
+
+Decided in M1. A path search that ran out of budget mid-tick is sim state: it decides on which tick a path appears. The sim stores it as `Pathing.active: Option<(PathRequest, AStarSearch)>` and serialises the `AStarSearch` in full: the open `BinaryHeap<Node>` as a sequence in its internal array order, the `closed`, `g` and `parent` arrays, and the expansion counter. `std::collections::BinaryHeap` deserialises by pushing in that order, which reproduces the identical array, so a snapshot taken mid-search restores the exact search and the next `resume` pops the same nodes. The alternative, storing an expansion counter and replaying the search on restore, was rejected: it spends the replayed expansions at restore time and cannot represent a search that the cache fallback would have skipped. A unit test round-trips a half-finished search through postcard and asserts identical paths and hashes; the queue and the active search together form the `pathing` sub-hash.
+
+The path cache is the opposite case: it must never change results, so it is `#[serde(skip)]`, never hashed, cleared on every generation change and on `restore()`, and transparent by construction. Each entry stores the path and `expansions_used`; a hit is honoured only when `expansions_used` fits in the tick's remaining budget, charging exactly that amount, so the hashed state at the end of every tick is identical with the cache on or off. When it does not fit, the real search runs and suspends as it would have anyway. `path_cache_is_transparent` asserts equal hashes on every tick of a random command stream.
+
 ## Hashing
 
 `Sim::hash()` is `xxh3_64` over the postcard serialization of all hashed state. Postcard is canonical for a given struct, and every container in the state is ordered, so equal states produce equal bytes.
 
 `Sim::sub_hashes()` returns one hash per subsystem so a divergence can be localized.
 
-| Sub-hash | Covers |
-|---|---|
-| `units` | The `BTreeMap<UnitId, Unit>` |
-| `buildings` | The `BTreeMap<BuildingId, Building>` |
-| `economy` | Stockpiles, accumulators, cap state, ramping counters |
-| `territory` | `TerritoryField` strength layers and owners |
-| `tech` | Researched techs, queues, ages |
-| `pathing` | The path request queue (not the cache) |
-| `rng` | The `Pcg32` state |
+| Sub-hash | Covers | Since |
+|---|---|---|
+| `units` | The `BTreeMap<UnitId, Unit>` | M1 |
+| `buildings` | The `BTreeMap<BuildingId, Building>` | M1 (empty until M3a) |
+| `economy` | Stockpiles, accumulators, cap state, ramping counters | placeholder until M3a |
+| `territory` | `TerritoryField` strength layers and owners | placeholder until M3a |
+| `tech` | Researched techs, queues, ages | placeholder until M4a |
+| `pathing` | The path request queue and the active (suspended) A* search; never the cache | M1 |
+| `rng` | The `Pcg32` state | M1 |
+| `map` | The cost grid and `cost_grid_generation` | M1 |
+| `meta` | `tick`, `seed`, the `IdGen` allocator, players, the pending command queue, `commands_applied` | M1 |
 
-Hashes are taken every 20 ticks in release and every tick under `--hash-every-tick` (flag arrives in M2 with the replay writer).
+The field order of `SubHashes` is the comparison order: `SubHashes::first_difference` returns the name of the first field that differs, which is what `verify` prints. `SubHashes::NAMES` lists the nine names in that order and names the `key=value` fields of a `hash-dump` line. Subsystems that do not exist yet hash an empty placeholder so the layout is stable across milestones. Every field of the hashed `State` belongs to exactly one sub-hash, so any divergence has a name.
 
-At M0 the hashed state is the full `State` (`tick`, `seed`, `rng`, `ids`, `players`, `units`, `buildings`, `pending`, `commands_applied`; see "What exists at M0" below) and `hash()` is already the real scheme. Sub-hashes arrive in M1.
+Hashes are recorded every 20 ticks by default (`replay::DEFAULT_HASH_EVERY`) and every tick under `--hash-every-tick` (`sim-cli record` from M1; the game's writer thread from M2).
+
+The hashed state is the full `State` (`tick`, `seed`, `rng`, `ids`, `players`, `units`, `buildings`, `map`, `pathing` without its cache, `pending`, `commands_applied`) and `hash()` is xxh3 over its postcard bytes. `sub_hashes()` hashes the pieces listed above separately.
 
 ## Replays
 
-A replay is a postcard stream: a `MatchSetup` header, then one `TickCommands` batch per tick, a hash record every 20 ticks, and a final hash.
+A replay is an `.eonreplay` file, format version 1, written and read by `crates/sim/src/replay.rs`:
+
+```text
+"EONR"                      4 magic bytes                       replay::MAGIC
+u16 little-endian           format version, 1                   replay::FORMAT_VERSION
+postcard(MatchSetup)        header (fields below)
+postcard(Record)*           stream, no framing, in tick order
+"EONRDONE"                  8-byte clean-exit trailer           replay::TRAILER (only when the writer finished)
+```
+
+| Record | Fields | Written |
+|---|---|---|
+| `Record::Tick(TickBatch)` | `tick: u32`, `cmds: Vec<PlayerCommand>` | for every tick whose `step` call received at least one command; the commands exactly as handed to `step`, before the command delay |
+| `Record::Hash(HashRecord)` | `tick: u32`, `hash: u64`, `sub: SubHashes` | after every 20 ticks (`--hash-every-tick`: every tick) and once more at clean exit |
+
+A tick's `Tick` record precedes its `Hash` record. Hash records carry the sub-hashes, not just the whole-state hash, so that `verify` can name the diverging subsystem from the replay alone: without them, naming the subsystem would need a second re-simulation on the machine that recorded the file, which is exactly what is unavailable when a replay comes in from somewhere else.
+
+The reader tolerates truncation. It decodes records with `postcard::take_from_bytes` and stops at the first record that does not decode, keeping everything before it; postcard encodings are self-delimiting and prefix-free per type, so a cut-off tail never decodes as a shorter valid record. A file cut by `kill -9` therefore verifies up to its last complete hash record and `verify` reports that tick count. The clean-exit trailer tells a cut apart from damage: `ReplayWriter::finish` appends `"EONRDONE"` after the last record, so a file that ends with the trailer was closed cleanly and every byte before the trailer must decode. If one does not, the reader returns `ReplayError::Corrupt { path, offset, undecoded }` and `verify` exits 2 instead of silently verifying the prefix (a flipped byte that breaks a record's encoding is reported this way; a flipped byte that keeps the record decodable but changes a command is a `DIVERGED` outcome; a flipped byte the sim never reads, such as a `queue` flag or a sub-tile bit of a target, is neither and verifies `OK`). A file without the trailer is a truncated recording: `ReplayFile::truncated` is set, the CLI prints a `warning:` line on stderr naming the complete records kept and the trailing bytes dropped, and the `OK` line itself is unchanged so CI's `^OK` grep and hash-parity diff still apply. A file shorter than its header is `ReplayError::Header`; wrong magic is `BadMagic`; a version other than 1 is `UnsupportedVersion`. A record whose tick lies before the tick the stream has already reached is a corrupt file, not truncation: the reader returns `ReplayError::OutOfOrder { path, tick, reached }` and `verify` reports it as an error (exit 2) rather than skipping it.
 
 ### Header fields
 
@@ -105,7 +132,8 @@ A replay is a postcard stream: a `MatchSetup` header, then one `TickCommands` ba
 | `seed` | `u64` | Loaded | Seed for the `Pcg32`. |
 | `tick_rate_hz` | `u32` | Loaded | 20. |
 | `cmd_delay` | `u32` | Loaded | Ticks between issue and application. |
-| `players` | `Vec<PlayerSlot>` | Loaded | Slot id and `is_ai` per player, in id order. `MatchSetup::skirmish` makes slot 0 human and slot 1 the AI. |
+| `players` | `Vec<PlayerSlot>` | Loaded | Slot id and `is_ai` per player, in id order. `MatchSetup::skirmish` makes slot 0 human and slot 1 the AI; `MatchSetup::scenario` makes two human slots. |
+| `debug_commands` | `bool` | Loaded | Whether `Command::DebugSpawn` is accepted. `false` for `skirmish`; `true` for `scenario` (fixtures, benches, tests). A `DebugSpawn` in a match with `false` is rejected with `CommandRejected { reason: DebugCommandsDisabled }` and spawns nothing; like every applied or rejected command it still increments `commands_applied` (hashed in `meta`), so the hash reflects the full command stream. Only the not-yet-implemented commands draw from the RNG on rejection. |
 
 AI difficulty ids (M6) and faction ids (M9) are added to the header when those systems arrive. The same struct is the future lockstep handshake payload.
 
@@ -113,7 +141,7 @@ Why two version fields: a git sha changes every commit, so it cannot gate fixtur
 
 ### Writer
 
-The replay is written by a dedicated `std::thread` fed by a channel of encoded tick batches. It writes and flushes every 20 ticks and calls `sync_all` only at clean exit. It never fsyncs during play: on Apple platforms both `sync_all` and `sync_data` issue `fcntl(F_FULLFSYNC)`, which costs milliseconds and would hitch the frame once a second for no benefit. Surviving `kill -9` needs only written pages, which a flush provides. A hard kill loses at most one second of commands. The writer is purely a sink: nothing reads from it, and the sim does not wait for it.
+`sim::replay::ReplayWriter` is the sink: `create(path, &setup)` writes the magic, version and header; `tick(tick, cmds)` and `hash(tick, hash, &sub)` append records; `flush()` writes the buffer; `finish()` appends the clean-exit trailer, flushes and `sync_all`s once. `sim-cli record` drives it directly (M1). In the game (M2) it runs on a dedicated `std::thread` fed by a channel of encoded tick batches. It writes and flushes every 20 ticks and calls `sync_all` only at clean exit. It never fsyncs during play: on Apple platforms both `sync_all` and `sync_data` issue `fcntl(F_FULLFSYNC)`, which costs milliseconds and would hitch the frame once a second for no benefit. Surviving `kill -9` needs only written pages, which a flush provides. A hard kill loses at most one second of commands. The writer is purely a sink: nothing reads from it, and the sim does not wait for it.
 
 Replays go to `ProjectDirs::from("com", "tonianev", "Eonmark").data_dir()/replays/<timestamp>.eonreplay`, or to `--replay-dir <path>`. CI uses a temporary directory.
 
@@ -123,28 +151,47 @@ Replays go to `ProjectDirs::from("com", "tonianev", "Eonmark").data_dir()/replay
 cargo run -p sim-cli --release -- verify path/to/match.eonreplay
 ```
 
-| Output | Exit code | Meaning |
+`verify` prints exactly one line, the `Display` of `sim::replay::VerifyOutcome`, and exits with `VerifyOutcome::exit_code()`. The strings are fixed and tested; CI greps for `^OK`.
+
+| Output (exact format) | Exit code | Meaning |
 |---|---|---|
-| `OK final_hash=0x...` | 0 | Re-simulation reproduced every recorded hash. |
-| `DIVERGED at tick N (subsystem: economy)` | 1 | The first recorded hash that did not match, with the first differing sub-hash. |
-| `SIM VERSION MISMATCH` | 1 | `header.sim_version != SIM_VERSION`. The replay predates a behaviour change; nothing is simulated. |
-| `RULES CHANGED since recording` | 1 | `header.rules_hash != Rules::load(...).rules_hash()`. Someone edited RON without bumping `rules_version` and regenerating. |
+| `OK final_hash=0x<16 hex> ticks=<n>` | 0 | Re-simulation reproduced every recorded hash. `final_hash` and `ticks` come from the last hash record in the file (a replay without any hash record reports the re-simulated hash at the last tick seen). |
+| `DIVERGED at tick <N> (subsystem: <name>)` | 1 | The first hash record that did not match. `<name>` is the first differing field of `SubHashes` in field order (`units`, `buildings`, `economy`, `territory`, `tech`, `pathing`, `rng`, `map`, `meta`), or `state` if the whole hash differs while every sub-hash matches. |
+| `SIM VERSION MISMATCH (replay <a>, binary <b>)` | 1 | `header.sim_version != sim::SIM_VERSION`. The replay predates a behaviour change; nothing is simulated and the rules are not loaded. |
+| `RULES CHANGED since recording (replay 0x<16 hex>, loaded 0x<16 hex>)` | 1 | `header.rules_hash != Rules::load(data_dir).rules_hash()`. Someone edited RON without bumping `rules_version` and regenerating; nothing is simulated. |
+
+The checks run in that order: version, then rules, then re-simulation. Read errors (`ReplayError`: missing file, bad magic, unsupported format version, undecodable header, a corrupt record stream before the clean-exit trailer, out-of-order records) are not outcomes; the CLI reports them as `error: <message>` with exit 2 and never prints one of the four lines. A truncated recording (no trailer) is not an error: the CLI prints a `warning:` on stderr and then the outcome for the records it has.
 
 ## Bisecting a desync
 
-When `verify` prints `DIVERGED at tick N (subsystem: X)`, the recorded hash at tick N differs, but hashes are only recorded every 20 ticks in release. Narrow it down with `hash-dump`. The replay-reading form below arrives in M1; at M0, `sim-cli hash-dump --ticks N --seed S` prints the whole-state hash after every tick of the scripted selftest match, which is already enough to compare two machines line by line.
+When `verify` prints `DIVERGED at tick N (subsystem: X)`, the recorded hash at tick N differs and X is the first sub-hash that disagrees with the recording, but hashes are only recorded every 20 ticks by default, so the drift began somewhere in the 20 ticks before N. Narrow it down with the replay form of `hash-dump`, which re-simulates the replay's command stream on the current machine and prints one line per tick:
 
 ```bash
-# 1. Per-tick sub-hashes from the recording side (if it was recorded with --hash-every-tick)
-#    or from a fresh run of the same setup on the machine that produced the replay.
+cargo run -p sim-cli --release -- hash-dump match.eonreplay --every 1
+```
+
+```text
+tick=1 hash=0x26cf75ae625738e2 units=0xc44bdff4074eecdb buildings=0xc44bdff4074eecdb economy=0x2d06800538d394c2 territory=0x2d06800538d394c2 tech=0x2d06800538d394c2 pathing=0x3325230e1f285505 rng=0x45713480d687fdbd map=0x38587eaeac2ca50a meta=0x5440e9088c79a4e6
+tick=2 hash=0x4b37015c35074176 units=0xc44bdff4074eecdb ...
+```
+
+Each line is `key=value` pairs: `tick`, the whole-state `hash`, then one field per name in `SubHashes::NAMES`, in field order (the lines above are the first two of `move_500_short`). A line is printed after the step that completes that tick, so the last line of a complete dump carries the replay's final hash. `--every N` prints every N-th tick (default 20, matching the recording cadence). `hash-dump` does not compare anything itself; it is the input to `diff`. The scripted M0 form, `hash-dump --ticks N --seed S`, still exists and prints the whole-state hash of the selftest match.
+
+To bisect across two machines (or two builds, or two operating systems):
+
+```bash
+# 1. On the machine that produced the replay (or any machine that verifies it OK):
 cargo run -p sim-cli --release -- hash-dump match.eonreplay --every 1 > a.txt
 
-# 2. The same dump on the machine or build under suspicion.
+# 2. On the machine or build under suspicion, with the same replay file and data/:
 cargo run -p sim-cli --release -- hash-dump match.eonreplay --every 1 > b.txt
 
-# 3. First differing line is the first tick and subsystem that drifted.
+# 3. The first differing line is the first tick that drifted; the first differing
+#    column on that line is the subsystem. Everything before it is identical.
 diff a.txt b.txt | head -n 5
 ```
+
+Both dumps are deterministic functions of the replay and the data directory, so `a.txt` is reproducible: if the recording machine is gone, a machine where `verify` prints `OK` for that replay stands in for it. If both machines print identical dumps but `verify` still diverges, the recording itself was made by a different binary or data set; check `sim_version` and `rules_hash` in the header first (`verify` does this before simulating, so this case normally surfaces as one of the two mismatch outcomes). Within one machine the same procedure finds a non-determinism bug: dump the same replay twice; any difference is a bug in the sim, and the column names it.
 
 Then look at what changed in that subsystem on that tick. The usual suspects, in order of frequency: a new `HashMap` or unsorted `Vec` iteration (check `clippy` passed with `-D warnings`), a float that leaked in through a dependency or a `Rules` conversion, a derived cache that was read before `restore()` rebuilt it, a sort key missing its id tiebreak, and an RNG draw that happens in a non-deterministic order. Run the proptest suite and the cache on/off test before suspecting anything exotic.
 
@@ -180,19 +227,30 @@ echo "boundary ok"
 
 ### Cross-OS parity
 
-The `check` job on macOS and the `headless` job on Ubuntu each upload the final hash line of the headless run (the 200-tick `--headless-run 200` smoke at M0; fixture replays from M1). The `hash-parity` job downloads both and `diff`s them. Any difference fails CI. This job is never negotiable.
+The `check` job on macOS and the `headless` job on Ubuntu each upload two lines: the `tick=200 hash=0x...` line of the game's `--headless-run 200` smoke, and the `OK final_hash=0x... ticks=1200` line that `sim-cli verify --release crates/sim/tests/fixtures/move_500.eonreplay` prints (only the `^OK` line is kept, so a non-OK outcome fails the producing job rather than the diff). The `hash-parity` job downloads both artifacts and `diff`s each pair. Any difference fails CI. This job is never negotiable. The `headless` job additionally verifies the `group_spiral` and `snapshot_restore` fixtures in release and asserts that `pathfinding` is absent from `cargo tree -p sim -e normal`.
 
 ## Golden fixtures
 
-Fixtures live under `crates/sim/tests/fixtures/` as `.eonreplay` files with a sibling `.hash` file. Short fixtures (at most 5000 ticks) run inside `cargo test -p sim`. Long ones (for example `m5_first_match`) are `#[ignore]` locally and verified by `sim-cli verify` in release in the headless CI job.
+Fixtures live under `crates/sim/tests/fixtures/` as `.eonreplay` files with a sibling `.hash` file holding the final hash as `0x<16 hex>` and a newline. They are recorded with `sim-cli record --scenario <name> --ticks <n> --out <file>` from scenario definitions shared with the tests, under `MatchSetup::scenario` (two human slots, `debug_commands: true`). Short fixtures (at most 5000 ticks) run inside `cargo test -p sim` through the `golden(name)` helper. Long ones are `#[ignore]` locally and verified by `sim-cli verify` in release in the headless CI job.
+
+| Fixture | Ticks | Verified by |
+|---|---|---|
+| `move_500_short` | 300 (the first 300 ticks of `move_500`, before its Stop) | `cargo test -p sim` |
+| `group_spiral` | 600 | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `snapshot_restore` | 1200 (recorded across a snapshot/restore swap at tick 300) | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `move_500` | 1200 | `sim-cli verify --release` in CI on both operating systems; the hash-parity fixture |
 
 Regeneration policy:
 
-- Fixtures regenerate only in a commit that bumps `rules_version` in `data/rules/rules.ron` and states the reason in one line of the commit message.
+- Fixtures regenerate only in a commit that bumps `rules_version` in `data/rules/rules.ron` and states the reason in one line of the commit message. CI enforces it: `scripts/check_fixture_policy.sh <base>` fails a pull request whose diff touches `crates/sim/tests/fixtures/*.eonreplay` or `*.hash` unless `rules_version` increased in the same diff (`just fixture-policy` runs it locally against the merge base with main).
 - A changed hash without that bump is a bug, not a fixture update. Find it with the bisect procedure above.
 - `RULES CHANGED since recording` means someone edited RON without bumping. Either revert the edit or bump and regenerate in the same commit.
 - A behaviour change in Rust that is intended (a new movement rule, a fixed bug) bumps `SIM_VERSION` as well, and the commit regenerates every fixture.
 
 ## What exists at M0
 
-The three `clippy.toml` files and the `[profile]` overrides. `Fx` and `FxVec2`. Monotonic ids from `IdGen`, which is itself hashed state so a restore never reuses an id. The full `Command` enum and `sort_commands`. The `MatchSetup` header with every field in the table above. A `Sim` whose hashed state is `{ tick, seed, rng: Pcg32, ids, players, units, buildings, pending, commands_applied }`; `step` queues commands for `tick + cmd_delay`, stamps and queues the AI's commands the same way, and applies everything due at the current tick in `(player, seq)` order. `hash()` as xxh3 over postcard, `snapshot()` and `restore()` with an empty `rebuild_derived`. `sim-cli selftest --ticks N --seed S` runs the scripted match twice on two threads and compares; `sim-cli hash-dump --ticks N --seed S` prints the per-tick hash. `sub_hashes`, the replay format, `verify` and the test list in rule 10 arrive in M1.
+The three `clippy.toml` files and the `[profile]` overrides. `Fx` and `FxVec2`. Monotonic ids from `IdGen`, which is itself hashed state so a restore never reuses an id. The full `Command` enum and `sort_commands`. The `MatchSetup` header with every field in the table above except `debug_commands`. A `Sim` whose hashed state is `{ tick, seed, rng: Pcg32, ids, players, units, buildings, pending, commands_applied }`; `step` queues commands for `tick + cmd_delay`, stamps and queues the AI's commands the same way, and applies everything due at the current tick in `(player, seq)` order. `hash()` as xxh3 over postcard, `snapshot()` and `restore()` with an empty `rebuild_derived`. `sim-cli selftest --ticks N --seed S` runs the scripted match twice on two threads and compares; `sim-cli hash-dump --ticks N --seed S` prints the per-tick hash.
+
+## What M1 adds
+
+The hashed `State` gains `map` (cost grid and generation) and `pathing` (request queue and active search). `Sim::step` runs, in order: queue the tick's commands, run the AI, apply due commands, `Pathing::service` under the rules budget, rebuild the spatial grid, `movement::step`, then `tick += 1`. `Command::Move` and `Command::Stop` have real handlers; `Command::DebugSpawn` spawns units on a deterministic square spiral of passable tiles and is accepted only under `debug_commands: true`. `sub_hashes()` with the nine fields above, `SimEvent`s drained through `drain_events()`, `rebuild_derived()` that rebuilds components and the spatial grid and clears the path cache. The replay format with its clean-exit trailer, `ReplayWriter`, `ReplayReader` (`ReplayFile` with `truncated`), `verify`, and `sim-cli verify`, `record`, `bench`, `fuzz` and the replay form of `hash-dump`. The movement constants (repath cadence, separation push caps, waypoint and slowdown radii) live in `rules.ron` and `units.ron`, not in Rust. The tests in rule 10 and the four golden fixtures. The game crate's writer thread and `--headless-run <replay>` arrive in M2.

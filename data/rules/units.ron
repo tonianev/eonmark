@@ -1,0 +1,22 @@
+// Eonmark unit kinds. Schema: crates/rules/src/units.rs (deny_unknown_fields).
+// List index is the UnitKindId. Integers only: fields ending in _x100 are
+// scaled by 100 (180 = 1.80 tiles per second). The sim converts speed to
+// tiles per tick and radii to fixed-point exactly once, at spawn.
+// Combat stats, costs and trainer buildings arrive in M3a / M4a.
+// return_to_post_radius_tiles_x100: an arrived unit pushed farther than this
+// from the tile centre it arrived at walks straight back (100 = one tile).
+(
+  units: [
+    (
+      id: "yeoman",
+      name: "Yeoman",
+      speed_tiles_per_s_x100: 180,
+      radius_tiles_x100: 35,
+      arrive_radius_tiles_x100: 25,
+      arrive_slowdown_radius_tiles_x100: 50,
+      waypoint_radius_tiles_x100: 50,
+      separation_tiles_x100: 10,
+      return_to_post_radius_tiles_x100: 100,
+    ),
+  ],
+)

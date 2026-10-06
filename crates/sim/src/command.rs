@@ -94,6 +94,21 @@ pub enum Command {
     },
     /// Resign the match.
     Surrender,
+    /// Spawn `count` units of `kind` for `owner` on the nearest passable
+    /// tiles in a square spiral around `at`. Accepted only when
+    /// `MatchSetup::debug_commands` is `true` (fixtures, benches, tests,
+    /// scenarios); rejected with `RejectReason::DebugCommandsDisabled`
+    /// otherwise.
+    DebugSpawn {
+        /// Owning player.
+        owner: PlayerId,
+        /// Unit kind (index into `units.ron`).
+        kind: UnitKindId,
+        /// Spiral centre.
+        at: FxVec2,
+        /// Units to spawn.
+        count: u16,
+    },
 }
 
 /// A command stamped with its issuing player and per-player sequence number.

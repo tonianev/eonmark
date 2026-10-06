@@ -170,6 +170,14 @@ jobs:
             exit 1
           fi
 
+      - name: fixture policy (goldens change only with a rules_version bump)
+        # docs/DETERMINISM.md, "Golden fixtures". The checkout is shallow, so
+        # fetch the PR base commit before diffing against it.
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          scripts/check_fixture_policy.sh "${{ github.event.pull_request.base.sha }}"
+
       - name: headless smoke (200 ticks)
         # M2: switch to a fixture replay. Same command as the macOS job; the
         # two outputs must be byte-identical (hash-parity job).

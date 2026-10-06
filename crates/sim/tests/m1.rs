@@ -1,0 +1,517 @@
+//! M1 acceptance tests (docs/ROADMAP.md, "M1"). Tests marked
+//! `#[ignore = "M1 implementation pending"]` call the real APIs and compile
+//! today; implementers remove the attribute as they land the bodies
+//! (pathing tests: A; movement, state and goldens: B and C).
+
+use proptest::prelude::*;
+use sim::pathing::{AStarSearch, PathRequest, SearchStatus, path_cost};
+use sim::{
+    Command, FxVec2, Map, MatchSetup, PlayerCommand, PlayerId, Rules, Sim, SimView, Tile, UnitId,
+    UnitKindId,
+};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+const WEST: FxVec2 = FxVec2::from_ints(24, 64);
+const EAST: FxVec2 = FxVec2::from_ints(103, 64);
+
+struct NoAi;
+
+impl sim::AiController for NoAi {
+    fn think(&mut self, _player: PlayerId, _view: &SimView<'_>) -> Vec<Command> {
+        Vec::new()
+    }
+}
+
+fn load_rules() -> Rules {
+    Rules::load(data_dir()).expect("data/ loads")
+}
+
+fn data_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+}
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+fn plains() -> Map {
+    Map::from_def(load_rules().map("plains_1v1").unwrap())
+}
+
+fn scenario(seed: u64) -> Sim {
+    let rules = load_rules();
+    let setup = MatchSetup::scenario(&rules, seed);
+    Sim::new(setup, rules, Box::new(NoAi))
+}
+
+fn spawn(owner: u8, seq: u32, at: FxVec2, count: u16) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(owner),
+        seq,
+        Command::DebugSpawn {
+            owner: PlayerId(owner),
+            kind: UnitKindId(0),
+            at,
+            count,
+        },
+    )
+}
+
+fn move_all(owner: u8, seq: u32, sim: &Sim, target: FxVec2) -> PlayerCommand {
+    let units = sim
+        .view()
+        .units()
+        .filter(|u| u.owner == PlayerId(owner))
+        .map(|u| u.id)
+        .collect();
+    PlayerCommand::new(
+        PlayerId(owner),
+        seq,
+        Command::Move {
+            units,
+            target,
+            queue: false,
+        },
+    )
+}
+
+/// The fixed M1 scenario: 500 Yeomen spawned at the west start on tick 0,
+/// ordered to the east start on tick 5, a Stop for every third unit at tick
+/// 400, then idle until `ticks`.
+fn move_500_commands(sim: &Sim, tick: u32) -> Vec<PlayerCommand> {
+    match tick {
+        0 => vec![spawn(0, 0, WEST, 500)],
+        5 => vec![move_all(0, 1, sim, EAST)],
+        400 => {
+            let units = sim
+                .view()
+                .units()
+                .filter(|u| u.id.0.is_multiple_of(3))
+                .map(|u| u.id)
+                .collect();
+            vec![PlayerCommand::new(PlayerId(0), 2, Command::Stop { units })]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn run_move_500(seed: u64, ticks: u32) -> u64 {
+    let mut sim = scenario(seed);
+    for t in 0..ticks {
+        let cmds = move_500_commands(&sim, t);
+        sim.step(&cmds);
+    }
+    sim.hash()
+}
+
+/// Load `fixtures/<name>.eonreplay`, verify it, and compare the final hash to
+/// `fixtures/<name>.hash` (`0x<16 hex>` and a newline). Fixtures are created
+/// by the integrator; regenerate only with a `rules_version` bump.
+fn golden(name: &str) {
+    let replay = fixtures_dir().join(format!("{name}.eonreplay"));
+    let hash_file = fixtures_dir().join(format!("{name}.hash"));
+    let expected = std::fs::read_to_string(&hash_file)
+        .unwrap_or_else(|e| panic!("{}: {e}", hash_file.display()));
+    let expected = expected.trim();
+    let outcome = sim::verify(&replay, &data_dir(), Box::new(NoAi))
+        .unwrap_or_else(|e| panic!("{}: {e}", replay.display()));
+    match outcome {
+        sim::VerifyOutcome::Ok { final_hash, .. } => {
+            assert_eq!(format!("0x{final_hash:016x}"), expected, "{name}");
+        }
+        other => panic!("{name}: {other}"),
+    }
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn same_seed_same_hash_two_threads() {
+    let seq_a = run_move_500(42, 600);
+    let seq_b = run_move_500(42, 600);
+    assert_eq!(seq_a, seq_b);
+    let (thr_a, thr_b) = std::thread::scope(|s| {
+        let a = s.spawn(|| run_move_500(42, 600));
+        let b = s.spawn(|| run_move_500(42, 600));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    assert_eq!(thr_a, thr_b);
+    assert_eq!(seq_a, thr_a);
+    assert_ne!(run_move_500(43, 600), seq_a, "seed must reach the hash");
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn snapshot_restore_matches_uninterrupted_including_spawns() {
+    let mut a = scenario(7);
+    for t in 0..300 {
+        let cmds = move_500_commands(&a, t);
+        a.step(&cmds);
+    }
+    let snap = a.snapshot();
+    let mut b = scenario(7);
+    b.restore(&snap).unwrap();
+    assert_eq!(a.hash(), b.hash());
+    assert_eq!(a.sub_hashes(), b.sub_hashes());
+    // Spawn 50 more units after the restore in both sims: ids must continue
+    // identically (no slot reuse) and the spiral placement must agree.
+    let extra = spawn(1, 0, EAST, 50);
+    a.step(std::slice::from_ref(&extra));
+    b.step(std::slice::from_ref(&extra));
+    for t in 301..1200 {
+        let cmds = move_500_commands(&a, t);
+        a.step(&cmds);
+        b.step(&cmds);
+        assert_eq!(a.hash(), b.hash(), "diverged at tick {t}");
+    }
+    assert_eq!(a.view().unit_count(), 550);
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn restore_rebuilds_caches() {
+    let mut a = scenario(3);
+    for t in 0..200 {
+        let cmds = move_500_commands(&a, t);
+        a.step(&cmds);
+    }
+    let snap = a.snapshot();
+    // `b` has a warm path cache and a stale spatial grid from its own run;
+    // restore must rebuild components and the grid and clear the cache.
+    let mut b = scenario(99);
+    for t in 0..150 {
+        let cmds = move_500_commands(&b, t);
+        b.step(&cmds);
+    }
+    b.restore(&snap).unwrap();
+    assert!(
+        b.view().pathing().cache.is_empty(),
+        "restore clears the cache"
+    );
+    assert_eq!(
+        b.view().map().components(),
+        a.view().map().components(),
+        "components rebuilt"
+    );
+    a.step(&[]);
+    b.step(&[]);
+    assert_eq!(a.hash(), b.hash());
+    assert_eq!(a.sub_hashes(), b.sub_hashes());
+}
+
+/// A random command stream over the scenario: spawns, moves, stops.
+fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
+    use rand_core::{Rng, SeedableRng};
+    let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
+    let mut out = Vec::new();
+    let mut seq = 0u32;
+    let mut spawned: u32 = 0;
+    for _ in 0..ticks {
+        let mut tick_cmds = Vec::new();
+        let roll = rng.next_u32() % 100;
+        if roll < 10 && spawned < 200 {
+            let x = i32::try_from(rng.next_u32() % 128).unwrap();
+            let y = i32::try_from(rng.next_u32() % 128).unwrap();
+            let count = u16::try_from(1 + rng.next_u32() % 20).unwrap();
+            spawned += u32::from(count);
+            tick_cmds.push(spawn(0, seq, FxVec2::from_ints(x, y), count));
+            seq += 1;
+        } else if roll < 40 && spawned > 0 {
+            let x = i32::try_from(rng.next_u32() % 128).unwrap();
+            let y = i32::try_from(rng.next_u32() % 128).unwrap();
+            let n = 1 + rng.next_u32() % 12;
+            let units = (0..n)
+                .map(|_| UnitId(1 + rng.next_u32() % spawned.max(1)))
+                .collect();
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Move {
+                    units,
+                    target: FxVec2::from_ints(x, y),
+                    queue: false,
+                },
+            ));
+            seq += 1;
+        } else if roll < 45 && spawned > 0 {
+            let units = vec![UnitId(1 + rng.next_u32() % spawned.max(1))];
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Stop { units },
+            ));
+            seq += 1;
+        }
+        out.push(tick_cmds);
+    }
+    out
+}
+
+fn run_with(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> Vec<u64> {
+    let mut sim = scenario(seed);
+    sim.set_path_cache_enabled(cache);
+    let mut hashes = Vec::with_capacity(stream.len());
+    for cmds in stream {
+        sim.step(cmds);
+        hashes.push(sim.hash());
+    }
+    hashes
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if std::env::var_os("CI").is_some() { 256 } else { 32 },
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    #[ignore = "M1 implementation pending"]
+    fn proptest_random_commands_are_deterministic(seed in any::<u64>(), ticks in 50u32..300) {
+        let stream = random_commands(seed, ticks);
+        let a = run_with(seed, &stream, true);
+        let b = run_with(seed, &stream, true);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    #[ignore = "M1 implementation pending"]
+    fn path_cache_is_transparent(seed in any::<u64>(), ticks in 50u32..300) {
+        let stream = random_commands(seed, ticks);
+        let on = run_with(seed, &stream, true);
+        let off = run_with(seed, &stream, false);
+        prop_assert_eq!(on, off, "hashes must agree on every tick with the cache on and off");
+    }
+}
+
+/// Run the in-house search to completion with an unlimited budget.
+fn search_full(map: &Map, from: Tile, to: Tile) -> Option<Vec<Tile>> {
+    let mut s = AStarSearch::new(map, from, to);
+    let mut budget = u32::MAX;
+    match s.resume(map, &mut budget) {
+        SearchStatus::Found(p) => Some(p),
+        SearchStatus::Exhausted => None,
+        SearchStatus::Suspended => panic!("unlimited budget suspended"),
+    }
+}
+
+/// The `pathfinding` oracle with the same neighbour function and costs.
+fn oracle(map: &Map, from: Tile, to: Tile) -> Option<(Vec<Tile>, u32)> {
+    pathfinding::prelude::astar(
+        &from,
+        |t| {
+            map.neighbors8(*t)
+                .map(|n| (n, sim::pathing::step_cost(*t, n)))
+                .collect::<Vec<_>>()
+        },
+        |t| sim::pathing::octile(*t, to),
+        |t| *t == to,
+    )
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn path_exists_iff_connected() {
+    use rand_core::{Rng, SeedableRng};
+    let mut rng = rand_pcg::Pcg32::seed_from_u64(11);
+    let mut maps = vec![plains()];
+    for _ in 0..4 {
+        let mut m = Map::open(32, 32);
+        for _ in 0..300 {
+            let x = u16::try_from(rng.next_u32() % 32).unwrap();
+            let y = u16::try_from(rng.next_u32() % 32).unwrap();
+            m.set_blocked(Tile::new(x, y), true);
+        }
+        maps.push(m);
+    }
+    for map in &maps {
+        for _ in 0..40 {
+            let rnd = |rng: &mut rand_pcg::Pcg32| {
+                Tile::new(
+                    u16::try_from(rng.next_u32() % u32::from(map.width())).unwrap(),
+                    u16::try_from(rng.next_u32() % u32::from(map.height())).unwrap(),
+                )
+            };
+            let a = rnd(&mut rng);
+            let b = rnd(&mut rng);
+            if !map.passable(a) || !map.passable(b) {
+                continue;
+            }
+            let ours = search_full(map, a, b);
+            let theirs = oracle(map, a, b);
+            let connected = map.component_of(a) == map.component_of(b);
+            assert_eq!(ours.is_some(), connected, "{a:?}->{b:?}");
+            assert_eq!(theirs.is_some(), connected, "oracle {a:?}->{b:?}");
+            if let (Some(p), Some((_, cost))) = (ours, theirs) {
+                assert_eq!(p.first(), Some(&a));
+                assert_eq!(p.last(), Some(&b));
+                assert_eq!(path_cost(&p), cost, "cost equality {a:?}->{b:?}");
+                for w in p.windows(2) {
+                    assert!(map.step_allowed(w[0], w[1]), "illegal step {w:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Check that `cmp` is a total order over `items`: antisymmetric, transitive
+/// and consistent with equality of the key.
+fn assert_total_order<T, K: Ord + std::fmt::Debug>(items: &[T], key: impl Fn(&T) -> K) {
+    use std::cmp::Ordering;
+    for a in items {
+        for b in items {
+            let ab = key(a).cmp(&key(b));
+            let ba = key(b).cmp(&key(a));
+            assert_eq!(ab, ba.reverse());
+            for c in items {
+                let bc = key(b).cmp(&key(c));
+                let ac = key(a).cmp(&key(c));
+                if ab != Ordering::Greater && bc != Ordering::Greater {
+                    assert_ne!(ac, Ordering::Greater);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sort_keys_are_total_orders() {
+    // Commands: (player, seq).
+    let cmds: Vec<PlayerCommand> = (0..3u8)
+        .flat_map(|p| {
+            (0..3u32).map(move |s| PlayerCommand::new(PlayerId(p), s, Command::Surrender))
+        })
+        .collect();
+    assert_total_order(&cmds, PlayerCommand::sort_key);
+    // Path requests: (requested_tick, UnitId).
+    let reqs: Vec<PathRequest> = (0..4u32)
+        .flat_map(|t| {
+            (1..4u32).map(move |u| PathRequest {
+                requested_tick: t,
+                unit: UnitId(u),
+                from: Tile::new(0, 0),
+                to: Tile::new(1, 1),
+            })
+        })
+        .collect();
+    assert_total_order(&reqs, PathRequest::sort_key);
+    let mut sorted = reqs.clone();
+    sorted.sort_by_key(PathRequest::sort_key);
+    assert!(sorted.windows(2).all(|w| w[0].sort_key() < w[1].sort_key()));
+    // Open-set nodes: f asc, g desc, tile asc; every distinct node comparable.
+    let nodes: Vec<sim::pathing::Node> = (0..3u32)
+        .flat_map(|f| {
+            (0..3u32)
+                .flat_map(move |g| (0..3u32).map(move |tile| sim::pathing::Node { f, g, tile }))
+        })
+        .collect();
+    assert_total_order(&nodes, |n| *n);
+    for a in &nodes {
+        for b in &nodes {
+            if a != b {
+                assert_ne!(a.cmp(b), std::cmp::Ordering::Equal, "{a:?} vs {b:?}");
+            }
+        }
+    }
+    // Unit ids and tiles (BTreeMap keys and spiral/grid iteration).
+    let ids: Vec<UnitId> = (0..6).map(UnitId).collect();
+    assert_total_order(&ids, |u| *u);
+    let tiles: Vec<Tile> = (0..3u16)
+        .flat_map(|x| (0..3u16).map(move |y| Tile::new(x, y)))
+        .collect();
+    assert_total_order(&tiles, |t| *t);
+    let units: BTreeMap<UnitId, ()> = ids.iter().map(|i| (*i, ())).collect();
+    assert!(units.keys().copied().eq(ids.iter().copied()));
+}
+
+#[test]
+fn dist_sq_i64_map_corners() {
+    let o = FxVec2::from_ints(0, 0);
+    assert_eq!(
+        o.dist_sq_i64(FxVec2::from_ints(128, 128)),
+        (2 * 128 * 128) << 32
+    );
+    assert_eq!(
+        o.dist_sq_i64(FxVec2::from_ints(256, 256)),
+        (2 * 256 * 256) << 32
+    );
+    let map = plains();
+    let a = map.center_of(Tile::new(0, 0));
+    let b = map.center_of(Tile::new(127, 127));
+    assert_eq!(a.dist_sq_i64(b), (2 * 127 * 127) << 32);
+    assert_eq!(a.dist_sq_i64(b), b.dist_sq_i64(a));
+}
+
+#[test]
+fn debug_spawn_is_rejected_in_a_skirmish_and_accepted_in_a_scenario() {
+    let rules = load_rules();
+    let mut skirmish = Sim::new(MatchSetup::skirmish(&rules, 1), rules, Box::new(NoAi));
+    let delay = skirmish.setup().cmd_delay;
+    skirmish.step(&[spawn(0, 0, WEST, 3)]);
+    for _ in 0..delay {
+        skirmish.step(&[]);
+    }
+    assert_eq!(skirmish.view().unit_count(), 0);
+    let events = skirmish.drain_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            sim::SimEvent::CommandRejected {
+                reason: sim::RejectReason::DebugCommandsDisabled,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+
+    let mut sc = scenario(1);
+    sc.step(&[spawn(0, 0, WEST, 3)]);
+    for _ in 0..delay {
+        sc.step(&[]);
+    }
+    assert_eq!(sc.view().unit_count(), 3);
+    let map = sc.view().map();
+    let mut tiles: Vec<Tile> = sc.view().units().map(|u| map.tile_of(u.pos)).collect();
+    // Spiral placement: the centre tile, then east, then south-east.
+    assert_eq!(
+        tiles,
+        vec![Tile::new(24, 64), Tile::new(25, 64), Tile::new(25, 65)]
+    );
+    tiles.sort();
+    tiles.dedup();
+    assert_eq!(tiles.len(), 3, "one unit per tile");
+    let u = sc.view().unit(UnitId(1)).unwrap();
+    assert_eq!(u.pos, map.center_of(Tile::new(24, 64)));
+    assert_eq!(u.speed, sim::Fx::from_ratio(180, 2000));
+    assert_eq!(u.radius, sim::Fx::from_ratio(35, 100));
+    assert!(u.order.is_none());
+    let spawned = sc
+        .drain_events()
+        .iter()
+        .filter(|e| matches!(e, sim::SimEvent::UnitSpawned { .. }))
+        .count();
+    assert_eq!(spawned, 3);
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn golden_move_500_short() {
+    golden("move_500_short");
+}
+
+#[test]
+#[ignore = "long golden; verified by sim-cli verify --release in CI"]
+fn golden_move_500() {
+    golden("move_500");
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn golden_group_spiral() {
+    golden("group_spiral");
+}
+
+#[test]
+#[ignore = "M1 implementation pending"]
+fn golden_snapshot_restore() {
+    golden("snapshot_restore");
+}

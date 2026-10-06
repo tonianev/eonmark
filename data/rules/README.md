@@ -1,7 +1,8 @@
 # data/rules/
 
 This directory is where every gameplay number lives. `rules.ron` holds the
-match-wide values and `resources.ron` describes the four resources. Both are
+match-wide values, `resources.ron` describes the four resources and
+`units.ron` lists the unit kinds. All are
 loaded by `rules::Rules::load` and validated before the simulation starts;
 their content is part of `rules_hash`, so editing them without bumping
 `rules_version` makes `sim-cli verify` report `RULES CHANGED since recording`
@@ -20,6 +21,7 @@ contains no floating point. The convention is:
 | Distance, radius | tiles | `_tiles` | `supply_radius_tiles: 14` |
 | Counts, caps, versions | plain integers | none | `pop_cap_base: 25` |
 | Tick-native values | ticks | `_ticks` | `cmd_delay_ticks: 2` (only this one) |
+| Fractional tiles or rates | hundredths | `_x100` | `speed_tiles_per_s_x100: 180` is 1.8 tiles/s |
 
 The single conversion lives in `Rules::ticks_from_ds`:
 
@@ -75,6 +77,25 @@ A list of resources in display order. Each entry:
 
 Lore is the only uncapped resource; it has `stockpile_cap: Some(999)` and is
 not tradeable.
+
+## units.ron
+
+A list of unit kinds; the list index is the sim's `UnitKindId`. M1 ships
+one kind, `yeoman` (index 0). Combat stats, costs and trainer buildings are
+added in M3a / M4a, each with a validator rule.
+
+| Field | Meaning | Yeoman |
+|-------|---------|--------|
+| `id` | Lowercase identifier other files use | `"yeoman"` |
+| `name` | Display name | `"Yeoman"` |
+| `speed_tiles_per_s_x100` | Movement speed in tiles per second, times 100; converted once to tiles per tick at spawn | 180 (1.8 tiles/s, 0.09 tiles/tick at 20 Hz) |
+| `radius_tiles_x100` | Collision radius in tiles, times 100 | 35 |
+| `arrive_radius_tiles_x100` | Arrival steering slows the unit inside this radius of its final waypoint | 25 |
+| `separation_tiles_x100` | Margin added to the sum of two radii before separation pushes neighbours apart | 10 |
+
+Validation: at least one kind, ids unique and lowercase, `speed_tiles_per_s_x100 > 0`,
+`radius_tiles_x100 > 0`, every `_x100` field at most 100000. Errors name
+the file and `units[i].<field>`.
 
 ## Worked example: slower attrition
 

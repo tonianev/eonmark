@@ -15,7 +15,11 @@
 //! | [`fx`] | `Fx` 32.32 fixed point, `FxVec2`, `dist_sq_i64` |
 //! | [`ids`] | `PlayerId`, `UnitId`, `BuildingId`, kind ids, `Tile`, `IdGen` |
 //! | [`command`] | `Command`, `PlayerCommand`, `sort_commands` |
-//! | [`state`] | `Sim`, `MatchSetup`, `State`, snapshot/restore |
+//! | [`state`] | `Sim`, `MatchSetup`, `State`, `Unit`, `MoveOrder`, `SimEvent`, `SubHashes`, snapshot/restore |
+//! | [`map`] | `Map`: cost grid, generation, components, neighbours, BFS, spiral |
+//! | [`pathing`] | budgeted resumable A*, request queue, transparent cache |
+//! | [`movement`] | `SpatialGrid`, movement step, group targets |
+//! | [`replay`] | `.eonreplay` writer, reader, `verify` |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
@@ -26,6 +30,10 @@ pub mod command;
 pub mod fx;
 pub mod hash;
 pub mod ids;
+pub mod map;
+pub mod movement;
+pub mod pathing;
+pub mod replay;
 pub mod state;
 
 pub use ai_hook::{AiController, SimView};
@@ -34,5 +42,12 @@ pub use fx::{Fx, FxVec2};
 pub use ids::{
     BuildingId, BuildingKindId, IdGen, PlayerId, TargetId, TechId, Tile, UnitId, UnitKindId,
 };
+pub use map::Map;
+pub use movement::SpatialGrid;
+pub use pathing::{AStarSearch, PathRequest, Pathing, SearchStatus};
+pub use replay::{ReplayError, ReplayReader, ReplayWriter, VerifyOutcome, verify};
 pub use rules::Rules;
-pub use state::{Building, MatchSetup, Player, PlayerSlot, SIM_VERSION, Sim, SnapshotError, Unit};
+pub use state::{
+    Building, MatchSetup, MoveOrder, Player, PlayerSlot, REPATH_INTERVAL_TICKS, RejectReason,
+    SIM_VERSION, Sim, SimEvent, SnapshotError, SubHashes, Unit,
+};

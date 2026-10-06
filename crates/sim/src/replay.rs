@@ -42,10 +42,11 @@
 
 use crate::ai_hook::AiController;
 use crate::command::PlayerCommand;
-use crate::state::{MatchSetup, SubHashes};
+use crate::state::{MatchSetup, SIM_VERSION, Sim, SubHashes};
+use rules::Rules;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// File magic.
@@ -127,6 +128,17 @@ pub enum ReplayError {
     Encode(postcard::Error),
     /// The rules under `data_dir` did not load.
     Rules(rules::Error),
+    /// A record's tick lies before the tick the stream had already reached.
+    /// Records are written in tick order; this file was spliced or not
+    /// written by [`ReplayWriter`].
+    OutOfOrder {
+        /// File involved.
+        path: PathBuf,
+        /// Tick of the offending record.
+        tick: u32,
+        /// Tick the re-simulation had already reached.
+        reached: u32,
+    },
 }
 
 impl core::fmt::Display for ReplayError {
@@ -150,6 +162,15 @@ impl core::fmt::Display for ReplayError {
             }
             ReplayError::Encode(e) => write!(f, "replay record does not encode: {e}"),
             ReplayError::Rules(e) => write!(f, "{e}"),
+            ReplayError::OutOfOrder {
+                path,
+                tick,
+                reached,
+            } => write!(
+                f,
+                "{}: record for tick {tick} after the stream reached tick {reached}",
+                path.display()
+            ),
         }
     }
 }
@@ -173,25 +194,57 @@ pub struct ReplayWriter {
 impl ReplayWriter {
     /// Create (truncate) `path` and write the magic, version and header.
     pub fn create(path: &Path, setup: &MatchSetup) -> Result<ReplayWriter, ReplayError> {
-        let _ = (path, setup);
-        todo!("M1 replay: ReplayWriter::create (implementer C)")
+        let io = |source| ReplayError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let file = File::create(path).map_err(io)?;
+        let mut out = BufWriter::new(file);
+        out.write_all(&MAGIC).map_err(io)?;
+        out.write_all(&FORMAT_VERSION.to_le_bytes()).map_err(io)?;
+        let header = postcard::to_allocvec(setup).map_err(ReplayError::Encode)?;
+        out.write_all(&header).map_err(io)?;
+        Ok(ReplayWriter {
+            path: path.to_path_buf(),
+            out,
+            records: 0,
+        })
+    }
+
+    fn record(&mut self, record: &Record) -> Result<(), ReplayError> {
+        let bytes = postcard::to_allocvec(record).map_err(ReplayError::Encode)?;
+        self.out
+            .write_all(&bytes)
+            .map_err(|source| ReplayError::Io {
+                path: self.path.clone(),
+                source,
+            })?;
+        self.records += 1;
+        Ok(())
     }
 
     /// Append a [`Record::Tick`]. A no-op when `cmds` is empty.
     pub fn tick(&mut self, tick: u32, cmds: &[PlayerCommand]) -> Result<(), ReplayError> {
-        let _ = (tick, cmds);
-        todo!("M1 replay: ReplayWriter::tick (implementer C)")
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.record(&Record::Tick(TickBatch {
+            tick,
+            cmds: cmds.to_vec(),
+        }))
     }
 
     /// Append a [`Record::Hash`].
     pub fn hash(&mut self, tick: u32, hash: u64, sub: &SubHashes) -> Result<(), ReplayError> {
-        let _ = (tick, hash, sub);
-        todo!("M1 replay: ReplayWriter::hash (implementer C)")
+        self.record(&Record::Hash(HashRecord {
+            tick,
+            hash,
+            sub: *sub,
+        }))
     }
 
     /// Write buffered bytes to the OS (no fsync).
     pub fn flush(&mut self) -> Result<(), ReplayError> {
-        use std::io::Write;
         self.out.flush().map_err(|source| ReplayError::Io {
             path: self.path.clone(),
             source,
@@ -199,8 +252,15 @@ impl ReplayWriter {
     }
 
     /// Flush and `sync_all`; consumes the writer. Call once at clean exit.
-    pub fn finish(self) -> Result<(), ReplayError> {
-        todo!("M1 replay: ReplayWriter::finish (implementer C)")
+    pub fn finish(mut self) -> Result<(), ReplayError> {
+        self.flush()?;
+        self.out
+            .get_ref()
+            .sync_all()
+            .map_err(|source| ReplayError::Io {
+                path: self.path.clone(),
+                source,
+            })
     }
 
     /// File being written.
@@ -222,14 +282,47 @@ impl ReplayReader {
     /// Read the whole file: header (magic and version checked) and every
     /// complete record. A truncated final record is dropped silently.
     pub fn open(path: &Path) -> Result<(MatchSetup, Vec<Record>), ReplayError> {
-        let _ = path;
-        todo!("M1 replay: ReplayReader::open (implementer C)")
+        let bytes = std::fs::read(path).map_err(|source| ReplayError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        ReplayReader::decode(path, &bytes)
     }
 
     /// Decode from bytes already in memory (the body of `open`; tests use it).
     pub fn decode(path: &Path, bytes: &[u8]) -> Result<(MatchSetup, Vec<Record>), ReplayError> {
-        let _ = (path, bytes);
-        todo!("M1 replay: ReplayReader::decode (implementer C)")
+        if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC {
+            return Err(ReplayError::BadMagic {
+                path: path.to_path_buf(),
+            });
+        }
+        let rest = &bytes[MAGIC.len()..];
+        let Some((version, rest)) = rest.split_first_chunk::<2>() else {
+            return Err(ReplayError::Header {
+                path: path.to_path_buf(),
+                source: postcard::Error::DeserializeUnexpectedEnd,
+            });
+        };
+        let found = u16::from_le_bytes(*version);
+        if found != FORMAT_VERSION {
+            return Err(ReplayError::UnsupportedVersion {
+                path: path.to_path_buf(),
+                found,
+            });
+        }
+        let (setup, mut rest): (MatchSetup, &[u8]) =
+            postcard::take_from_bytes(rest).map_err(|source| ReplayError::Header {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut records = Vec::new();
+        // Stop at the first record that does not decode: a `kill -9` leaves a
+        // partial final record, which is dropped with everything after it.
+        while let Ok((record, tail)) = postcard::take_from_bytes::<Record>(rest) {
+            records.push(record);
+            rest = tail;
+        }
+        Ok((setup, records))
     }
 }
 
@@ -305,8 +398,154 @@ pub fn verify(
     data_dir: &Path,
     ai: Box<dyn AiController>,
 ) -> Result<VerifyOutcome, ReplayError> {
-    let _ = (path, data_dir, ai);
-    todo!("M1 replay: verify (implementer C)")
+    let (setup, records) = ReplayReader::open(path)?;
+    let mut sim = match prepare(setup, data_dir, ai)? {
+        Ok(sim) => sim,
+        Err(outcome) => return Ok(outcome),
+    };
+    let mut last_hash: Option<(u32, u64)> = None;
+    for record in &records {
+        let tick = record_tick(record);
+        advance_to(&mut sim, tick, path)?;
+        match record {
+            Record::Tick(batch) => sim.step(&batch.cmds),
+            Record::Hash(rec) => {
+                if sim.hash() != rec.hash {
+                    let subsystem = sim
+                        .sub_hashes()
+                        .first_difference(&rec.sub)
+                        .unwrap_or("state");
+                    return Ok(VerifyOutcome::Diverged {
+                        tick: rec.tick,
+                        subsystem,
+                    });
+                }
+                last_hash = Some((rec.tick, rec.hash));
+            }
+        }
+    }
+    Ok(match last_hash {
+        Some((ticks, final_hash)) => VerifyOutcome::Ok { final_hash, ticks },
+        None => VerifyOutcome::Ok {
+            final_hash: sim.hash(),
+            ticks: sim.tick(),
+        },
+    })
+}
+
+/// Re-simulate `path` like [`verify`] without comparing hashes, calling
+/// `emit(tick, hash, sub_hashes)` after every step whose resulting tick is a
+/// multiple of `every` (at least 1) and once more at the end. The run ends
+/// at the larger of the last hash record's tick and one past the last tick
+/// batch. Version and rules mismatches are returned as in [`verify`]; a
+/// completed dump returns `Ok` with the re-simulation's own final hash and
+/// tick. `sim-cli hash-dump <replay> --every N` prints the emitted lines;
+/// `docs/DETERMINISM.md` explains bisecting with them.
+pub fn hash_dump(
+    path: &Path,
+    data_dir: &Path,
+    ai: Box<dyn AiController>,
+    every: u32,
+    mut emit: impl FnMut(u32, u64, &SubHashes),
+) -> Result<VerifyOutcome, ReplayError> {
+    let (setup, records) = ReplayReader::open(path)?;
+    let mut sim = match prepare(setup, data_dir, ai)? {
+        Ok(sim) => sim,
+        Err(outcome) => return Ok(outcome),
+    };
+    let every = every.max(1);
+    let end = records
+        .iter()
+        .map(|r| match r {
+            Record::Tick(b) => b.tick.saturating_add(1),
+            Record::Hash(h) => h.tick,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut batches = records.iter().filter_map(|r| match r {
+        Record::Tick(b) => Some(b),
+        Record::Hash(_) => None,
+    });
+    let mut next = batches.next();
+    while sim.tick() < end {
+        let tick = sim.tick();
+        match next {
+            Some(b) if b.tick < tick => {
+                return Err(ReplayError::OutOfOrder {
+                    path: path.to_path_buf(),
+                    tick: b.tick,
+                    reached: tick,
+                });
+            }
+            Some(b) if b.tick == tick => {
+                sim.step(&b.cmds);
+                next = batches.next();
+            }
+            _ => sim.step(&[]),
+        }
+        let now = sim.tick();
+        if now.is_multiple_of(every) || now == end {
+            emit(now, sim.hash(), &sim.sub_hashes());
+        }
+    }
+    if let Some(b) = next {
+        // Only a batch for a tick already passed can remain once `end` is reached.
+        return Err(ReplayError::OutOfOrder {
+            path: path.to_path_buf(),
+            tick: b.tick,
+            reached: sim.tick(),
+        });
+    }
+    Ok(VerifyOutcome::Ok {
+        final_hash: sim.hash(),
+        ticks: sim.tick(),
+    })
+}
+
+/// The checks shared by [`verify`] and [`hash_dump`]: `sim_version` before
+/// anything is loaded, then the rules and their hash. `Ok(Err(outcome))` is
+/// a mismatch; `Ok(Ok(sim))` is a fresh sim at tick 0.
+fn prepare(
+    setup: MatchSetup,
+    data_dir: &Path,
+    ai: Box<dyn AiController>,
+) -> Result<Result<Sim, VerifyOutcome>, ReplayError> {
+    if setup.sim_version != SIM_VERSION {
+        return Ok(Err(VerifyOutcome::SimVersionMismatch {
+            replay: setup.sim_version,
+            binary: SIM_VERSION,
+        }));
+    }
+    let rules = Rules::load(data_dir)?;
+    if rules.rules_hash() != setup.rules_hash {
+        return Ok(Err(VerifyOutcome::RulesChanged {
+            replay: setup.rules_hash,
+            loaded: rules.rules_hash(),
+        }));
+    }
+    Ok(Ok(Sim::new(setup, rules, ai)))
+}
+
+fn record_tick(record: &Record) -> u32 {
+    match record {
+        Record::Tick(b) => b.tick,
+        Record::Hash(h) => h.tick,
+    }
+}
+
+/// Step with empty command lists until `sim.tick() == tick`.
+fn advance_to(sim: &mut Sim, tick: u32, path: &Path) -> Result<(), ReplayError> {
+    if tick < sim.tick() {
+        return Err(ReplayError::OutOfOrder {
+            path: path.to_path_buf(),
+            tick,
+            reached: sim.tick(),
+        });
+    }
+    while sim.tick() < tick {
+        sim.step(&[]);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -373,5 +612,361 @@ mod tests {
         let cut = &bytes[..bytes.len() - 3];
         let (_, rest): (Record, &[u8]) = postcard::take_from_bytes(cut).unwrap();
         assert!(postcard::take_from_bytes::<Record>(rest).is_err());
+    }
+
+    // ---- end-to-end tests over a scenario the M1 contract sim runs today --
+
+    use crate::command::Command;
+    use crate::fx::FxVec2;
+    use crate::ids::{PlayerId, UnitId, UnitKindId};
+
+    struct NoAi;
+
+    impl AiController for NoAi {
+        fn think(&mut self, _p: PlayerId, _v: &crate::ai_hook::SimView<'_>) -> Vec<Command> {
+            Vec::new()
+        }
+    }
+
+    fn data_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eonmark-replay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{name}.eonreplay"))
+    }
+
+    fn scenario_setup(seed: u64) -> (MatchSetup, Rules) {
+        let rules = Rules::load(data_dir()).expect("data/ loads");
+        (MatchSetup::scenario(&rules, seed), rules)
+    }
+
+    const SPAWN_COUNT: u16 = 3;
+
+    /// Spawn, a not-yet-implemented command (advances the rng) and a Stop:
+    /// everything the contract sim applies without the pathing and movement
+    /// bodies (fixtures with Move orders are recorded by sim-cli once those
+    /// land).
+    fn scenario_commands(tick: u32) -> Vec<PlayerCommand> {
+        match tick {
+            0 => vec![PlayerCommand::new(
+                PlayerId(0),
+                0,
+                Command::DebugSpawn {
+                    owner: PlayerId(0),
+                    kind: UnitKindId(0),
+                    at: FxVec2::from_ints(24, 64),
+                    count: SPAWN_COUNT,
+                },
+            )],
+            10 => vec![PlayerCommand::new(
+                PlayerId(0),
+                1,
+                Command::AttackMove {
+                    units: vec![UnitId(1)],
+                    target: FxVec2::from_ints(100, 64),
+                },
+            )],
+            30 => vec![PlayerCommand::new(
+                PlayerId(1),
+                0,
+                Command::Stop {
+                    units: vec![UnitId(2)],
+                },
+            )],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Record `ticks` ticks of the scenario with a hash every `hash_every`
+    /// ticks plus the final one; returns the recorded `(tick, hash)` pairs.
+    fn record(path: &Path, setup: MatchSetup, ticks: u32, hash_every: u32) -> Vec<(u32, u64)> {
+        let rules = Rules::load(data_dir()).unwrap();
+        let mut sim = Sim::new(setup.clone(), rules, Box::new(NoAi));
+        let mut w = ReplayWriter::create(path, &setup).unwrap();
+        let mut hashes = Vec::new();
+        for t in 0..ticks {
+            let cmds = scenario_commands(t);
+            w.tick(t, &cmds).unwrap();
+            sim.step(&cmds);
+            if sim.tick().is_multiple_of(hash_every) || sim.tick() == ticks {
+                w.hash(sim.tick(), sim.hash(), &sim.sub_hashes()).unwrap();
+                hashes.push((sim.tick(), sim.hash()));
+            }
+            if sim.tick().is_multiple_of(DEFAULT_HASH_EVERY) {
+                w.flush().unwrap();
+            }
+        }
+        w.finish().unwrap();
+        hashes
+    }
+
+    #[test]
+    fn writer_and_reader_round_trip() {
+        let path = temp_path("round_trip");
+        let (setup, _) = scenario_setup(5);
+        let hashes = record(&path, setup.clone(), 50, 20);
+        assert_eq!(hashes.iter().map(|h| h.0).collect::<Vec<_>>(), [20, 40, 50]);
+        let (read_setup, records) = ReplayReader::open(&path).unwrap();
+        assert_eq!(read_setup, setup);
+        let ticks: Vec<u32> = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Tick(b) => Some(b.tick),
+                Record::Hash(_) => None,
+            })
+            .collect();
+        assert_eq!(ticks, [0, 10, 30]);
+        let recorded: Vec<(u32, u64)> = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Hash(h) => Some((h.tick, h.hash)),
+                Record::Tick(_) => None,
+            })
+            .collect();
+        assert_eq!(recorded, hashes);
+        // Tick order: Hash(20) sits between Tick(10) and Tick(30).
+        let order: Vec<u32> = records.iter().map(record_tick).collect();
+        assert!(order.windows(2).all(|w| w[0] <= w[1]), "{order:?}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..4], &MAGIC);
+        assert_eq!(bytes[4..6], FORMAT_VERSION.to_le_bytes());
+    }
+
+    #[test]
+    fn reader_tolerates_truncation_mid_record() {
+        let path = temp_path("truncated");
+        let (setup, _) = scenario_setup(5);
+        record(&path, setup, 60, 20);
+        let bytes = std::fs::read(&path).unwrap();
+        let (_, full) = ReplayReader::decode(&path, &bytes).unwrap();
+        // The last record is Hash(60); cut it in half.
+        let last = postcard::to_allocvec(full.last().unwrap()).unwrap();
+        assert!(bytes.ends_with(&last));
+        let cut = &bytes[..bytes.len() - last.len() / 2];
+        let (_, records) = ReplayReader::decode(&path, cut).unwrap();
+        assert_eq!(records.len(), full.len() - 1);
+        assert_eq!(records, full[..full.len() - 1]);
+        // Cut at a record boundary: still every complete record.
+        let cut = &bytes[..bytes.len() - last.len()];
+        let (_, records) = ReplayReader::decode(&path, cut).unwrap();
+        assert_eq!(records, full[..full.len() - 1]);
+        // Cut inside the header.
+        let err = ReplayReader::decode(&path, &bytes[..10]).unwrap_err();
+        assert!(matches!(err, ReplayError::Header { .. }), "{err}");
+        // Shorter than the version field.
+        let err = ReplayReader::decode(&path, &bytes[..5]).unwrap_err();
+        assert!(matches!(err, ReplayError::Header { .. }), "{err}");
+        // Bad magic and an unsupported version.
+        let err = ReplayReader::decode(&path, b"EONX").unwrap_err();
+        assert!(matches!(err, ReplayError::BadMagic { .. }), "{err}");
+        let err = ReplayReader::decode(&path, b"EO").unwrap_err();
+        assert!(matches!(err, ReplayError::BadMagic { .. }), "{err}");
+        let mut v2 = bytes.clone();
+        v2[4..6].copy_from_slice(&2u16.to_le_bytes());
+        let err = ReplayReader::decode(&path, &v2).unwrap_err();
+        assert!(
+            matches!(err, ReplayError::UnsupportedVersion { found: 2, .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn verify_reproduces_a_recording_and_a_truncated_copy() {
+        let path = temp_path("verify_ok");
+        let (setup, _) = scenario_setup(9);
+        let hashes = record(&path, setup, 70, 20);
+        let outcome = verify(&path, &data_dir(), Box::new(NoAi)).unwrap();
+        let (ticks, final_hash) = *hashes.last().unwrap();
+        assert_eq!(outcome, VerifyOutcome::Ok { final_hash, ticks });
+        assert_eq!(ticks, 70);
+        assert_eq!(outcome.exit_code(), 0);
+        // Truncate mid-record (as `kill -9` would): the file verifies up to
+        // the last complete hash record.
+        let bytes = std::fs::read(&path).unwrap();
+        let cut_path = temp_path("verify_cut");
+        std::fs::write(&cut_path, &bytes[..bytes.len() - 5]).unwrap();
+        let outcome = verify(&cut_path, &data_dir(), Box::new(NoAi)).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Ok {
+                final_hash: hashes[2].1,
+                ticks: 60
+            }
+        );
+    }
+
+    #[test]
+    fn verify_reports_sim_version_mismatch_before_loading_rules() {
+        let path = temp_path("sim_version");
+        let (mut setup, _) = scenario_setup(1);
+        setup.sim_version = SIM_VERSION + 1;
+        let mut w = ReplayWriter::create(&path, &setup).unwrap();
+        w.hash(0, 0, &SubHashes::default()).unwrap();
+        w.finish().unwrap();
+        // A data dir that does not exist proves the rules are never loaded.
+        let outcome = verify(&path, Path::new("/nonexistent/data"), Box::new(NoAi)).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::SimVersionMismatch {
+                replay: SIM_VERSION + 1,
+                binary: SIM_VERSION
+            }
+        );
+        assert_eq!(outcome.exit_code(), 1);
+    }
+
+    #[test]
+    fn verify_reports_rules_changed() {
+        let path = temp_path("rules_hash");
+        let (mut setup, rules) = scenario_setup(1);
+        setup.rules_hash ^= 0x1;
+        let mut w = ReplayWriter::create(&path, &setup).unwrap();
+        w.hash(0, 0, &SubHashes::default()).unwrap();
+        w.finish().unwrap();
+        let outcome = verify(&path, &data_dir(), Box::new(NoAi)).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::RulesChanged {
+                replay: setup.rules_hash,
+                loaded: rules.rules_hash()
+            }
+        );
+        assert_eq!(outcome.exit_code(), 1);
+        // Missing data is an error, not an outcome.
+        let err = verify(&path, Path::new("/nonexistent/data"), Box::new(NoAi)).unwrap_err();
+        assert!(matches!(err, ReplayError::Rules(_)), "{err}");
+    }
+
+    #[test]
+    fn verify_detects_a_flipped_command_byte() {
+        let path = temp_path("diverged");
+        let (setup, _) = scenario_setup(3);
+        record(&path, setup, 60, 20);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Locate the spawn record and bump its `count` by one.
+        let original = postcard::to_allocvec(&Record::Tick(TickBatch {
+            tick: 0,
+            cmds: scenario_commands(0),
+        }))
+        .unwrap();
+        let mut flipped_cmds = scenario_commands(0);
+        let Command::DebugSpawn { count, .. } = &mut flipped_cmds[0].cmd else {
+            unreachable!()
+        };
+        *count += 1;
+        let flipped = postcard::to_allocvec(&Record::Tick(TickBatch {
+            tick: 0,
+            cmds: flipped_cmds,
+        }))
+        .unwrap();
+        assert_eq!(original.len(), flipped.len());
+        let diff: Vec<usize> = (0..original.len())
+            .filter(|&i| original[i] != flipped[i])
+            .collect();
+        assert_eq!(diff.len(), 1, "exactly one byte differs");
+        let at = bytes
+            .windows(original.len())
+            .position(|w| w == original.as_slice())
+            .expect("spawn record present");
+        bytes[at + diff[0]] = flipped[diff[0]];
+        let bad = temp_path("diverged_copy");
+        std::fs::write(&bad, &bytes).unwrap();
+        let outcome = verify(&bad, &data_dir(), Box::new(NoAi)).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Diverged {
+                tick: 20,
+                subsystem: "units"
+            }
+        );
+        assert_eq!(outcome.exit_code(), 1);
+        assert_eq!(
+            outcome.to_string(),
+            "DIVERGED at tick 20 (subsystem: units)"
+        );
+    }
+
+    #[test]
+    fn verify_without_hash_records_reports_the_last_tick() {
+        let path = temp_path("no_hashes");
+        let (setup, rules) = scenario_setup(2);
+        let mut sim = Sim::new(setup.clone(), rules, Box::new(NoAi));
+        let mut w = ReplayWriter::create(&path, &setup).unwrap();
+        for t in 0..35 {
+            let cmds = scenario_commands(t);
+            w.tick(t, &cmds).unwrap();
+            sim.step(&cmds);
+        }
+        w.finish().unwrap();
+        // The last Tick record is at 30, so the stream reaches tick 31.
+        let outcome = verify(&path, &data_dir(), Box::new(NoAi)).unwrap();
+        let mut expect = Sim::new(setup, Rules::load(data_dir()).unwrap(), Box::new(NoAi));
+        for t in 0..31 {
+            expect.step(&scenario_commands(t));
+        }
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Ok {
+                final_hash: expect.hash(),
+                ticks: 31
+            }
+        );
+    }
+
+    #[test]
+    fn out_of_order_records_are_an_error() {
+        let path = temp_path("out_of_order");
+        let (setup, _) = scenario_setup(2);
+        let mut w = ReplayWriter::create(&path, &setup).unwrap();
+        w.tick(10, &scenario_commands(0)).unwrap();
+        w.tick(2, &scenario_commands(0)).unwrap();
+        w.finish().unwrap();
+        // Tick(10) is stepped (the stream reaches 11), then Tick(2) is in the past.
+        let err = verify(&path, &data_dir(), Box::new(NoAi)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ReplayError::OutOfOrder {
+                    tick: 2,
+                    reached: 11,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let err = hash_dump(&path, &data_dir(), Box::new(NoAi), 1, |_, _, _| {}).unwrap_err();
+        assert!(matches!(err, ReplayError::OutOfOrder { .. }), "{err}");
+    }
+
+    #[test]
+    fn hash_dump_emits_every_n_and_the_final_tick() {
+        let path = temp_path("hash_dump");
+        let (setup, _) = scenario_setup(4);
+        let hashes = record(&path, setup, 45, 20);
+        let mut lines = Vec::new();
+        let outcome = hash_dump(&path, &data_dir(), Box::new(NoAi), 10, |t, h, sub| {
+            lines.push((t, h, *sub));
+        })
+        .unwrap();
+        let ticks: Vec<u32> = lines.iter().map(|l| l.0).collect();
+        assert_eq!(ticks, [10, 20, 30, 40, 45]);
+        // Dumped hashes agree with the recorded ones where both exist.
+        for (t, h) in &hashes {
+            let line = lines.iter().find(|l| l.0 == *t).unwrap();
+            assert_eq!(line.1, *h);
+        }
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Ok {
+                final_hash: hashes.last().unwrap().1,
+                ticks: 45
+            }
+        );
+        // Sub-hashes differ between ticks (tick lives in `meta`).
+        assert_ne!(lines[0].2.meta, lines[1].2.meta);
+        assert_eq!(lines[0].2.first_difference(&lines[0].2), None);
     }
 }

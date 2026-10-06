@@ -93,7 +93,7 @@ The path cache is the opposite case: it must never change results, so it is `#[s
 | `map` | The cost grid and `cost_grid_generation` | M1 |
 | `meta` | `tick`, `seed`, the `IdGen` allocator, players, the pending command queue, `commands_applied` | M1 |
 
-The field order of `SubHashes` is the comparison order: `SubHashes::first_difference` returns the name of the first field that differs, which is what `verify` prints. `SubHashes::NAMES` lists the nine names in that order and is the column header of `hash-dump`. Subsystems that do not exist yet hash an empty placeholder so the layout is stable across milestones. Every field of the hashed `State` belongs to exactly one sub-hash, so any divergence has a name.
+The field order of `SubHashes` is the comparison order: `SubHashes::first_difference` returns the name of the first field that differs, which is what `verify` prints. `SubHashes::NAMES` lists the nine names in that order and names the `key=value` fields of a `hash-dump` line. Subsystems that do not exist yet hash an empty placeholder so the layout is stable across milestones. Every field of the hashed `State` belongs to exactly one sub-hash, so any divergence has a name.
 
 Hashes are recorded every 20 ticks by default (`replay::DEFAULT_HASH_EVERY`) and every tick under `--hash-every-tick` (`sim-cli record` from M1; the game's writer thread from M2).
 
@@ -117,7 +117,7 @@ postcard(Record)*           stream, no framing, in tick order
 
 A tick's `Tick` record precedes its `Hash` record. Hash records carry the sub-hashes, not just the whole-state hash, so that `verify` can name the diverging subsystem from the replay alone: without them, naming the subsystem would need a second re-simulation on the machine that recorded the file, which is exactly what is unavailable when a replay comes in from somewhere else.
 
-The reader tolerates truncation. It decodes records with `postcard::take_from_bytes` and stops at the first record that does not decode, keeping everything before it; postcard encodings are self-delimiting and prefix-free per type, so a cut-off tail never decodes as a shorter valid record. A file cut by `kill -9` therefore verifies up to its last complete hash record and `verify` reports that tick count. A file shorter than its header is `ReplayError::Header`; wrong magic is `BadMagic`; a version other than 1 is `UnsupportedVersion`.
+The reader tolerates truncation. It decodes records with `postcard::take_from_bytes` and stops at the first record that does not decode, keeping everything before it; postcard encodings are self-delimiting and prefix-free per type, so a cut-off tail never decodes as a shorter valid record. A file cut by `kill -9` therefore verifies up to its last complete hash record and `verify` reports that tick count. A file shorter than its header is `ReplayError::Header`; wrong magic is `BadMagic`; a version other than 1 is `UnsupportedVersion`. A record whose tick lies before the tick the stream has already reached is a corrupt file, not truncation: the reader returns `ReplayError::OutOfOrder { path, tick, reached }` and `verify` reports it as an error (exit 2) rather than skipping it.
 
 ### Header fields
 
@@ -170,12 +170,11 @@ cargo run -p sim-cli --release -- hash-dump match.eonreplay --every 1
 ```
 
 ```text
-tick hash units buildings economy territory tech pathing rng map meta
-0 0x... 0x... 0x... 0x... 0x... 0x... 0x... 0x... 0x... 0x...
-1 0x... ...
+tick=1 hash=0x26cf75ae625738e2 units=0xc44bdff4074eecdb buildings=0xc44bdff4074eecdb economy=0x2d06800538d394c2 territory=0x2d06800538d394c2 tech=0x2d06800538d394c2 pathing=0x3325230e1f285505 rng=0x45713480d687fdbd map=0x38587eaeac2ca50a meta=0x5440e9088c79a4e6
+tick=2 hash=0x4b37015c35074176 units=0xc44bdff4074eecdb ...
 ```
 
-The columns after `hash` are `SubHashes::NAMES` in field order. `--every N` prints every N-th tick (default 20, matching the recording cadence). `hash-dump` does not compare anything itself; it is the input to `diff`. The scripted M0 form, `hash-dump --ticks N --seed S`, still exists and prints the whole-state hash of the selftest match.
+Each line is `key=value` pairs: `tick`, the whole-state `hash`, then one field per name in `SubHashes::NAMES`, in field order (the lines above are the first two of `move_500_short`). A line is printed after the step that completes that tick, so the last line of a complete dump carries the replay's final hash. `--every N` prints every N-th tick (default 20, matching the recording cadence). `hash-dump` does not compare anything itself; it is the input to `diff`. The scripted M0 form, `hash-dump --ticks N --seed S`, still exists and prints the whole-state hash of the selftest match.
 
 To bisect across two machines (or two builds, or two operating systems):
 
@@ -235,9 +234,9 @@ Fixtures live under `crates/sim/tests/fixtures/` as `.eonreplay` files with a si
 
 | Fixture | Ticks | Verified by |
 |---|---|---|
-| `move_500_short` | 600 | `cargo test -p sim` |
-| `group_spiral` | short | `cargo test -p sim`, `sim-cli verify --release` in CI |
-| `snapshot_restore` | short | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `move_500_short` | 300 (the first 300 ticks of `move_500`, before its Stop) | `cargo test -p sim` |
+| `group_spiral` | 600 | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `snapshot_restore` | 1200 (recorded across a snapshot/restore swap at tick 300) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 | `move_500` | 1200 | `sim-cli verify --release` in CI on both operating systems; the hash-parity fixture |
 
 Regeneration policy:

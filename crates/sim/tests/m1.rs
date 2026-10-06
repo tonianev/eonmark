@@ -1,7 +1,6 @@
-//! M1 acceptance tests (docs/ROADMAP.md, "M1"). Tests marked
-//! `#[ignore = "M1 implementation pending"]` call the real APIs and compile
-//! today; implementers remove the attribute as they land the bodies
-//! (pathing tests: A; movement, state and goldens: B and C).
+//! M1 acceptance tests (docs/ROADMAP.md, "M1"). Every test runs in
+//! `cargo test -p sim` except `golden_move_500`, the long golden that
+//! `sim-cli verify --release` checks in CI.
 
 use proptest::prelude::*;
 use sim::pathing::{AStarSearch, PathRequest, Pathing, SearchStatus, path_cost};
@@ -661,7 +660,6 @@ fn debug_spawn_is_rejected_in_a_skirmish_and_accepted_in_a_scenario() {
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn golden_move_500_short() {
     golden("move_500_short");
 }
@@ -673,13 +671,11 @@ fn golden_move_500() {
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn golden_group_spiral() {
     golden("group_spiral");
 }
 
 #[test]
-#[ignore = "M1 implementation pending"]
 fn golden_snapshot_restore() {
     golden("snapshot_restore");
 }

@@ -93,13 +93,19 @@ data-check:
 bots *ARGS:
     @echo "bots: available from M5b (sim-cli play-bots)"
 
-# Sim benchmarks (available from M1).
+# Sim benchmarks: `just bench` runs the 500-mover crossing, `just bench --astar --budget 4000` one saturated A* tick.
 bench *ARGS:
-    @echo "bench: available from M1 (sim-cli bench)"
+    cargo run -p sim-cli --locked --release -- bench {{ARGS}}
 
-# Verify replay fixtures (available from M1).
+# Verify replay fixtures in release: every golden under crates/sim/tests/fixtures/, or the files given.
 verify *ARGS:
-    @echo "verify: available from M1 (sim-cli verify)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ $# -eq 0 ]; then set -- crates/sim/tests/fixtures/*.eonreplay; fi
+    for f in "$@"; do
+      printf '%s: ' "$f"
+      cargo run -q -p sim-cli --locked --release -- verify "$f"
+    done
 
 # Build the release binary and assemble dist/Eonmark.app, zip and SHA256SUMS.
 bundle VERSION="":

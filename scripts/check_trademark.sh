@@ -8,7 +8,8 @@
 # inspiration's fan wiki may not appear anywhere.
 # The check runs
 # over the working tree (not the git index) so it works before the first
-# commit and catches unstaged files. target/, dist/ and .git/ are skipped.
+# commit and catches unstaged files. target/, dist/, .git/ and .claude/ (the
+# agent harness keeps its worktrees there) are skipped.
 #
 # Usage: scripts/check_trademark.sh [repo-root]
 # Exit 0 when clean; exit 1 and print the offending lines otherwise.
@@ -23,7 +24,7 @@ abbr="Ro""N"
 status=0
 
 grep_tree() {
-  grep -rIn --exclude-dir=target --exclude-dir=dist --exclude-dir=.git "$@" . || true
+  grep -rIn --exclude-dir=target --exclude-dir=dist --exclude-dir=.git --exclude-dir=.claude "$@" . || true
 }
 
 filter_allowed() {

@@ -32,10 +32,13 @@ pub const EAST: FxVec2 = FxVec2::from_ints(103, 64);
 /// Length of [`move_500`]: 500 Yeomen cross the map (80 tiles at 1.8
 /// tiles/s is 890 ticks plus jams).
 pub const MOVE_500_TICKS: u32 = 1200;
-/// Length of [`move_500_short`]: the same stream cut for `cargo test`.
-pub const MOVE_500_SHORT_TICKS: u32 = 600;
-/// Length of [`group_spiral`].
-pub const GROUP_SPIRAL_TICKS: u32 = 800;
+/// Length of [`move_500_short`]: the same stream cut for `cargo test`
+/// (the Stop during tick 400 lies beyond it; the full [`move_500`] fixture
+/// covers it in CI).
+pub const MOVE_500_SHORT_TICKS: u32 = 300;
+/// Length of [`group_spiral`]: the second order (during tick 300) is still
+/// in progress at the end, which is enough to lock the target assignment.
+pub const GROUP_SPIRAL_TICKS: u32 = 600;
 /// Length of [`snapshot_restore`].
 pub const SNAPSHOT_RESTORE_TICKS: u32 = 1200;
 /// Tick at which [`snapshot_restore`] expects the snapshot to be taken
@@ -109,9 +112,12 @@ pub fn move_500(rules: &Rules) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
-/// [`move_500`] cut at [`MOVE_500_SHORT_TICKS`]: the same setup and stream.
+/// [`move_500`] cut at [`MOVE_500_SHORT_TICKS`]: the same setup, and the
+/// same stream without the commands issued at or after the cut.
 pub fn move_500_short(rules: &Rules) -> (MatchSetup, Stream) {
-    move_500(rules)
+    let (setup, mut stream) = move_500(rules);
+    stream.retain(|(t, _)| *t < MOVE_500_SHORT_TICKS);
+    (setup, stream)
 }
 
 /// Group-order targets: 64 Yeomen spawned at the west start (ids 1..=64)
@@ -119,7 +125,8 @@ pub fn move_500_short(rules: &Rules) -> (MatchSetup, Stream) {
 /// spiral is cut by the edge (24 tiles, about 270 ticks); during tick 300
 /// they are ordered onto a mountain tile (34, 53), so the click is corrected
 /// by the BFS fallback and the spiral skips the 5x5 blocked blob (about 36
-/// tiles, 400 ticks). Seed 7. Length [`GROUP_SPIRAL_TICKS`].
+/// tiles, 400 ticks, so the fixture ends mid-walk). Seed 7. Length
+/// [`GROUP_SPIRAL_TICKS`].
 pub fn group_spiral(rules: &Rules) -> (MatchSetup, Stream) {
     let setup = MatchSetup::scenario(rules, 7);
     let stream = vec![

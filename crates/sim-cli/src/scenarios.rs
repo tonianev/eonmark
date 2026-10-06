@@ -1,52 +1,45 @@
-//! Scripted scenarios shared by `record`, `bench` and `fuzz`.
+//! Scripted scenarios for `record`, `bench` and `fuzz`.
 //!
-//! A scenario is a pure function of `(tick, &Sim)` to the commands issued
-//! on that tick, so a recording and a test that replay the same scenario
-//! agree command for command. The definitions mirror the helpers in
-//! `crates/sim/tests/m1.rs` (`move_500_commands`, the snapshot/restore
-//! test shape); the fixtures under `crates/sim/tests/fixtures/` are
-//! recorded from here with `sim-cli record --scenario <name>`.
+//! The four golden-fixture streams (`move_500`, `move_500_short`,
+//! `group_spiral`, `snapshot_restore`) are defined once in
+//! [`sim::scenarios`] and shared with `crates/sim/tests/m1.rs` and the
+//! criterion benches, so a recording, a test and a bench that name the same
+//! scenario agree command for command. This module adds the streams only
+//! the CLI needs: `selftest` (no Move, so it runs on any sim), the bench
+//! `Crossing`, and the seeded random generator behind `fuzz`.
 //!
 //! Every scenario runs on [`MatchSetup::scenario`] (two human slots, debug
-//! commands accepted) with [`ai::Passive`] in the AI seat.
+//! commands accepted) with [`ai::Passive`] in the AI seat, which is never
+//! consulted.
 
 use rand_core::{Rng, SeedableRng};
+use sim::scenarios::{EAST, Stream, WEST};
 use sim::{Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, Rules, Sim, UnitId, UnitKindId};
 
-/// Player 0's start tile centre on `plains_1v1`.
-pub const WEST: FxVec2 = FxVec2::from_ints(24, 64);
-/// Player 1's start tile centre on `plains_1v1`.
-pub const EAST: FxVec2 = FxVec2::from_ints(103, 64);
-/// A point in the river (impassable) north of the central ford: the Move
-/// target is corrected to the nearest passable tile and the spiral offsets
-/// skip water tiles.
+/// A point in the river (impassable) north of the central ford. `bench
+/// --astar` searches towards it so the open set never reaches the goal and
+/// every expansion of the budget is spent.
 pub const RIVER: FxVec2 = FxVec2::from_ints(63, 40);
 
 /// The Yeoman, the only unit kind in M1.
 pub const YEOMAN: UnitKindId = UnitKindId(0);
 
-/// The tick at which `snapshot_restore` snapshots and swaps sims.
-pub const SNAPSHOT_TICK: u32 = 300;
+/// Fixture length of [`Scenario::Selftest`].
+pub const SELFTEST_TICKS: u32 = 400;
+
+/// Default seed for the CLI-only scenarios (`selftest`, `Crossing`); the
+/// fixture scenarios carry their own seed in [`sim::scenarios`].
+pub const DEFAULT_SEED: u64 = 1;
 
 /// A scripted command stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
-    /// 500 Yeomen at the west start on tick 0, Move to the east start on
-    /// tick 5, Stop for every third unit on tick 400; 1200 ticks.
-    Move500,
-    /// `Move500` cut to 600 ticks (the `cargo test` golden).
-    Move500Short,
-    /// 64 Yeomen ordered into the river on tick 5 (goal correction and
-    /// blocked-tile skipping in the spiral) and on to the east start on
-    /// tick 300; 600 ticks.
-    GroupSpiral,
-    /// `Move500` with a snapshot/restore swap before tick 300 and 50 units
-    /// spawned for player 1 at the east start on tick 300; 1200 ticks.
-    /// The recorded hashes come from the restored sim, so `verify`
-    /// (uninterrupted) passing proves the restore was exact.
-    SnapshotRestore,
-    /// Spawns, Stops and not-yet-implemented commands only: runs on the M1
-    /// contract sim before pathing and movement land. 400 ticks.
+    /// One of [`sim::scenarios::NAMES`]: stream, seed and fixture length
+    /// come from [`sim::scenarios::by_name`].
+    Fixture(&'static str),
+    /// Spawns, Stops and not-yet-implemented commands only: no Move, so it
+    /// exercises the delay queue, rejections and the RNG without pathing.
+    /// 400 ticks.
     Selftest,
     /// `units` Yeomen crossing west to east with no Stop (the `bench` stream).
     Crossing {
@@ -57,92 +50,102 @@ pub enum Scenario {
 
 impl Scenario {
     /// Names accepted by `--scenario`.
-    pub const NAMES: [&'static str; 5] = [
-        "move_500",
-        "move_500_short",
-        "group_spiral",
-        "snapshot_restore",
-        "selftest",
-    ];
+    pub fn names() -> Vec<&'static str> {
+        let mut names = sim::scenarios::NAMES.to_vec();
+        names.push("selftest");
+        names
+    }
 
     /// Parse a `--scenario` name.
     pub fn parse(name: &str) -> Option<Scenario> {
-        Some(match name {
-            "move_500" => Scenario::Move500,
-            "move_500_short" => Scenario::Move500Short,
-            "group_spiral" => Scenario::GroupSpiral,
-            "snapshot_restore" => Scenario::SnapshotRestore,
-            "selftest" => Scenario::Selftest,
-            _ => return None,
-        })
+        if name == "selftest" {
+            return Some(Scenario::Selftest);
+        }
+        sim::scenarios::NAMES
+            .iter()
+            .find(|n| **n == name)
+            .map(|n| Scenario::Fixture(n))
     }
 
     /// The tick count the fixture of this scenario is recorded with.
-    pub fn default_ticks(self) -> u32 {
+    pub fn default_ticks(self, rules: &Rules) -> u32 {
         match self {
-            Scenario::Move500 | Scenario::SnapshotRestore | Scenario::Crossing { .. } => 1200,
-            Scenario::Move500Short | Scenario::GroupSpiral => 600,
-            Scenario::Selftest => 400,
-        }
-    }
-
-    /// Commands issued during `tick`, given the sim as it stands before the
-    /// step (unit ids are read from the view).
-    pub fn commands(self, sim: &Sim, tick: u32) -> Vec<PlayerCommand> {
-        match self {
-            Scenario::Move500 | Scenario::Move500Short => move_500(sim, tick, 500),
-            Scenario::SnapshotRestore => {
-                if tick == SNAPSHOT_TICK {
-                    vec![spawn(1, 0, EAST, 50)]
-                } else {
-                    move_500(sim, tick, 500)
-                }
+            Scenario::Fixture(name) => {
+                sim::scenarios::by_name(name, rules)
+                    .expect("Fixture names come from sim::scenarios::NAMES")
+                    .2
             }
-            Scenario::GroupSpiral => match tick {
-                0 => vec![spawn(0, 0, WEST, 64)],
-                5 => vec![move_all(0, 1, sim, RIVER)],
-                300 => vec![move_all(0, 2, sim, EAST)],
-                _ => Vec::new(),
-            },
-            Scenario::Crossing { units } => match tick {
-                0 => vec![spawn(0, 0, WEST, units)],
-                5 => vec![move_all(0, 1, sim, EAST)],
-                _ => Vec::new(),
-            },
-            Scenario::Selftest => selftest(tick),
+            Scenario::Selftest => SELFTEST_TICKS,
+            Scenario::Crossing { .. } => sim::scenarios::MOVE_500_TICKS,
         }
     }
 
-    /// Side effects on the recording sim before the step at `tick`. Only
-    /// `snapshot_restore` has one: at [`SNAPSHOT_TICK`] it snapshots, builds
-    /// a fresh sim with `fresh`, restores into it and continues on that sim.
-    /// Returns `true` when a swap happened.
-    pub fn before_step(self, sim: &mut Sim, tick: u32, fresh: impl FnOnce() -> Sim) -> bool {
-        if self != Scenario::SnapshotRestore || tick != SNAPSHOT_TICK {
-            return false;
+    /// The tick before whose step a recording snapshots the sim, builds a
+    /// fresh one and restores into it, so `verify` passing on the fixture
+    /// proves the restore was exact. Only `snapshot_restore` has one.
+    pub fn snapshot_tick(self) -> Option<u32> {
+        match self {
+            Scenario::Fixture("snapshot_restore") => {
+                Some(sim::scenarios::SNAPSHOT_RESTORE_SNAPSHOT_TICK)
+            }
+            _ => None,
         }
-        let snap = sim.snapshot();
-        let mut restored = fresh();
-        restored
-            .restore(&snap)
-            .expect("a snapshot of the same setup restores");
-        assert_eq!(
-            restored.hash(),
-            sim.hash(),
-            "restore must reproduce the hash at tick {tick}"
-        );
-        *sim = restored;
-        true
+    }
+
+    /// The match setup and command stream for a run of `ticks` ticks. A
+    /// fixture scenario uses its own seed unless `seed` overrides it; the
+    /// CLI-only scenarios use `seed` or [`DEFAULT_SEED`].
+    pub fn setup_and_stream(
+        self,
+        rules: &Rules,
+        seed: Option<u64>,
+        ticks: u32,
+    ) -> (MatchSetup, Stream) {
+        match self {
+            Scenario::Fixture(name) => {
+                let (mut setup, stream, _) = sim::scenarios::by_name(name, rules)
+                    .expect("Fixture names come from sim::scenarios::NAMES");
+                if let Some(seed) = seed {
+                    setup.seed = seed;
+                }
+                (setup, stream)
+            }
+            Scenario::Selftest => {
+                let setup = MatchSetup::scenario(rules, seed.unwrap_or(DEFAULT_SEED));
+                let stream = (0..ticks)
+                    .filter_map(|t| {
+                        let cmds = selftest(t);
+                        (!cmds.is_empty()).then_some((t, cmds))
+                    })
+                    .collect();
+                (setup, stream)
+            }
+            Scenario::Crossing { units } => {
+                let setup = MatchSetup::scenario(rules, seed.unwrap_or(DEFAULT_SEED));
+                let stream = vec![
+                    (0, vec![spawn(0, 0, WEST, units)]),
+                    (
+                        5,
+                        vec![PlayerCommand::new(
+                            PlayerId(0),
+                            1,
+                            Command::Move {
+                                units: (1..=u32::from(units)).map(UnitId).collect(),
+                                target: EAST,
+                                queue: false,
+                            },
+                        )],
+                    ),
+                ];
+                (setup, stream)
+            }
+        }
     }
 }
 
-/// A sim for a scenario: [`MatchSetup::scenario`] with a passive AI seat.
-pub fn build(rules: &Rules, seed: u64) -> Sim {
-    Sim::new(
-        MatchSetup::scenario(rules, seed),
-        rules.clone(),
-        Box::new(ai::Passive),
-    )
+/// A sim for a scenario setup, with a passive AI seat.
+pub fn build(setup: &MatchSetup, rules: &Rules) -> Sim {
+    Sim::new(setup.clone(), rules.clone(), Box::new(ai::Passive))
 }
 
 /// `DebugSpawn` of `count` Yeomen for `owner` around `at`.
@@ -159,49 +162,10 @@ pub fn spawn(owner: u8, seq: u32, at: FxVec2, count: u16) -> PlayerCommand {
     )
 }
 
-/// Move every unit `owner` has to `target`.
-pub fn move_all(owner: u8, seq: u32, sim: &Sim, target: FxVec2) -> PlayerCommand {
-    let units = sim
-        .view()
-        .units()
-        .filter(|u| u.owner == PlayerId(owner))
-        .map(|u| u.id)
-        .collect();
-    PlayerCommand::new(
-        PlayerId(owner),
-        seq,
-        Command::Move {
-            units,
-            target,
-            queue: false,
-        },
-    )
-}
-
-/// The `move_500_commands` stream of `crates/sim/tests/m1.rs`, sized to
-/// `units`: spawn at the west start on tick 0, Move to the east start on
-/// tick 5, Stop every third unit on tick 400.
-fn move_500(sim: &Sim, tick: u32, units: u16) -> Vec<PlayerCommand> {
-    match tick {
-        0 => vec![spawn(0, 0, WEST, units)],
-        5 => vec![move_all(0, 1, sim, EAST)],
-        400 => {
-            let units = sim
-                .view()
-                .units()
-                .filter(|u| u.id.0.is_multiple_of(3))
-                .map(|u| u.id)
-                .collect();
-            vec![PlayerCommand::new(PlayerId(0), 2, Command::Stop { units })]
-        }
-        _ => Vec::new(),
-    }
-}
-
 /// Spawns for both players on tick 0, a not-yet-implemented command every 7
 /// ticks (counted and rejected, advancing the rng), a Stop every 50 ticks,
 /// an unknown unit kind on tick 100 and an unknown player on tick 200.
-/// No Move, so the stream runs before pathing and movement exist.
+/// No Move, so the stream never touches pathing or movement.
 fn selftest(tick: u32) -> Vec<PlayerCommand> {
     let mut out = Vec::new();
     match tick {
@@ -256,8 +220,7 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 /// (unknown player, no valid units, unknown unit kind, not implemented,
 /// and everything player 1 issues after it surrenders). Returns the
 /// per-tick commands and the `(player, seq)` keys the sim must reject.
-/// `movement` enables Move commands (which need the pathing and movement
-/// bodies; the M1 contract sim panics on them).
+/// `movement` enables Move commands.
 pub fn random_commands(
     seed: u64,
     ticks: u32,
@@ -385,33 +348,81 @@ pub fn random_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn rules() -> Rules {
+        Rules::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap()
+    }
 
     #[test]
     fn names_parse_and_default_ticks_match_the_roadmap() {
-        for name in Scenario::NAMES {
-            let s = Scenario::parse(name).unwrap();
-            assert!(s.default_ticks() > 0);
+        let rules = rules();
+        for name in Scenario::names() {
+            let s = Scenario::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert!(s.default_ticks(&rules) > 0, "{name}");
         }
         assert_eq!(Scenario::parse("nope"), None);
-        assert_eq!(Scenario::Move500.default_ticks(), 1200);
-        assert!(Scenario::Move500Short.default_ticks() <= 5000);
+        assert_eq!(
+            Scenario::parse("move_500"),
+            Some(Scenario::Fixture("move_500"))
+        );
+        assert_eq!(Scenario::Fixture("move_500").default_ticks(&rules), 1200);
+        assert!(Scenario::Fixture("move_500_short").default_ticks(&rules) <= 5000);
+        assert_eq!(
+            Scenario::Fixture("snapshot_restore").snapshot_tick(),
+            Some(sim::scenarios::SNAPSHOT_RESTORE_SNAPSHOT_TICK)
+        );
+        assert_eq!(Scenario::Fixture("move_500").snapshot_tick(), None);
+        assert_eq!(Scenario::Selftest.snapshot_tick(), None);
+    }
+
+    #[test]
+    fn fixture_streams_are_the_shared_ones_and_seed_overrides() {
+        let rules = rules();
+        let (setup, stream) = Scenario::Fixture("move_500").setup_and_stream(&rules, None, 1200);
+        let (expected_setup, expected_stream) = sim::scenarios::move_500(&rules);
+        assert_eq!(setup, expected_setup);
+        assert_eq!(stream, expected_stream);
+        let (setup, _) = Scenario::Fixture("move_500").setup_and_stream(&rules, Some(9), 1200);
+        assert_eq!(setup.seed, 9);
     }
 
     #[test]
     fn selftest_stream_has_no_move() {
-        for t in 0..400 {
-            for pc in selftest(t) {
+        let rules = rules();
+        let (setup, stream) = Scenario::Selftest.setup_and_stream(&rules, None, SELFTEST_TICKS);
+        assert_eq!(setup.seed, DEFAULT_SEED);
+        assert!(stream.windows(2).all(|w| w[0].0 < w[1].0));
+        for (t, cmds) in &stream {
+            assert!(!cmds.is_empty(), "tick {t}");
+            for pc in cmds {
                 assert!(!matches!(pc.cmd, Command::Move { .. }), "tick {t}");
             }
         }
-        assert_eq!(selftest(0).len(), 2);
-        assert!(selftest(100).iter().any(|c| matches!(
-            c.cmd,
-            Command::DebugSpawn {
-                kind: UnitKindId(99),
-                ..
-            }
-        )));
+        assert_eq!(sim::scenarios::commands_at(&stream, 0).len(), 2);
+        assert!(
+            sim::scenarios::commands_at(&stream, 100)
+                .iter()
+                .any(|c| matches!(
+                    c.cmd,
+                    Command::DebugSpawn {
+                        kind: UnitKindId(99),
+                        ..
+                    }
+                ))
+        );
+    }
+
+    #[test]
+    fn crossing_moves_every_spawned_unit() {
+        let rules = rules();
+        let (_, stream) = Scenario::Crossing { units: 12 }.setup_and_stream(&rules, None, 10);
+        let Command::Move { units, target, .. } = &sim::scenarios::commands_at(&stream, 5)[0].cmd
+        else {
+            panic!("tick 5 is the Move");
+        };
+        assert_eq!(units.len(), 12);
+        assert_eq!(*target, EAST);
     }
 
     #[test]

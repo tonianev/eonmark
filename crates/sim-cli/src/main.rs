@@ -119,9 +119,9 @@ enum Cmd {
         /// Write a hash record every tick instead of every 20.
         #[arg(long)]
         hash_every_tick: bool,
-        /// Match seed.
-        #[arg(long, default_value_t = 1)]
-        seed: u64,
+        /// Match seed (default: the scenario's own seed; fixtures must keep it).
+        #[arg(long)]
+        seed: Option<u64>,
         /// Sleep this many milliseconds after every tick (to land a `kill -9`
         /// mid-recording when testing truncation tolerance).
         #[arg(long, default_value_t = 0)]
@@ -343,21 +343,21 @@ fn record(
     ticks: Option<u32>,
     out: &Path,
     hash_every_tick: bool,
-    seed: u64,
+    seed: Option<u64>,
     slow_ms: u64,
 ) -> ExitCode {
     let Some(scenario) = Scenario::parse(name) else {
         eprintln!(
             "record: unknown scenario {name:?}; one of {}",
-            Scenario::NAMES.join(", ")
+            Scenario::names().join(", ")
         );
         return ExitCode::from(EXIT_ERROR);
     };
-    let ticks = ticks.unwrap_or_else(|| scenario.default_ticks());
     let rules = match load_rules(data) {
         Ok(r) => r,
         Err(code) => return code,
     };
+    let ticks = ticks.unwrap_or_else(|| scenario.default_ticks(&rules));
     match record_scenario(&rules, scenario, ticks, out, hash_every_tick, seed, slow_ms) {
         Ok((final_hash, records)) => {
             println!(
@@ -377,6 +377,10 @@ fn record(
 /// tick with commands, a `Hash` record every `hash_every` ticks and at the
 /// end, a `flush` every 20 ticks (no fsync) and `finish` at clean exit, so a
 /// `kill -9` leaves a file that verifies up to its last complete record.
+/// For `snapshot_restore` the recording sim is snapshotted before the step
+/// at its snapshot tick, a fresh sim is restored from the bytes and the
+/// recording continues on that sim, so `verify` (which re-simulates without
+/// interruption) passing on the fixture proves the restore was exact.
 /// Returns the final hash and the number of records written.
 fn record_scenario(
     rules: &Rules,
@@ -384,7 +388,7 @@ fn record_scenario(
     ticks: u32,
     out: &Path,
     hash_every_tick: bool,
-    seed: u64,
+    seed: Option<u64>,
     slow_ms: u64,
 ) -> Result<(u64, u64), sim::ReplayError> {
     let hash_every = if hash_every_tick {
@@ -392,19 +396,31 @@ fn record_scenario(
     } else {
         DEFAULT_HASH_EVERY
     };
-    let mut sim = scenarios::build(rules, seed);
+    let (setup, stream) = scenario.setup_and_stream(rules, seed, ticks);
+    let mut sim = scenarios::build(&setup, rules);
     let mut writer = ReplayWriter::create(out, sim.setup())?;
     let mut last_hashed = 0;
     for t in 0..ticks {
-        if scenario.before_step(&mut sim, t, || scenarios::build(rules, seed)) {
+        if scenario.snapshot_tick() == Some(t) {
+            let snap = sim.snapshot();
+            let mut restored = scenarios::build(&setup, rules);
+            restored
+                .restore(&snap)
+                .expect("a snapshot of the same setup restores");
+            assert_eq!(
+                restored.hash(),
+                sim.hash(),
+                "restore must reproduce the hash before tick {t}"
+            );
+            sim = restored;
             eprintln!(
                 "snapshot/restore swap before tick {t}: hash 0x{:016x}",
                 sim.hash()
             );
         }
-        let cmds = scenario.commands(&sim, t);
-        writer.tick(t, &cmds)?;
-        sim.step(&cmds);
+        let cmds = sim::scenarios::commands_at(&stream, t);
+        writer.tick(t, cmds)?;
+        sim.step(cmds);
         if sim.tick().is_multiple_of(hash_every) {
             writer.hash(sim.tick(), sim.hash(), &sim.sub_hashes())?;
             last_hashed = sim.tick();
@@ -455,15 +471,15 @@ fn bench(
     if astar {
         return bench_astar(&rules, budget.unwrap_or(rules.path_budget_expansions));
     }
-    let scenario = Scenario::Crossing { units };
-    let mut sim = scenarios::build(&rules, seed);
+    let (setup, stream) = Scenario::Crossing { units }.setup_and_stream(&rules, Some(seed), ticks);
+    let mut sim = scenarios::build(&setup, &rules);
     // Each unit's goal, captured while its order is live (arrival clears it).
     let mut goals: BTreeMap<UnitId, FxVec2> = BTreeMap::new();
     let mut step_ms = Vec::with_capacity(ticks as usize);
     for t in 0..ticks {
-        let cmds = scenario.commands(&sim, t);
+        let cmds = sim::scenarios::commands_at(&stream, t);
         let start = Instant::now();
-        sim.step(&cmds);
+        sim.step(cmds);
         step_ms.push(start.elapsed().as_secs_f64() * 1000.0);
         for u in sim.view().units() {
             if let Some(order) = &u.order {
@@ -506,7 +522,7 @@ fn bench_astar(rules: &Rules, budget: u32) -> ExitCode {
         .map(&rules.default_map)
         .expect("default map is validated by Rules::load");
     let map = Map::from_def(def);
-    let from = map.tile_of(scenarios::WEST);
+    let from = map.tile_of(sim::scenarios::WEST);
     let to = map.tile_of(scenarios::RIVER);
     let mut tick_ms = Vec::with_capacity(ASTAR_ITERATIONS as usize);
     let mut found = 0u32;
@@ -546,8 +562,9 @@ struct FuzzCase {
 /// expectation.
 fn fuzz_case(rules: &Rules, seed: u64, ticks: u32, movement: bool) -> Result<FuzzCase, String> {
     let (stream, expected) = scenarios::random_commands(seed, ticks, movement);
+    let setup = MatchSetup::scenario(rules, seed);
     let run = || {
-        let mut sim = scenarios::build(rules, seed);
+        let mut sim = scenarios::build(&setup, rules);
         let mut hashes = Vec::with_capacity(stream.len());
         for cmds in &stream {
             sim.step(cmds);
@@ -712,6 +729,7 @@ mod tests {
                 hash_every_tick: true,
                 ticks: Some(1200),
                 slow_ms: 5,
+                seed: None,
                 ..
             }
         ));
@@ -722,7 +740,7 @@ mod tests {
         let rules = Rules::load(data()).unwrap();
         let out = temp("selftest.eonreplay");
         let (final_hash, records) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out, false, 1, 0).unwrap();
+            record_scenario(&rules, Scenario::Selftest, 90, &out, false, None, 0).unwrap();
         // Hash records at 20, 40, 60, 80 and the final one at 90, plus the
         // tick batches the selftest stream issues.
         assert!(records >= 5);
@@ -737,7 +755,7 @@ mod tests {
         // --hash-every-tick: one hash record per tick, same final hash.
         let out2 = temp("selftest_every.eonreplay");
         let (final_hash2, _) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out2, true, 1, 0).unwrap();
+            record_scenario(&rules, Scenario::Selftest, 90, &out2, true, None, 0).unwrap();
         assert_eq!(final_hash2, final_hash);
         let (_, recs) = ReplayReader::open(&out2).unwrap();
         let hashes = recs
@@ -748,7 +766,7 @@ mod tests {
         // A different seed changes the final hash.
         let out3 = temp("selftest_seed2.eonreplay");
         let (final_hash3, _) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out3, false, 2, 0).unwrap();
+            record_scenario(&rules, Scenario::Selftest, 90, &out3, false, Some(2), 0).unwrap();
         assert_ne!(final_hash3, final_hash);
     }
 

@@ -86,16 +86,26 @@ jobs:
         run: test "$(cargo tree -i bevy_ecs --depth 0 | wc -l | tr -d ' ')" -eq 1
 
       - name: headless smoke (200 ticks)
-        # M1: switch to fixture (crates/sim/tests/fixtures/smoke.eonreplay).
+        # M2: switch to a fixture replay once `--headless-run <replay>` exists.
         # Only the `tick=... hash=...` line is kept so hash-parity diffs cleanly.
         run: |
           cargo run -p game --locked --profile ci -- --headless-run 200 | grep '^tick=' | tee hash-macos.txt
           test -s hash-macos.txt
 
+      - name: verify golden fixture move_500 (release)
+        # The same command runs in the headless job on Linux; hash-parity
+        # diffs the two `OK final_hash=...` lines. `verify` exits 1 on any
+        # other outcome and pipefail propagates it through grep and tee.
+        run: |
+          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/move_500.eonreplay | grep '^OK' | tee hash-macos-fixture.txt
+          test -s hash-macos-fixture.txt
+
       - uses: actions/upload-artifact@v7
         with:
           name: hash-macos
-          path: hash-macos.txt
+          path: |
+            hash-macos.txt
+            hash-macos-fixture.txt
           if-no-files-found: error
 
   headless:
@@ -131,8 +141,17 @@ jobs:
       - name: selftest
         run: cargo run -p sim-cli --locked -- selftest
 
-      # M1: `cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/*.eonreplay`
-      # M5b: `cargo run -p sim-cli --locked --release -- play-bots --seeds 1..5 --jobs 2`
+      - name: verify golden fixtures (release)
+        # Long goldens are verified here in release rather than by
+        # `cargo test -- --ignored`. move_500 is the hash-parity fixture:
+        # only its `OK final_hash=...` line is kept so the diff is clean;
+        # `verify` exits 1 on any other outcome and pipefail propagates it.
+        # M5b: `cargo run -p sim-cli --locked --release -- play-bots --seeds 1..5 --jobs 2`
+        run: |
+          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/move_500.eonreplay | grep '^OK' | tee hash-linux-fixture.txt
+          test -s hash-linux-fixture.txt
+          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/group_spiral.eonreplay | tee verify-group-spiral.txt
+          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/snapshot_restore.eonreplay | tee verify-snapshot-restore.txt
 
       - name: engine boundary (no bevy/glam/wgpu/winit in engine-free crates)
         run: |
@@ -143,9 +162,17 @@ jobs:
             fi
           done
 
+      - name: pathfinding is a dev-dependency only
+        # The oracle crate must never reach the normal dependency graph of sim.
+        run: |
+          if cargo tree -p sim -e normal --locked | grep -q pathfinding; then
+            echo "::error::pathfinding is a normal dependency of sim; it may only be a dev-dependency oracle"
+            exit 1
+          fi
+
       - name: headless smoke (200 ticks)
-        # M1: switch to fixture. Same command as the macOS job; the two outputs
-        # must be byte-identical (hash-parity job).
+        # M2: switch to a fixture replay. Same command as the macOS job; the
+        # two outputs must be byte-identical (hash-parity job).
         run: |
           cargo run -p game --locked --profile ci -- --headless-run 200 | grep '^tick=' | tee hash-linux.txt
           test -s hash-linux.txt
@@ -153,7 +180,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: hash-linux
-          path: hash-linux.txt
+          path: |
+            hash-linux.txt
+            hash-linux-fixture.txt
           if-no-files-found: error
 
   game-linux:
@@ -204,8 +233,18 @@ jobs:
         with:
           name: hash-linux
           path: hashes/linux
-      - name: compare
+      - name: compare headless smoke (200 ticks)
         run: |
           echo "macOS:"; cat hashes/macos/hash-macos.txt
           echo "Linux:"; cat hashes/linux/hash-linux.txt
           diff hashes/macos/hash-macos.txt hashes/linux/hash-linux.txt
+
+      - name: compare golden fixture move_500
+        # Both files hold exactly the `OK final_hash=0x... ticks=...` line
+        # that `sim-cli verify --release` printed on each OS.
+        run: |
+          echo "macOS:"; cat hashes/macos/hash-macos-fixture.txt
+          echo "Linux:"; cat hashes/linux/hash-linux-fixture.txt
+          test -s hashes/macos/hash-macos-fixture.txt
+          test -s hashes/linux/hash-linux-fixture.txt
+          diff hashes/macos/hash-macos-fixture.txt hashes/linux/hash-linux-fixture.txt

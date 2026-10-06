@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use bevy::window::{PresentMode, PrimaryWindow, WindowResolution};
+use bevy::window::{PresentMode, WindowResolution};
 use rules::Rules;
 use sim::{MatchSetup, PlayerCommand, Sim};
 
@@ -129,6 +129,8 @@ pub fn run(cli: &Cli) -> AppExit {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
+            // The title stays "Eonmark" (ROADMAP M0 acceptance); the seed,
+            // tick and hash readout lives in the `dev` Sim panel.
             title: "Eonmark".into(),
             // Logical size: winit reads this as a LogicalSize at creation.
             resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
@@ -140,7 +142,6 @@ pub fn run(cli: &Cli) -> AppExit {
     app.insert_resource(ClearColor(palette::SKY));
     install_sim(&mut app, handle);
     app.add_plugins((camera::CameraPlugin, ground::GroundPlugin));
-    app.add_systems(Update, show_tick_in_title);
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
@@ -153,25 +154,6 @@ pub fn run(cli: &Cli) -> AppExit {
     app.run()
 }
 
-fn show_tick_in_title(
-    sim: NonSend<SimHandle>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut last_tick: Local<Option<u32>>,
-) {
-    let tick = sim.tick();
-    if *last_tick == Some(tick) {
-        return;
-    }
-    *last_tick = Some(tick);
-    if let Ok(mut window) = windows.single_mut() {
-        window.title = format!(
-            "Eonmark  seed {}  tick {tick}  hash {:#018x}",
-            sim.seed(),
-            sim.hash()
-        );
-    }
-}
-
 fn exit_after(
     time: Res<Time<Real>>,
     deadline: Res<ExitAfter>,
@@ -180,7 +162,8 @@ fn exit_after(
 ) {
     if time.elapsed() >= deadline.0 {
         info!(
-            "exit-after-seconds reached: tick={} hash={:#018x}",
+            "exit-after-seconds reached: seed={} tick={} hash={:#018x}",
+            sim.seed(),
             sim.tick(),
             sim.hash()
         );

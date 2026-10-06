@@ -22,7 +22,7 @@ Area: `area:sim`. Milestone: M1 (see [../ROADMAP.md](../ROADMAP.md)). Benches re
 | Tick rate | 20 Hz | `rules.ron` (`tick_rate_hz`) |
 | Bench stream | `scenarios::bench_cross(n)`: `n` Yeomen in six groups spawned at column 20, rows 16, 35, 54, 73, 92, 111, each group ordered to its mirror point at column 107, so two groups cross at each of the three fords (rows 14-21, 60-67, 106-113 of the river at columns 62-65) | `crates/sim/src/scenarios.rs`, `sim-cli bench --units N` |
 | Bench: 500 movers | mean step < 5 ms, p95 < 10 ms, release, dev Mac | `sim-cli bench --units 500 --ticks 1200` |
-| Bench: arrival | >= 99 % of 500 units within 3 tiles of the component-corrected goal | same bench; `--arrival-curve` prints the percentage every 100 ticks and the first tick the gate holds |
+| Bench: arrival | >= 99 % of 500 units within 3 tiles of the component-corrected goal by tick 2400, 0 moving or displaced at the end (the 87-tile crossing alone takes about 970 ticks at 1.8 tiles/s; the gate first held at tick 1624 on 2026-10-06) | `sim-cli bench --units 500 --ticks 2400`; `--arrival-curve` prints the percentage every 100 ticks and the first tick the gate holds |
 | Bench: saturated budget | one tick that spends the full 4000 expansions < 2 ms | `sim-cli bench --astar --budget 4000` |
 | Test oracle | `pathfinding` 4.16.0, dev-dependency only | `crates/sim/Cargo.toml` |
 

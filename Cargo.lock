@@ -5575,6 +5575,8 @@ version = "0.0.1"
 dependencies = [
  "ai",
  "clap",
+ "rand_core 0.10.1",
+ "rand_pcg",
  "rules",
  "sim",
 ]

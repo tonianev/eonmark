@@ -11,7 +11,7 @@ This document explains how Eonmark's game data is authored: where the files live
 - Durations are authored in deciseconds, in fields ending in `_ds`. The one conversion is `Rules::ticks_from_ds`: `ticks = round(ds * tick_rate_hz / 10)`, rounding to nearest with halves up. At 20 Hz one decisecond is exactly two ticks: `32` ds is 64 ticks, `600` ds is 1200 ticks. The validator does not require a whole tick count; pick values that give one when you can. The exceptions are `tick_rate_hz` and `cmd_delay_ticks` in `rules.ron`, which define the clock itself.
 - Conversion happens in one place. Authored values stay in `Rules` as integers; the sim reads them only through tick and `Fx` accessors such as `Rules::attrition_interval_ticks()` and `Rules::annexation_ticks()`, which call `Rules::ticks_from_ds`. No other code converts.
 - Rates are per 30 seconds. "10 Grain per 30 s" is written as `10` in a field documented as per-30-s.
-- `rules_version` is a human label bumped when golden replays regenerate; `rules_hash` is computed over everything `Rules::load` reads (match rules, resources and every map at M0). Both go into every replay header. See [DETERMINISM.md](DETERMINISM.md).
+- `rules_version` is a human label bumped when golden replays regenerate; `rules_hash` is computed over everything `Rules::load` reads (match rules, resources and every map at M0; `units.ron` from M1; `visuals.ron` from M2). Both go into every replay header. See [DETERMINISM.md](DETERMINISM.md).
 
 ## The `Modifier` type
 
@@ -75,7 +75,7 @@ Cross-reference checks run after parsing: every unit has a trainer building and 
 cargo run -p sim-cli -- data-check data/
 ```
 
-Exit code 0 prints one line such as `OK rules_version=1 rules_hash=0xd834a23f66683801 resources=4 maps=plains_1v1` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
+Exit code 0 prints one line such as `OK rules_version=1 rules_hash=0xd834a23f66683801 resources=4 maps=plains_1v1` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it, M2 `visuals.ron`). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
 
 | Variant | Format | Example cause |
 |---|---|---|
@@ -101,7 +101,7 @@ The same loader runs at game start, so a broken file is caught before a window o
 | `data/README.md` | Layout, conventions and the license statement for `data/` (MIT OR Apache-2.0) | M0 |
 | `data/maps/README.md`, `data/ai/README.md` | Per-directory schema in plain English | M0 |
 | `data/maps/plains_1v1.ron` | The one 128x128 map: `name`, `width`, `height`, `symmetry` (`MirrorX`), two `starts`, and `rows` of `.` grass, `f` forest, `m` mountain, `~` water | M0 |
-| `data/visuals.ron` | `Visual::Primitive(kind)` or `Visual::Scene(path, scale, y_offset, yaw)` per unit and building kind | M2 (primitives), M7 (glTF) |
+| `data/visuals.ron` | `(units: { "<kind id>": <Visual>, ... })`, keyed by `units.ron` `id`; every kind needs one. `Visual` is `Primitive(Capsule \| Cuboid \| Cylinder \| Sphere)` (one shared mesh sized from the kind's `radius_tiles_x100`, tinted with the owner's team colour) or the struct variant `Scene(path: "models/x.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0)` (glTF under `assets/`; parsed and validated now, used from M7). Validation (`Visuals::validate`): a kind without a visual or a key naming no kind is an error naming `units["<id>"]`; a `Scene` path must end in `.glb` or `.gltf`, `scale_x100` must be in `1..=10000`, `yaw_deg` in `-360..=360`, errors naming `units["<id>"].<field>`; `deny_unknown_fields`. Schema `crates/rules/src/visuals.rs`, loaded by `Rules::load`, part of `rules_hash` (so a visual change still marks older replays `RULES CHANGED`); the sim never reads it, the game's `present.rs` does. Building kinds join in M3b | M2 (primitives), M7 (glTF) |
 | `data/ai/build_orders/*.ron` | Scripted build orders | M5b |
 | `data/ai/difficulty.ron` | Easy, Standard, Hard: income interval and aggression flag | M6 |
 | `data/ai/personalities.ron` | rush, boom, tower | M6 |

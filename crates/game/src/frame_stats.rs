@@ -1,0 +1,426 @@
+//! Frame-time statistics and the `units200_auto` arrival proxy, printed on
+//! exit so the M2 acceptance line "FPS >= 60, no periodic hitch at the 1 s
+//! replay flush" and the `--max-fps` cap have numbers instead of eyeballs.
+//!
+//! `frame_ms mean=<f> p95=<f> max=<f> max_at_flush=<f>` is the frame
+//! period in milliseconds over the run (`Time<Real>::delta`, the first frame
+//! skipped). `max_at_flush` is the worst frame among the frame that sent a
+//! recorder flush (every [`FLUSH_EVERY_TICKS`], see
+//! [`DriverStats::flushes_sent`]) and the frame after it, where a blocking
+//! write would show up. `frames=<n> seconds=<s> fps=<f>` is the plain mean
+//! rate for the `--max-fps` check. `worst_ms=<ms>@<s>s/f<n> ...` lists the
+//! [`WORST_FRAMES`] longest frames with the wall-clock second each ended at
+//! and its `FrameCount`, so a one-off stall can be placed in time and
+//! matched against the `debug` log (first ring and marker spawns). `window focused=<n>/<frames>
+//! occluded=<n>/<frames> events=...` says how many frames ran with the
+//! primary window focused and fully covered, and when that changed: an
+//! unfocused window runs Bevy's `reactive_low_power` 60 Hz update mode
+//! unless background mode switched to `continuous`, and a covered window is
+//! not presented at all on macOS, so both change what the frame times
+//! mean. With the arrival proxy on,
+//! `arrived=<n>/<total> by tick <t>` counts units whose move order has
+//! completed and that hold a `Post` (the sim's own arrival state, what
+//! `UnitArrived` reported): `n` at exit, `t` the tick the count first
+//! reached `total` (or the exit tick when it never did). The next line,
+//! `within_3_tiles=<k>/<total>`, is the `sim-cli bench` gate (units within
+//! [`ARRIVED_TILES`] of the goal); 200 units of radius 0.35 cannot all pack
+//! into that circle, so it is informational for a single-point goal.
+
+use std::time::Duration;
+
+use bevy::app::AppExit;
+use bevy::diagnostic::FrameCount;
+use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, WindowFocused, WindowOccluded};
+use sim::FxVec2;
+
+use crate::sim_driver::{DriverStats, FLUSH_EVERY_TICKS, SimHandle};
+
+/// The `within_3_tiles` line counts units this close to the goal, the same
+/// gate `sim-cli bench` uses (docs/design/pathing.md). A measurement
+/// threshold for the proxy line, not a gameplay number.
+pub const ARRIVED_TILES: i64 = 3;
+
+/// `ARRIVED_TILES` squared, in `FxVec2::dist_sq_i64` scale.
+const ARRIVED_DIST_SQ: i64 = (ARRIVED_TILES * ARRIVED_TILES) << 32;
+
+/// Prefix of every line `print_on_exit` writes to stdout, so scripts can
+/// pick the frame-time report out of the log (`grep '^frame_stats:'`).
+pub const STDOUT_PREFIX: &str = "frame_stats: ";
+
+/// Frames flagged after each flush: the flush frame itself and the next.
+const FLUSH_WINDOW_FRAMES: u8 = 2;
+
+/// How many of the longest frames the `worst_ms` line lists.
+pub const WORST_FRAMES: usize = 3;
+
+/// Window focus / occlusion changes kept for the `window` line.
+const MAX_WINDOW_EVENTS: usize = 12;
+
+/// Collected frame periods and flush attribution.
+#[derive(Resource, Debug, Default)]
+pub struct FrameStats {
+    /// Frame periods in milliseconds, in order.
+    pub samples_ms: Vec<f64>,
+    /// Worst frame in a flush window.
+    pub max_at_flush_ms: f64,
+    /// `DriverStats::flushes_sent` last seen.
+    flushes_seen: u32,
+    /// Frames still to attribute to the latest flush.
+    flush_window: u8,
+    /// The longest frames as `(ms, wall-clock seconds at the frame's end,
+    /// frame number)`, longest first, at most [`WORST_FRAMES`].
+    pub worst: Vec<(f64, f64, u32)>,
+    /// Frames sampled while the primary window had focus.
+    pub focused_frames: u32,
+    /// Frames sampled while the primary window was reported fully covered.
+    pub occluded_frames: u32,
+    /// The window is currently reported fully covered (`WindowOccluded`).
+    occluded: bool,
+    /// Focus and occlusion changes as `(label, seconds)`.
+    window_events: Vec<(&'static str, f64)>,
+}
+
+/// Mean, 95th percentile and maximum of the samples (milliseconds).
+pub fn summarize(samples: &[f64]) -> (f64, f64, f64) {
+    if samples.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+    let rank = ((sorted.len() as f64 * 0.95).ceil() as usize).clamp(1, sorted.len());
+    (mean, sorted[rank - 1], sorted[sorted.len() - 1])
+}
+
+impl FrameStats {
+    /// Record one frame period and attribute it to a flush window when due.
+    /// `flushes_sent` is the driver's counter as of the frame that is
+    /// running now; the period of that frame is the next sample, so a
+    /// change opens the window after this one. `at_secs` (wall clock at
+    /// the end of the frame) and `frame_no` place it on the `worst_ms` line.
+    pub fn record(&mut self, frame: Duration, flushes_sent: u32, at_secs: f64, frame_no: u32) {
+        let ms = frame.as_secs_f64() * 1000.0;
+        self.samples_ms.push(ms);
+        let slot = self.worst.partition_point(|(w, _, _)| *w >= ms);
+        if slot < WORST_FRAMES {
+            self.worst.insert(slot, (ms, at_secs, frame_no));
+            self.worst.truncate(WORST_FRAMES);
+        }
+        if self.flush_window > 0 {
+            self.flush_window -= 1;
+            self.max_at_flush_ms = self.max_at_flush_ms.max(ms);
+        }
+        if flushes_sent != self.flushes_seen {
+            self.flushes_seen = flushes_sent;
+            self.flush_window = FLUSH_WINDOW_FRAMES;
+        }
+    }
+
+    /// The `frame_ms ...` line.
+    pub fn frame_line(&self) -> String {
+        let (mean, p95, max) = summarize(&self.samples_ms);
+        format!(
+            "frame_ms mean={mean:.2} p95={p95:.2} max={max:.2} max_at_flush={:.2}",
+            self.max_at_flush_ms
+        )
+    }
+
+    /// Count this frame's window state.
+    pub fn record_window(&mut self, focused: bool) {
+        self.focused_frames += u32::from(focused);
+        self.occluded_frames += u32::from(self.occluded);
+    }
+
+    /// Note a focus (`focused`) or occlusion (`occluded`) change at `secs`.
+    pub fn window_event(&mut self, label: &'static str, secs: f64) {
+        match label {
+            "occluded" => self.occluded = true,
+            "visible" => self.occluded = false,
+            _ => {}
+        }
+        if self.window_events.len() < MAX_WINDOW_EVENTS {
+            self.window_events.push((label, secs));
+        }
+    }
+
+    /// The `worst_ms=...` line.
+    pub fn worst_line(&self) -> String {
+        let frames: Vec<String> = self
+            .worst
+            .iter()
+            .map(|(ms, at, n)| format!("{ms:.2}@{at:.2}s/f{n}"))
+            .collect();
+        format!("worst_ms={}", frames.join(" "))
+    }
+
+    /// The `window ...` line.
+    pub fn window_line(&self) -> String {
+        let n = self.samples_ms.len();
+        let mut events: Vec<String> = self
+            .window_events
+            .iter()
+            .map(|(label, at)| format!("{label}@{at:.2}s"))
+            .collect();
+        if events.is_empty() {
+            events.push("none".to_string());
+        }
+        format!(
+            "window focused={}/{n} occluded={}/{n} events={}",
+            self.focused_frames,
+            self.occluded_frames,
+            events.join(",")
+        )
+    }
+
+    /// The `frames=... fps=...` line.
+    pub fn rate_line(&self) -> String {
+        let seconds = self.samples_ms.iter().sum::<f64>() / 1000.0;
+        let fps = if seconds > 0.0 {
+            self.samples_ms.len() as f64 / seconds
+        } else {
+            0.0
+        };
+        format!(
+            "frames={} seconds={seconds:.2} fps={fps:.1}",
+            self.samples_ms.len()
+        )
+    }
+}
+
+/// Arrival tracking for a scenario whose units all head for one goal.
+#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+pub struct ArrivalProxy {
+    /// Where the scripted order sends every unit.
+    pub goal: FxVec2,
+    /// Units expected to arrive.
+    pub total: u32,
+    /// Units holding a `Post` (order completed) after the latest tick.
+    pub arrived: u32,
+    /// Units within [`ARRIVED_TILES`] of `goal` after the latest tick.
+    pub within: u32,
+    /// First tick at which `arrived == total`.
+    pub all_arrived_at: Option<u32>,
+}
+
+impl ArrivalProxy {
+    /// Track `total` units heading for `goal`.
+    pub fn new(goal: FxVec2, total: u32) -> Self {
+        Self {
+            goal,
+            total,
+            arrived: 0,
+            within: 0,
+            all_arrived_at: None,
+        }
+    }
+
+    /// Count after a tick from `(position, holds a post)` pairs; `tick` is
+    /// the completed tick.
+    pub fn observe(&mut self, units: impl Iterator<Item = (FxVec2, bool)>, tick: u32) {
+        let (mut arrived, mut within) = (0u32, 0u32);
+        for (pos, posted) in units {
+            arrived += u32::from(posted);
+            within += u32::from(pos.dist_sq_i64(self.goal) <= ARRIVED_DIST_SQ);
+        }
+        self.arrived = arrived;
+        self.within = within;
+        if self.arrived >= self.total && self.all_arrived_at.is_none() {
+            self.all_arrived_at = Some(tick);
+        }
+    }
+
+    /// The `arrived=...` line for an exit at `exit_tick`.
+    pub fn line(&self, exit_tick: u32) -> String {
+        format!(
+            "arrived={}/{} by tick {}",
+            self.arrived,
+            self.total,
+            self.all_arrived_at.unwrap_or(exit_tick)
+        )
+    }
+
+    /// The `within_3_tiles=...` line.
+    pub fn within_line(&self) -> String {
+        format!(
+            "within_{ARRIVED_TILES}_tiles={}/{}",
+            self.within, self.total
+        )
+    }
+}
+
+/// Collects frame periods and prints the summary lines when the app exits.
+pub struct FrameStatsPlugin {
+    /// Also count arrivals at this goal for this many units.
+    pub arrival: Option<(FxVec2, u32)>,
+}
+
+impl Plugin for FrameStatsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FrameStats>()
+            .add_systems(Update, (window_events, sample_frame).chain())
+            .add_systems(Last, print_on_exit);
+        if let Some((goal, total)) = self.arrival {
+            app.insert_resource(ArrivalProxy::new(goal, total))
+                .add_systems(FixedPostUpdate, observe_arrivals);
+        }
+    }
+}
+
+fn sample_frame(
+    time: Res<Time<Real>>,
+    frame: Res<FrameCount>,
+    driver: Res<DriverStats>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut stats: ResMut<FrameStats>,
+) {
+    // The first frame's delta is zero (the clock has no previous update).
+    if time.delta() > Duration::ZERO {
+        stats.record(
+            time.delta(),
+            driver.flushes_sent,
+            time.elapsed().as_secs_f64(),
+            frame.0,
+        );
+        stats.record_window(windows.single().is_ok_and(|w| w.focused));
+    }
+}
+
+/// Primary-window focus and occlusion changes, with their wall-clock time.
+fn window_events(
+    mut focus: MessageReader<WindowFocused>,
+    mut occlusion: MessageReader<WindowOccluded>,
+    primary: Query<(), With<PrimaryWindow>>,
+    time: Res<Time<Real>>,
+    mut stats: ResMut<FrameStats>,
+) {
+    let secs = time.elapsed().as_secs_f64();
+    for msg in focus.read() {
+        if primary.contains(msg.window) {
+            stats.window_event(if msg.focused { "focused" } else { "unfocused" }, secs);
+        }
+    }
+    for msg in occlusion.read() {
+        if primary.contains(msg.window) {
+            stats.window_event(if msg.occluded { "occluded" } else { "visible" }, secs);
+        }
+    }
+}
+
+fn observe_arrivals(sim: NonSend<SimHandle>, mut proxy: ResMut<ArrivalProxy>) {
+    let view = sim.view();
+    proxy.observe(view.units().map(|u| (u.pos, u.post.is_some())), sim.tick());
+}
+
+fn print_on_exit(
+    mut exits: MessageReader<AppExit>,
+    stats: Res<FrameStats>,
+    driver: Res<DriverStats>,
+    arrival: Option<Res<ArrivalProxy>>,
+    sim: NonSend<SimHandle>,
+) {
+    if exits.is_empty() {
+        return;
+    }
+    exits.clear();
+    // Every line carries the `frame_stats: ` prefix that
+    // `scripts/m2_checks.sh` (check 6) and docs/PLAYTEST.md grep for.
+    println!("{STDOUT_PREFIX}{}", stats.frame_line());
+    println!("{STDOUT_PREFIX}{}", stats.rate_line());
+    println!("{STDOUT_PREFIX}{}", stats.worst_line());
+    println!("{STDOUT_PREFIX}{}", stats.window_line());
+    println!(
+        "{STDOUT_PREFIX}ticks={} dropped_ticks={} stalled_ticks={} flushes={} (every {FLUSH_EVERY_TICKS} ticks)",
+        sim.tick(),
+        driver.dropped_ticks,
+        driver.stalled_ticks,
+        driver.flushes_sent
+    );
+    if let Some(arrival) = arrival {
+        println!("{STDOUT_PREFIX}{}", arrival.line(sim.tick()));
+        println!("{STDOUT_PREFIX}{}", arrival.within_line());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_is_mean_p95_max() {
+        let (mean, p95, max) = summarize(&[1.0, 2.0, 3.0, 4.0, 100.0]);
+        assert!((mean - 22.0).abs() < 1e-9);
+        assert_eq!(p95, 100.0);
+        assert_eq!(max, 100.0);
+        let twenty: Vec<f64> = (1..=20).map(f64::from).collect();
+        assert_eq!(summarize(&twenty).1, 19.0, "p95 of 1..=20 is the 19th");
+        assert_eq!(summarize(&[]), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn flush_window_covers_the_flush_frame_and_the_next() {
+        let mut s = FrameStats::default();
+        let f = |ms: u64| Duration::from_millis(ms);
+        s.record(f(10), 0, 0.01, 1); // quiet frame
+        s.record(f(10), 1, 0.02, 2); // the flush was sent in the frame measured NEXT
+        s.record(f(30), 1, 0.05, 3); // flush frame
+        s.record(f(25), 1, 0.08, 4); // frame after
+        s.record(f(90), 1, 0.17, 5); // outside the window
+        assert_eq!(s.max_at_flush_ms, 30.0);
+        assert_eq!(s.samples_ms.len(), 5);
+        assert_eq!(
+            s.frame_line(),
+            "frame_ms mean=33.00 p95=90.00 max=90.00 max_at_flush=30.00"
+        );
+        assert_eq!(s.rate_line(), "frames=5 seconds=0.17 fps=30.3");
+        assert_eq!(
+            s.worst_line(),
+            "worst_ms=90.00@0.17s/f5 30.00@0.05s/f3 25.00@0.08s/f4"
+        );
+    }
+
+    #[test]
+    fn window_line_counts_focus_and_occlusion() {
+        let mut s = FrameStats::default();
+        assert_eq!(
+            s.window_line(),
+            "window focused=0/0 occluded=0/0 events=none"
+        );
+        let f = Duration::from_millis(8);
+        s.record(f, 0, 0.1, 1);
+        s.record_window(true);
+        s.window_event("unfocused", 0.15);
+        s.window_event("occluded", 0.2);
+        s.record(f, 0, 0.2, 2);
+        s.record_window(false);
+        s.window_event("visible", 0.3);
+        s.record(f, 0, 0.3, 3);
+        s.record_window(false);
+        assert_eq!(
+            s.window_line(),
+            "window focused=1/3 occluded=1/3 events=unfocused@0.15s,occluded@0.20s,visible@0.30s"
+        );
+    }
+
+    #[test]
+    fn arrival_proxy_counts_and_remembers_the_first_full_tick() {
+        let goal = FxVec2::from_ints(100, 64);
+        let mut a = ArrivalProxy::new(goal, 2);
+        let far = FxVec2::from_ints(10, 64);
+        let near = FxVec2::from_ints(102, 65);
+        // One unit still walking (far, no post), one that arrived.
+        a.observe([(far, false), (near, true)].into_iter(), 5);
+        assert_eq!((a.arrived, a.within), (1, 1));
+        assert_eq!(a.all_arrived_at, None);
+        assert_eq!(a.line(5), "arrived=1/2 by tick 5");
+        assert_eq!(a.within_line(), "within_3_tiles=1/2");
+        // Both hold a post; one was pushed out of the 3-tile circle.
+        a.observe([(near, true), (far, true)].into_iter(), 9);
+        assert_eq!((a.arrived, a.within), (2, 1));
+        assert_eq!(a.all_arrived_at, Some(9));
+        // A Stop clears the posts; the first full tick is remembered.
+        a.observe([(far, false), (goal, false)].into_iter(), 12);
+        assert_eq!(a.line(12), "arrived=0/2 by tick 9");
+        assert_eq!(a.within_line(), "within_3_tiles=1/2");
+    }
+}

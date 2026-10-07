@@ -2,7 +2,8 @@
 
 This directory is where every gameplay number lives. `rules.ron` holds the
 match-wide values, `resources.ron` describes the four resources and
-`units.ron` lists the unit kinds. All are
+`units.ron` lists the unit kinds (how a kind is drawn is not a gameplay
+number and lives one level up, in `../visuals.ron`). All are
 loaded by `rules::Rules::load` and validated before the simulation starts;
 their content is part of `rules_hash`, so editing them without bumping
 `rules_version` makes `sim-cli verify` report `RULES CHANGED since recording`
@@ -37,7 +38,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 3 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 4 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -124,7 +125,7 @@ Then bump `rules_version` (replays recorded under the old value will report
 cargo run -p sim-cli -- data-check data
 ```
 
-Expected output starts with `OK rules_version=4` (the repository is at 3). A typo such as
+Expected output starts with `OK rules_version=5` (the repository is at 4). A typo such as
 `attrition_interval_s` fails with the file path, the span and the field:
 
 ```text

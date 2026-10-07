@@ -13,6 +13,7 @@
 //! | `rules/resources.ron` | [`Resources`] |
 //! | `rules/units.ron` | [`Units`] |
 //! | `maps/*.ron` | [`map::MapDef`] |
+//! | `visuals.ron` | [`Visuals`] (how each unit kind is drawn; validated here, read by the game) |
 //!
 //! Every error names the file and, when the data parsed, the field.
 #![forbid(unsafe_code)]
@@ -21,6 +22,7 @@
 pub mod map;
 pub mod resources;
 pub mod units;
+pub mod visuals;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,6 +31,7 @@ use std::path::{Path, PathBuf};
 pub use map::{MapDef, Symmetry, Terrain, TilePos};
 pub use resources::{Resource, Resources};
 pub use units::{UnitKind, Units};
+pub use visuals::{Primitive, Visual, Visuals};
 
 /// Errors produced while loading or validating rules data.
 #[derive(Debug, thiserror::Error)]
@@ -163,6 +166,11 @@ pub struct Rules {
     /// Every map under `maps/`, keyed by name. Attached by [`Rules::load`].
     #[serde(skip_deserializing)]
     pub maps: BTreeMap<String, MapDef>,
+    /// Contents of `visuals.ron`: a [`Visual`] per unit kind id. Attached by
+    /// [`Rules::load`] and validated against `units`; read by the game crate's
+    /// presenter, never by the sim.
+    #[serde(skip_deserializing)]
+    pub visuals: Visuals,
 }
 
 impl Rules {
@@ -183,6 +191,10 @@ impl Rules {
         let units: Units = load_ron(&units_path)?;
         units.validate(&units_path)?;
         rules.units = units.units;
+
+        let visuals_path = dir.join("visuals.ron");
+        rules.visuals = load_ron(&visuals_path)?;
+        rules.visuals.validate(&visuals_path, &rules.units)?;
 
         rules.maps = map::load_dir(&dir.join("maps"))?;
         if !rules.maps.contains_key(&rules.default_map) {
@@ -311,9 +323,15 @@ impl Rules {
         self.units.iter().find(|u| u.id == id)
     }
 
-    /// Content hash of the loaded rules (match rules, resources, units and maps);
-    /// stored in replay headers so a changed RON file is reported as
-    /// `RULES CHANGED` instead of a sim divergence.
+    /// The visual for a unit kind index (the sim's `UnitKindId.0`), if the
+    /// kind exists. `Rules::load` guarantees every kind has one.
+    pub fn visual(&self, kind: u16) -> Option<&Visual> {
+        self.unit_kind(kind).and_then(|k| self.visuals.get(&k.id))
+    }
+
+    /// Content hash of the loaded rules (match rules, resources, units, maps
+    /// and visuals); stored in replay headers so a changed RON file is
+    /// reported as `RULES CHANGED` instead of a sim divergence.
     pub fn rules_hash(&self) -> u64 {
         let bytes = postcard::to_allocvec(self).expect("Rules serialises");
         xxhash_rust::xxh3::xxh3_64(&bytes)
@@ -339,6 +357,11 @@ mod tests {
         assert!(rules.unit_kind(1).is_none());
         assert!(rules.unit_kind_by_id("yeoman").is_some());
         assert!(rules.map("plains_1v1").is_some());
+        assert_eq!(
+            rules.visual(0),
+            Some(&Visual::Primitive(visuals::Primitive::Capsule))
+        );
+        assert!(rules.visual(1).is_none());
         assert_eq!(rules.ticks_from_ds(32), 64);
         assert_eq!(rules.attrition_interval_ticks(), 64);
         assert_eq!(rules.annexation_ticks(), 1200);
@@ -382,6 +405,27 @@ mod tests {
             d.rules_hash(),
             "units.ron is part of the hash"
         );
+        let mut e = Rules::load(data_dir()).unwrap();
+        e.visuals.units.insert(
+            "yeoman".into(),
+            Visual::Primitive(visuals::Primitive::Sphere),
+        );
+        assert_ne!(
+            a.rules_hash(),
+            e.rules_hash(),
+            "visuals.ron is part of the hash"
+        );
+    }
+
+    #[test]
+    fn missing_visual_names_file_and_kind() {
+        let dir = copied_data_dir("visual-missing");
+        std::fs::write(dir.join("visuals.ron"), "(units: {})").unwrap();
+        let err = Rules::load(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("visuals.ron"), "{msg}");
+        assert!(msg.contains(r#"units["yeoman"]"#), "{msg}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -486,7 +530,7 @@ mod tests {
         let dir = copied_data_dir("rules-version-zero");
         let path = dir.join("rules/rules.ron");
         let text = std::fs::read_to_string(&path).unwrap();
-        let text = text.replacen("rules_version: 3,", "rules_version: 0,", 1);
+        let text = text.replacen("rules_version: 4,", "rules_version: 0,", 1);
         assert!(
             text.contains("rules_version: 0,"),
             "repo rules_version moved"
@@ -538,6 +582,7 @@ mod tests {
             dir.join("rules/units.ron"),
         )
         .unwrap();
+        std::fs::copy(data_dir().join("visuals.ron"), dir.join("visuals.ron")).unwrap();
         let err = Rules::load(&dir).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("maps") || msg.contains("default_map"), "{msg}");

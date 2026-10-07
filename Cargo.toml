@@ -23,6 +23,9 @@ bevy = "=0.19.1"
 bevy_egui = "=0.40.1"
 bevy-inspector-egui = "=0.37.0"
 muda = "0.21"
+# macOS only (game background mode); the same versions muda resolves.
+objc2 = { version = "0.6.5", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false }
 directories = "6"
 
 # simulation (no engine deps allowed here; CI greps `cargo tree`)

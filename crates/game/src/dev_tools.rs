@@ -1,16 +1,20 @@
 //! Developer-only overlays, compiled only with `--features dev`:
-//! Bevy's FPS overlay, the egui world inspector and a small sim panel.
+//! Bevy's FPS overlay, the egui world inspector (hidden until F12) and a
+//! small sim panel.
 
 use std::time::Duration;
 
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
+use bevy::input::common_conditions::input_toggle_active;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
-use crate::app::SimHandle;
 use crate::camera::RtsCamera;
+use crate::present::UnitVisuals;
+use crate::selection::Selection;
+use crate::sim_driver::{ActiveInput, DriverStats, PendingCommands, ReplayRecorder, SimHandle};
 
 /// Adds every dev overlay. Never shipped.
 pub struct DevToolsPlugin;
@@ -35,17 +39,26 @@ impl Plugin for DevToolsPlugin {
             },
             // The inspector asserts that EguiPlugin was added before it.
             EguiPlugin::default(),
-            WorldInspectorPlugin::new(),
+            // Hidden until F12: listing every entity (200 units, 200 rings)
+            // each frame costs several milliseconds and covers the map.
+            WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F12)),
         ))
         .register_type::<RtsCamera>()
         .add_systems(EguiPrimaryContextPass, sim_panel);
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one egui panel reads many resources
 fn sim_panel(
     mut contexts: EguiContexts,
     sim: NonSend<SimHandle>,
     fixed: Res<Time<Fixed>>,
+    stats: Res<DriverStats>,
+    pending: Res<PendingCommands>,
+    input: Res<ActiveInput>,
+    recorder: Res<ReplayRecorder>,
+    selection: Res<Selection>,
+    visuals: Res<UnitVisuals>,
     cameras: Query<&RtsCamera>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -69,8 +82,65 @@ fn sim_panel(
                 ui.label("overstep");
                 ui.monospace(format!("{:.2}", fixed.overstep_fraction()));
                 ui.end_row();
+                ui.label("ticks / frame");
+                ui.monospace(stats.ticks_last_frame.to_string());
+                ui.end_row();
                 ui.label("dropped ticks");
-                ui.monospace(sim.dropped_ticks.to_string());
+                ui.monospace(stats.dropped_ticks.to_string());
+                ui.end_row();
+                ui.label("stalled ticks");
+                ui.monospace(stats.stalled_ticks.to_string());
+                ui.end_row();
+                ui.label("units");
+                ui.monospace(sim.view().unit_count().to_string());
+                ui.end_row();
+                ui.label("selected");
+                ui.monospace(selection.units.len().to_string());
+                ui.end_row();
+                ui.label("input");
+                ui.monospace(input.0.describe());
+                ui.end_row();
+                ui.label("pending cmds");
+                let kinds: Vec<&str> = pending
+                    .peek()
+                    .iter()
+                    .map(|c| command_kind(&c.cmd))
+                    .collect();
+                ui.monospace(format!("{} {}", pending.len(), kinds.join(" ")));
+                ui.end_row();
+                ui.label("recorded cmds");
+                ui.monospace(stats.commands_recorded.to_string());
+                ui.end_row();
+                ui.label("rejected / events");
+                ui.monospace(format!(
+                    "{} / {}",
+                    stats.commands_rejected, stats.events_seen
+                ));
+                ui.end_row();
+                ui.label("recording");
+                // File name only: the full path would stretch the panel
+                // across the window and hide the units (it is on stdout as
+                // `replay: <path>`, and here on hover).
+                match recorder.0.as_ref() {
+                    None => {
+                        ui.monospace("off");
+                    }
+                    Some(r) => {
+                        let path = r.path();
+                        let name = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        ui.monospace(name).on_hover_text(path.display().to_string());
+                    }
+                }
+                ui.end_row();
+                ui.label("flushes");
+                ui.monospace(stats.flushes_sent.to_string());
+                ui.end_row();
+                let (meshes, materials) = visuals.counts();
+                ui.label("meshes / materials");
+                ui.monospace(format!("{meshes} / {materials}"));
                 ui.end_row();
                 if let Ok(cam) = cameras.single() {
                     ui.label("focus");
@@ -83,4 +153,16 @@ fn sim_panel(
             });
         });
     Ok(())
+}
+
+/// Short label for a queued command.
+fn command_kind(cmd: &sim::Command) -> &'static str {
+    match cmd {
+        sim::Command::Move { .. } => "Move",
+        sim::Command::Stop { .. } => "Stop",
+        sim::Command::AttackMove { .. } => "AttackMove",
+        sim::Command::DebugSpawn { .. } => "DebugSpawn",
+        sim::Command::Surrender => "Surrender",
+        _ => "other",
+    }
 }

@@ -1,72 +1,35 @@
-//! The windowed Bevy app plus the shared simulation driver.
+//! The windowed Bevy app: window, plugins, the sim driver with its input
+//! source and recorder, and the `--exit-after-seconds` / `--max-fps` /
+//! `--screenshot` smoke-test helpers.
 //!
-//! The simulation is a `!Send` value at M0 (`Box<dyn AiController>` carries
-//! no `Send + Sync` bound), so it lives in a non-send resource and is only
-//! touched by main-thread systems. See `notesForOtherFiles` in the M0 report.
+//! Which input source runs (M2 decision 2): `--scenario <name>` builds the
+//! sim from `MatchSetup::scenario` (debug commands on) and feeds a
+//! `ScenarioInput` (scripted stream + the player's commands); otherwise a
+//! skirmish with `LocalInput`. Every windowed session records a replay
+//! (decision 3) to `--replay-dir` or the platform data directory.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use bevy::window::{PresentMode, WindowResolution};
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::window::{PresentMode, PrimaryWindow, WindowCloseRequested, WindowResolution};
 use rules::Rules;
-use sim::{MatchSetup, PlayerCommand, Sim};
+use sim::scenarios;
 
 use crate::cli::Cli;
-use crate::{camera, ground, palette};
-
-/// Hard cap on simulation ticks stepped in one rendered frame. With
-/// `Time<Virtual>::max_delta` at 250 ms and a 20 Hz tick the fixed schedule
-/// never asks for more than 5, so this only guards against a future
-/// higher tick rate or a larger max delta.
-pub const MAX_TICKS_PER_FRAME: u32 = 8;
+use crate::frame_stats::FrameStatsPlugin;
+use crate::hud::HudPlugin;
+use crate::orders::OrdersPlugin;
+use crate::present::PresentPlugin;
+use crate::selection::SelectionPlugin;
+use crate::sim_driver::{
+    InputSource, LocalInput, ScenarioInput, SimHandle, SimPlugin, new_replay_path, replay_dir,
+};
+use crate::{background, camera, ground, palette};
 
 /// Default logical window size.
 pub const WINDOW_SIZE: (u32, u32) = (1280, 800);
-
-/// The running match. Non-send resource; see the module docs.
-pub struct SimHandle {
-    sim: Sim,
-    /// Ticks skipped because [`MAX_TICKS_PER_FRAME`] was reached.
-    pub dropped_ticks: u32,
-}
-
-impl SimHandle {
-    /// Build a skirmish from loaded rules and a seed with the passive bot.
-    pub fn skirmish(rules: Rules, seed: u64) -> Self {
-        let setup = MatchSetup::skirmish(&rules, seed);
-        Self {
-            sim: Sim::new(setup, rules, Box::new(ai::Passive)),
-            dropped_ticks: 0,
-        }
-    }
-
-    /// Advance one tick with no human commands (M0: no input mapping yet).
-    pub fn step_once(&mut self) {
-        let no_commands: [PlayerCommand; 0] = [];
-        self.sim.step(&no_commands);
-    }
-
-    /// Completed ticks.
-    pub fn tick(&self) -> u32 {
-        self.sim.tick()
-    }
-
-    /// Hash of the current simulation state.
-    pub fn hash(&self) -> u64 {
-        self.sim.hash()
-    }
-
-    /// Ticks per second the match runs at.
-    pub fn tick_rate_hz(&self) -> u32 {
-        self.sim.rules().tick_rate_hz
-    }
-
-    /// Seed the match was created with.
-    pub fn seed(&self) -> u64 {
-        self.sim.setup().seed
-    }
-}
 
 /// Load `data/` for `cli`, or print why it failed.
 pub fn load_rules(cli: &Cli) -> Option<Rules> {
@@ -80,75 +43,205 @@ pub fn load_rules(cli: &Cli) -> Option<Rules> {
     }
 }
 
-#[derive(Resource, Default)]
-struct TickBudget {
-    used: u32,
-}
-
-/// Install the sim as a non-send resource and drive it from `FixedUpdate`
-/// at the rules' tick rate. Not a `Plugin`: `Plugin` values must be
-/// `Send + Sync` and the sim is not (see the module docs).
-pub fn install_sim(app: &mut App, handle: SimHandle) {
-    let hz = f64::from(handle.tick_rate_hz());
-    app.world_mut().insert_non_send(handle);
-    app.insert_resource(Time::<Fixed>::from_hz(hz))
-        .init_resource::<TickBudget>()
-        .add_systems(Startup, configure_virtual_time)
-        .add_systems(PreUpdate, reset_tick_budget)
-        .add_systems(FixedUpdate, step_sim);
-}
-
-fn configure_virtual_time(mut time: ResMut<Time<Virtual>>) {
-    time.set_max_delta(Duration::from_millis(250));
-}
-
-fn reset_tick_budget(mut budget: ResMut<TickBudget>) {
-    budget.used = 0;
-}
-
-fn step_sim(mut sim: NonSendMut<SimHandle>, mut budget: ResMut<TickBudget>) {
-    if budget.used >= MAX_TICKS_PER_FRAME {
-        sim.dropped_ticks += 1;
-        return;
+/// The sim and the input source a windowed session starts with.
+pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputSource>), String> {
+    match &cli.scenario {
+        None => Ok((SimHandle::skirmish(rules, cli.seed), Box::new(LocalInput))),
+        Some(name) => {
+            let Some((mut setup, stream, _ticks)) = scenarios::by_name(name, &rules) else {
+                return Err(format!(
+                    "unknown scenario {name:?}; one of {}",
+                    scenarios::NAMES.join(", ")
+                ));
+            };
+            // `--seed` overrides the scenario's own seed only when given
+            // explicitly (the default 1 would otherwise clobber it).
+            if cli.seed != Cli::default().seed {
+                setup.seed = cli.seed;
+            }
+            Ok((
+                SimHandle::from_setup(setup, rules),
+                Box::new(ScenarioInput::new(stream)),
+            ))
+        }
     }
-    budget.used += 1;
-    sim.step_once();
 }
 
 /// `--exit-after-seconds`: wall-clock deadline for smoke tests.
 #[derive(Resource)]
 struct ExitAfter(Duration);
 
+/// `--close-window-after-seconds`: the red-close-button proxy. After the
+/// delay, write `WindowCloseRequested` for the primary window exactly as
+/// winit does for a click on the button; `bevy_window::close_when_requested`
+/// then despawns it and `exit_on_all_closed` writes `AppExit::Success`,
+/// both in `Last`.
+#[derive(Resource)]
+struct CloseWindowAfter {
+    after: Duration,
+    sent: bool,
+}
+
+/// `--max-fps <n>`: minimum frame duration enforced by a sleep in `Last`
+/// (`limit_frame_rate`). The window runs without vsync under the cap so the
+/// display's refresh rate cannot quantise the frame period (a 33 ms sleep
+/// plus a 60 Hz vsync would settle at 50 ms, not 33); the sim is unaffected
+/// either way because `FixedUpdate` catches up.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct FrameLimiter {
+    /// Target frames per second.
+    pub max_fps: u32,
+}
+
+impl FrameLimiter {
+    /// The frame period the limiter enforces.
+    pub fn period(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / f64::from(self.max_fps.max(1)))
+    }
+}
+
+/// `limit_frame_rate` sleeps until this much before the deadline and spins
+/// the rest: `thread::sleep` on macOS overshoots by up to about a
+/// millisecond, which at 30 fps would cost 3 %.
+const SPIN_MARGIN: Duration = Duration::from_micros(1200);
+
+/// When the deadline for the next frame should be, given the last deadline
+/// and the current time: the previous deadline plus one period (so sleep
+/// jitter does not accumulate), unless the frame overran by more than a
+/// period, in which case the clock resynchronises from `now`.
+pub fn next_deadline(previous: Option<Instant>, now: Instant, period: Duration) -> Instant {
+    match previous {
+        Some(prev) if now <= prev + period => prev + period,
+        _ => now + period,
+    }
+}
+
+/// `--screenshot <path>`: capture the primary window about one second
+/// before the exit deadline (or at the deadline when it is under a second),
+/// so the asynchronous capture lands before the app exits.
+#[derive(Resource, Debug, Clone)]
+pub struct ScreenshotRequest {
+    /// Output PNG path.
+    pub path: std::path::PathBuf,
+    /// When to capture, in wall-clock seconds since start.
+    pub at_secs: f64,
+    /// Set once the capture was requested.
+    pub taken: bool,
+}
+
 /// Run the windowed game. Returns the exit status for `main`.
 pub fn run(cli: &Cli) -> AppExit {
     let Some(rules) = load_rules(cli) else {
         return AppExit::error();
     };
-    let handle = SimHandle::skirmish(rules, cli.seed);
+    let units200_auto = cli.scenario.as_deref() == Some("units200_auto");
+    // The `units200_auto` arrival proxy needs the scripted move's goal and
+    // the spawn count before `rules` moves into the match.
+    let arrival = units200_auto.then(|| {
+        let (_, stream) = scenarios::units200_auto(&rules);
+        (scenarios::EAST, spawn_total(&stream))
+    });
+    let (handle, input) = match build_match(cli, rules) {
+        Ok(pair) => pair,
+        Err(message) => {
+            eprintln!("eonmark: {message}");
+            return AppExit::from_code(2);
+        }
+    };
+    let replay_path = new_replay_path(&replay_dir(cli.replay_dir.as_deref()), handle.seed());
+    let hud_click_check = cli.scenario.as_deref() == Some("hud_click");
+    let present_mode = if cli.max_fps.is_some() {
+        PresentMode::AutoNoVsync
+    } else {
+        PresentMode::AutoVsync
+    };
+
+    let background = cli.background_mode();
+    let mut window = Window {
+        // The title stays "Eonmark" (ROADMAP M0 acceptance); the seed,
+        // tick and hash readout lives in the `dev` Sim panel.
+        title: "Eonmark".into(),
+        // Logical size: winit reads this as a LogicalSize at creation.
+        resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
+        present_mode,
+        ..default()
+    };
+    if background {
+        background::configure_window(&mut window);
+    }
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            // The title stays "Eonmark" (ROADMAP M0 acceptance); the seed,
-            // tick and hash readout lives in the `dev` Sim panel.
-            title: "Eonmark".into(),
-            // Logical size: winit reads this as a LogicalSize at creation.
-            resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
-            present_mode: PresentMode::AutoVsync,
-            ..default()
-        }),
+        primary_window: Some(window),
         ..default()
     }));
+    if background {
+        app.add_plugins(background::BackgroundPlugin);
+    }
     app.insert_resource(ClearColor(palette::SKY));
-    install_sim(&mut app, handle);
-    app.add_plugins((camera::CameraPlugin, ground::GroundPlugin));
+    app.add_plugins(
+        SimPlugin::new(handle, input)
+            .recording(Some(replay_path))
+            .hash_every(cli.hash_every()),
+    );
+    app.add_plugins((
+        camera::CameraPlugin,
+        ground::GroundPlugin,
+        PresentPlugin,
+        SelectionPlugin,
+        OrdersPlugin,
+        HudPlugin { hud_click_check },
+    ));
+
+    #[cfg(target_os = "macos")]
+    app.add_plugins(crate::macos_menu::MacosMenuPlugin {
+        quit_via_menu_after: cli.quit_via_menu_after_seconds.map(Duration::from_secs_f64),
+    });
+    #[cfg(not(target_os = "macos"))]
+    if cli.quit_via_menu_after_seconds.is_some() {
+        eprintln!("eonmark: --quit-via-menu-after-seconds is macOS-only; ignored");
+    }
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
+    #[cfg(feature = "dev")]
+    if units200_auto {
+        app.add_plugins(crate::selection::SyntheticBoxSelectPlugin);
+    }
+
+    if let Some(max_fps) = cli.max_fps {
+        app.insert_resource(FrameLimiter { max_fps })
+            .add_systems(Last, limit_frame_rate);
+    }
+
+    // Frame-time lines on exit: the `units200_auto` owner proxy (with the
+    // arrival count for its scripted move to EAST) and any `--max-fps` run,
+    // whose achieved rate they document.
+    if units200_auto || cli.max_fps.is_some() {
+        app.add_plugins(FrameStatsPlugin { arrival });
+    }
+
+    if let Some(secs) = cli.close_window_after_seconds {
+        app.insert_resource(CloseWindowAfter {
+            after: Duration::from_secs_f64(secs),
+            sent: false,
+        })
+        .add_systems(Update, close_window_after);
+    }
 
     if let Some(secs) = cli.exit_after_seconds {
         app.insert_resource(ExitAfter(Duration::from_secs_f64(secs)))
             .add_systems(Update, exit_after);
+        if let Some(path) = &cli.screenshot {
+            app.insert_resource(ScreenshotRequest {
+                path: path.clone(),
+                at_secs: (secs - 1.0).max(0.0),
+                taken: false,
+            })
+            .add_systems(Update, take_screenshot);
+        }
+    } else if cli.screenshot.is_some() {
+        eprintln!("eonmark: --screenshot needs --exit-after-seconds to know when to capture");
     }
 
     app.run()
@@ -168,5 +261,124 @@ fn exit_after(
             sim.hash()
         );
         exit.write(AppExit::Success);
+    }
+}
+
+/// Units a scenario stream spawns: the sum of its `DebugSpawn` counts.
+pub fn spawn_total(stream: &scenarios::Stream) -> u32 {
+    stream
+        .iter()
+        .flat_map(|(_, cmds)| cmds.iter())
+        .map(|c| match &c.cmd {
+            sim::Command::DebugSpawn { count, .. } => u32::from(*count),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Request the primary window to close once `after` has elapsed, once.
+fn close_window_after(
+    time: Res<Time<Real>>,
+    mut request: ResMut<CloseWindowAfter>,
+    windows: Query<Entity, With<PrimaryWindow>>,
+    mut close: MessageWriter<WindowCloseRequested>,
+) {
+    if request.sent || time.elapsed() < request.after {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    request.sent = true;
+    println!(
+        "close-window: requesting close after {:.2} s",
+        time.elapsed().as_secs_f64()
+    );
+    close.write(WindowCloseRequested { window });
+}
+
+/// Sleep in `Last` so the frame takes at least `1 / max_fps` seconds: wait
+/// until the deadline set by the previous frame (sleep, then spin the last
+/// [`SPIN_MARGIN`]), then schedule the next deadline one period later.
+fn limit_frame_rate(limiter: Res<FrameLimiter>, mut deadline: Local<Option<Instant>>) {
+    let period = limiter.period();
+    let now = Instant::now();
+    if let Some(target) = *deadline
+        && now < target
+    {
+        let remaining = target - now;
+        if remaining > SPIN_MARGIN {
+            std::thread::sleep(remaining - SPIN_MARGIN);
+        }
+        while Instant::now() < target {
+            std::hint::spin_loop();
+        }
+    }
+    *deadline = Some(next_deadline(*deadline, Instant::now(), period));
+}
+
+/// Capture the primary window once `at_secs` has passed, exactly once
+/// (`Screenshot::primary_window()` + `save_to_disk`; the PNG lands a frame
+/// or two later).
+fn take_screenshot(
+    time: Res<Time<Real>>,
+    mut request: ResMut<ScreenshotRequest>,
+    mut commands: Commands,
+) {
+    if request.taken || time.elapsed().as_secs_f64() < request.at_secs {
+        return;
+    }
+    request.taken = true;
+    info!(
+        "screenshot: capturing the primary window to {}",
+        request.path.display()
+    );
+    // Overwrite semantics, and a stale file must not look like this run's
+    // capture to anything waiting for the PNG (the `hud_click` check).
+    if let Err(err) = std::fs::remove_file(&request.path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(
+            "screenshot: cannot remove the old {}: {err}",
+            request.path.display()
+        );
+    }
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(request.path.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn units200_auto_spawns_200() {
+        let rules =
+            Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .unwrap();
+        let (_, stream) = scenarios::units200_auto(&rules);
+        assert_eq!(spawn_total(&stream), 200);
+        assert_eq!(spawn_total(&Vec::new()), 0);
+    }
+
+    #[test]
+    fn frame_limiter_period_and_deadlines() {
+        let period = FrameLimiter { max_fps: 30 }.period();
+        assert!((period.as_secs_f64() - 1.0 / 30.0).abs() < 1e-9);
+        assert_eq!(FrameLimiter { max_fps: 0 }.period(), Duration::from_secs(1));
+        let t0 = Instant::now();
+        // First frame: one period from now.
+        assert_eq!(next_deadline(None, t0, period), t0 + period);
+        // On time (or early): advance from the previous deadline, not from now.
+        let d1 = t0 + period;
+        assert_eq!(
+            next_deadline(Some(d1), d1 + Duration::from_millis(1), period),
+            d1 + period
+        );
+        assert_eq!(next_deadline(Some(d1), d1, period), d1 + period);
+        // Overran by more than a period: resynchronise from now.
+        let late = d1 + period + Duration::from_millis(5);
+        assert_eq!(next_deadline(Some(d1), late, period), late + period);
     }
 }

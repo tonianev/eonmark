@@ -1,0 +1,783 @@
+//! Unit selection (M2 decision 5): click, shift-add, double-click same
+//! kind on screen, screen-space drag box, control groups, and the retained
+//! gizmo rings and move markers.
+//!
+//! Picking rules (fixed on day one, `docs/design/ui.md`): `MeshPickingPlugin`
+//! with `MeshPickingSettings { require_markers: true }`, `MeshPickingCamera`
+//! on the RTS camera only, `Pickable::default()` only on unit entities
+//! (`present::sync_lifecycle` adds it). The drag box never raycasts: it
+//! projects every sim unit position with `Camera::world_to_viewport` and
+//! tests the rectangle. Rings and markers are SEPARATE flat entities keyed
+//! by `UnitId`, never children of unit entities, so unit transforms stay
+//! flat and a despawned unit never drags a child with it.
+//!
+//! Input paths: a `Pointer<Click>` observer handles clicks that land on a
+//! unit (the mesh backend decides what was hit); the drag box and the
+//! click-on-empty-ground deselect read raw `ButtonInput<MouseButton>` and
+//! the window cursor in [`WorldInputSet`], guarded by `PointerOverUi`. Box
+//! selection takes the local player's units only.
+
+use std::collections::{BTreeSet, HashMap};
+
+use bevy::gizmos::config::GizmoLineConfig;
+use bevy::picking::events::{Click, Pointer};
+use bevy::picking::hover::HoverMap;
+use bevy::picking::mesh_picking::{MeshPickingCamera, MeshPickingPlugin, MeshPickingSettings};
+use bevy::picking::pointer::{PointerButton, PointerId};
+use bevy::prelude::*;
+use bevy::transform::TransformSystems;
+use bevy::window::PrimaryWindow;
+use sim::{SimView, UnitId};
+
+use crate::camera::RtsCamera;
+use crate::hud::{PointerOverUi, WorldInputSet};
+use crate::orders::OrderMode;
+use crate::palette;
+use crate::present::{
+    Interp, UNIT_Y, UnitEntities, UnitRef, flat_on_ground, fx_to_f32, world_from_sim,
+};
+use crate::sim_driver::{LOCAL_PLAYER, SimHandle};
+
+/// A left press that moves less than this (logical px) before release is a
+/// click, not a drag box.
+pub const DRAG_THRESHOLD_PX: f32 = 4.0;
+/// Two clicks on the same unit within this many seconds are a double click.
+pub const DOUBLE_CLICK_SECS: f32 = 0.3;
+/// Selection ring radius as a multiple of the unit's collision radius.
+pub const RING_RADIUS_PER_UNIT_RADIUS: f32 = 1.4;
+/// Move marker radius, metres.
+pub const MOVE_MARKER_RADIUS: f32 = 0.5;
+/// Move marker lifetime, seconds (wall clock; purely cosmetic).
+pub const MOVE_MARKER_SECS: f32 = 0.6;
+/// Rings float this far above the ground to avoid z-fighting.
+pub const RING_Y: f32 = 0.03;
+/// Segments per ring circle.
+pub const RING_RESOLUTION: u32 = 48;
+/// Ring and marker line width, pixels (thin and calm, `docs/ART_STYLE.md`).
+pub const RING_LINE_WIDTH_PX: f32 = 1.5;
+
+/// The selected units and the nine control groups. Render-side state: the
+/// sim knows nothing about selection.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    /// Currently selected units, in id order.
+    pub units: BTreeSet<UnitId>,
+    /// Control groups 1..=9 at indices 0..=8.
+    pub groups: [BTreeSet<UnitId>; 9],
+}
+
+impl Selection {
+    /// Replace the selection.
+    pub fn set(&mut self, units: impl IntoIterator<Item = UnitId>) {
+        self.units = units.into_iter().collect();
+    }
+
+    /// Deselect everything.
+    pub fn clear(&mut self) {
+        self.units.clear();
+    }
+
+    /// Shift-click: add if absent, remove if present.
+    pub fn toggle(&mut self, unit: UnitId) {
+        if !self.units.remove(&unit) {
+            self.units.insert(unit);
+        }
+    }
+
+    /// Add without removing.
+    pub fn extend(&mut self, units: impl IntoIterator<Item = UnitId>) {
+        self.units.extend(units);
+    }
+
+    /// `true` when `unit` is selected.
+    pub fn contains(&self, unit: UnitId) -> bool {
+        self.units.contains(&unit)
+    }
+
+    /// `true` when nothing is selected.
+    pub fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+
+    /// Ctrl+`digit`: store the selection in group `digit` (1..=9). Ignores
+    /// other digits.
+    pub fn assign_group(&mut self, digit: u8) {
+        if let Some(slot) = Self::slot(digit) {
+            self.groups[slot] = self.units.clone();
+        }
+    }
+
+    /// `digit`: recall group `digit` (1..=9) into the selection. Returns
+    /// `false` and leaves the selection alone when the group is empty or
+    /// the digit is out of range.
+    pub fn recall_group(&mut self, digit: u8) -> bool {
+        match Self::slot(digit) {
+            Some(slot) if !self.groups[slot].is_empty() => {
+                self.units = self.groups[slot].clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Drop ids that no longer exist (dead or despawned units) from the
+    /// selection and every group.
+    pub fn prune(&mut self, alive: impl Fn(UnitId) -> bool) {
+        self.units.retain(|u| alive(*u));
+        for g in &mut self.groups {
+            g.retain(|u| alive(*u));
+        }
+    }
+
+    fn slot(digit: u8) -> Option<usize> {
+        (1..=9).contains(&digit).then(|| usize::from(digit - 1))
+    }
+
+    /// The digit for a number-row key, if it is one.
+    pub fn digit_of(key: KeyCode) -> Option<u8> {
+        Some(match key {
+            KeyCode::Digit1 => 1,
+            KeyCode::Digit2 => 2,
+            KeyCode::Digit3 => 3,
+            KeyCode::Digit4 => 4,
+            KeyCode::Digit5 => 5,
+            KeyCode::Digit6 => 6,
+            KeyCode::Digit7 => 7,
+            KeyCode::Digit8 => 8,
+            KeyCode::Digit9 => 9,
+            _ => return None,
+        })
+    }
+}
+
+/// A left drag in progress, in logical window pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragRect {
+    /// Where the button went down.
+    pub start: Vec2,
+    /// Where the cursor is now.
+    pub current: Vec2,
+}
+
+impl DragRect {
+    /// The normalised rectangle.
+    pub fn rect(&self) -> Rect {
+        Rect::from_corners(self.start, self.current)
+    }
+
+    /// `true` while the cursor has not moved past [`DRAG_THRESHOLD_PX`].
+    pub fn is_click(&self) -> bool {
+        self.start.distance(self.current) < DRAG_THRESHOLD_PX
+    }
+}
+
+/// The current drag box, if the left button is held on the world.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct DragBox(pub Option<DragRect>);
+
+/// The `bevy_ui` node that draws the drag box (`Pickable::IGNORE`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DragBoxNode;
+
+/// Remembers the last click for double-click detection.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct LastClick {
+    /// Entity and wall-clock time of the previous primary click on a unit.
+    pub previous: Option<(Entity, f32)>,
+}
+
+/// A retained-gizmo ring under a selected unit; one entity per selected
+/// `UnitId`, tracked in [`SelectionRings`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionRing(pub UnitId);
+
+/// Ring entities by unit id.
+#[derive(Resource, Default, Debug)]
+pub struct SelectionRings(pub HashMap<UnitId, Entity>);
+
+/// A short-lived ring at an order's target point.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct MoveMarker {
+    /// `Time::elapsed_secs()` after which the marker despawns.
+    pub expires_at: f32,
+}
+
+/// The two `GizmoAsset`s shared by every ring and marker (one circle each,
+/// unit radius; entities scale their `Transform`).
+#[derive(Resource, Debug, Clone)]
+pub struct RingAssets {
+    /// Unit-radius circle in `palette::SELECTION_RING`.
+    pub selection: Handle<GizmoAsset>,
+    /// Unit-radius circle in `palette::MOVE_MARKER`.
+    pub marker: Handle<GizmoAsset>,
+}
+
+/// Picking, selection input, rings and markers.
+pub struct SelectionPlugin;
+
+impl Plugin for SelectionPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MeshPickingPlugin)
+            .insert_resource(MeshPickingSettings {
+                require_markers: true,
+                ..default()
+            })
+            .init_resource::<Selection>()
+            .init_resource::<DragBox>()
+            .init_resource::<LastClick>()
+            .init_resource::<SelectionRings>()
+            .add_systems(Startup, (create_ring_assets, spawn_drag_box_node))
+            .add_systems(PostStartup, mark_picking_camera)
+            .add_observer(on_unit_click)
+            .add_systems(
+                Update,
+                (
+                    update_drag_box,
+                    control_groups,
+                    clear_selection_on_escape,
+                    expire_move_markers,
+                )
+                    .chain()
+                    .in_set(WorldInputSet),
+            )
+            .add_systems(Update, draw_drag_box.after(WorldInputSet))
+            // Before `FrameCount` advances, so the frame number matches the
+            // one `frame_stats` records for this frame.
+            .add_systems(
+                Last,
+                log_first_gizmo_spawns.before(bevy::diagnostic::update_frame_count),
+            )
+            .add_systems(
+                PostUpdate,
+                (prune_dead, sync_selection_rings)
+                    .chain()
+                    .before(TransformSystems::Propagate),
+            );
+    }
+}
+
+/// Adds `MeshPickingCamera` to the RTS camera. `camera.rs` spawns it with
+/// `Commands` in `Startup`, so this runs in `PostStartup`, after that
+/// schedule's commands were applied.
+fn mark_picking_camera(
+    mut commands: Commands,
+    cameras: Query<Entity, (With<RtsCamera>, Without<MeshPickingCamera>)>,
+) {
+    for cam in &cameras {
+        commands.entity(cam).insert(MeshPickingCamera);
+    }
+}
+
+/// Builds the two shared ring assets: a unit circle laid flat
+/// (`present::flat_on_ground()`), [`RING_RESOLUTION`] segments.
+fn create_ring_assets(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
+    let flat = Isometry3d::new(Vec3::ZERO, flat_on_ground());
+    let mut selection = GizmoAsset::new();
+    selection
+        .circle(flat, 1.0, palette::SELECTION_RING)
+        .resolution(RING_RESOLUTION);
+    let mut marker = GizmoAsset::new();
+    marker
+        .circle(flat, 1.0, palette::MOVE_MARKER)
+        .resolution(RING_RESOLUTION);
+    commands.insert_resource(RingAssets {
+        selection: gizmo_assets.add(selection),
+        marker: gizmo_assets.add(marker),
+    });
+}
+
+/// Spawns the hidden drag-box node; [`draw_drag_box`] shows and sizes it.
+fn spawn_drag_box_node(mut commands: Commands) {
+    commands.spawn((
+        Name::new("Drag box"),
+        DragBoxNode,
+        Node {
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BackgroundColor(palette::DRAG_BOX_FILL),
+        BorderColor::all(palette::DRAG_BOX_BORDER),
+        GlobalZIndex(10),
+        Pickable::IGNORE,
+    ));
+}
+
+/// Shift held (either key).
+fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
+}
+
+/// Primary click on a unit entity: plain click selects it alone; shift
+/// toggles it; a second primary click on the same entity within
+/// [`DOUBLE_CLICK_SECS`] selects every unit of the same kind whose
+/// projected position is inside the camera's logical viewport rect.
+/// Ignored while [`PointerOverUi`] is set, in attack-move mode, when the
+/// release ends a box drag, or when the target has no [`UnitRef`] (the
+/// event propagates to the window entity too).
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
+pub fn on_unit_click(
+    click: On<Pointer<Click>>,
+    units: Query<&UnitRef>,
+    mut selection: ResMut<Selection>,
+    over_ui: Res<PointerOverUi>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut last: ResMut<LastClick>,
+    time: Res<Time>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    drag: Res<DragBox>,
+    mode: Res<OrderMode>,
+) {
+    let target = click.event().entity;
+    let Ok(unit) = units.get(target) else {
+        return;
+    };
+    if click.event().event.button != PointerButton::Primary
+        || over_ui.0
+        || *mode != OrderMode::Normal
+        || drag.0.is_some_and(|d| !d.is_click())
+    {
+        return;
+    }
+    let shift = shift_held(&keys);
+    let now = time.elapsed_secs();
+    let double = last
+        .previous
+        .is_some_and(|(e, t)| e == target && now > t && now - t <= DOUBLE_CLICK_SECS);
+    if !double {
+        last.previous = Some((target, now));
+        if shift {
+            selection.toggle(unit.0);
+        } else {
+            selection.set([unit.0]);
+        }
+        return;
+    }
+    last.previous = None;
+    let view = sim.view();
+    let Some(kind) = view.unit(unit.0).map(|u| u.kind) else {
+        return;
+    };
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    let Some(rect) = cam.logical_viewport_rect() else {
+        return;
+    };
+    let same_kind = units_in_rect(
+        rect,
+        cam,
+        cam_tf,
+        view.units()
+            .filter(|u| u.kind == kind && u.owner == LOCAL_PLAYER)
+            .map(|u| (u.id, world_from_sim(u.pos, UNIT_Y))),
+    );
+    if shift {
+        selection.extend(same_kind);
+    } else {
+        selection.set(same_kind);
+    }
+}
+
+/// Left button: on press (not over UI, in `Normal` mode) start a
+/// [`DragRect`] at the cursor; while held, update `current`; on release, if
+/// `!is_click()`, select the units whose sim position projects inside the
+/// rect (shift extends) via [`select_in_rect`]; a release that is still a
+/// click on empty ground clears the selection unless shift is held. Units
+/// clicked directly are handled by [`on_unit_click`], which fires on the
+/// same release; the hover map tells the two apart.
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
+pub fn update_drag_box(
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    over_ui: Res<PointerOverUi>,
+    mode: Res<OrderMode>,
+    hover: Res<HoverMap>,
+    units: Query<(), With<UnitRef>>,
+    mut drag: ResMut<DragBox>,
+    mut selection: ResMut<Selection>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+) {
+    let cursor = windows.single().ok().and_then(Window::cursor_position);
+    if buttons.just_pressed(MouseButton::Left)
+        && !over_ui.0
+        && *mode == OrderMode::Normal
+        && let Some(c) = cursor
+    {
+        drag.0 = Some(DragRect {
+            start: c,
+            current: c,
+        });
+    }
+    if buttons.pressed(MouseButton::Left)
+        && let (Some(d), Some(c)) = (drag.0.as_mut(), cursor)
+    {
+        d.current = c;
+    }
+    if !buttons.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(d) = drag.0.take() else {
+        return;
+    };
+    let shift = shift_held(&keys);
+    if d.is_click() {
+        let over_unit = hover
+            .get(&PointerId::Mouse)
+            .is_some_and(|hits| hits.keys().any(|e| units.contains(*e)));
+        if !over_ui.0 && !over_unit && !shift {
+            selection.clear();
+        }
+        return;
+    }
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    select_in_rect(d.rect(), shift, cam, cam_tf, &sim.view(), &mut selection);
+}
+
+/// Box selection: the local player's units whose positions project inside
+/// `rect` replace the selection (or extend it). Returns how many matched.
+pub fn select_in_rect(
+    rect: Rect,
+    extend: bool,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    view: &SimView<'_>,
+    selection: &mut Selection,
+) -> usize {
+    let hits = units_in_rect(
+        rect,
+        camera,
+        camera_transform,
+        view.units()
+            .filter(|u| u.owner == LOCAL_PLAYER)
+            .map(|u| (u.id, world_from_sim(u.pos, UNIT_Y))),
+    );
+    let n = hits.len();
+    if extend {
+        selection.extend(hits);
+    } else {
+        selection.set(hits);
+    }
+    n
+}
+
+/// Shows the drag-box node over the current [`DragRect`] once it is past
+/// the click threshold; hides it otherwise.
+fn draw_drag_box(drag: Res<DragBox>, mut nodes: Query<&mut Node, With<DragBoxNode>>) {
+    for mut node in &mut nodes {
+        match drag.0.filter(|d| !d.is_click()) {
+            Some(d) => {
+                let r = d.rect();
+                node.display = Display::Flex;
+                node.left = Val::Px(r.min.x);
+                node.top = Val::Px(r.min.y);
+                node.width = Val::Px(r.width());
+                node.height = Val::Px(r.height());
+            }
+            None => node.display = Display::None,
+        }
+    }
+}
+
+/// The ids whose world positions project inside `rect` (logical pixels).
+/// Positions behind the camera (`world_to_viewport` errors) are skipped.
+pub fn units_in_rect(
+    rect: Rect,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    positions: impl IntoIterator<Item = (UnitId, Vec3)>,
+) -> BTreeSet<UnitId> {
+    positions
+        .into_iter()
+        .filter_map(|(id, pos)| {
+            camera
+                .world_to_viewport(camera_transform, pos)
+                .ok()
+                .filter(|p| rect.contains(*p))
+                .map(|_| id)
+        })
+        .collect()
+}
+
+/// Ctrl+1..9 assigns, 1..9 recalls (`Selection::assign_group` /
+/// `recall_group`). Cmd is not used: it is the menu modifier on macOS.
+pub fn control_groups(keys: Res<ButtonInput<KeyCode>>, mut selection: ResMut<Selection>) {
+    let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    for key in keys.get_just_pressed() {
+        if let Some(digit) = Selection::digit_of(*key) {
+            if ctrl {
+                selection.assign_group(digit);
+            } else {
+                selection.recall_group(digit);
+            }
+        }
+    }
+}
+
+/// Esc clears the selection (the pause menu takes Esc over from M6).
+pub fn clear_selection_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut selection: ResMut<Selection>,
+) {
+    if keys.just_pressed(KeyCode::Escape) {
+        selection.clear();
+    }
+}
+
+/// Drop ids that left the sim from the selection and groups.
+pub fn prune_dead(sim: NonSend<SimHandle>, mut selection: ResMut<Selection>) {
+    if selection.is_empty() && selection.groups.iter().all(BTreeSet::is_empty) {
+        return;
+    }
+    let view = sim.view();
+    selection.prune(|id| view.unit(id).is_some());
+}
+
+/// One ring entity per selected unit: spawn `(SelectionRing(id), Gizmo {
+/// handle: assets.selection, .. }, Transform)` for newly selected ids,
+/// despawn rings whose id left the selection, and every frame place each
+/// ring at the unit entity's interpolated position (`Interp::sample` with
+/// the overstep fraction) at [`RING_Y`], scaled by the kind's radius times
+/// [`RING_RADIUS_PER_UNIT_RADIUS`]. Rings are never children of units.
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
+pub fn sync_selection_rings(
+    mut commands: Commands,
+    selection: Res<Selection>,
+    mut rings: ResMut<SelectionRings>,
+    assets: Option<Res<RingAssets>>,
+    entities: Res<UnitEntities>,
+    interps: Query<&Interp>,
+    mut ring_transforms: Query<&mut Transform, With<SelectionRing>>,
+    fixed: Res<Time<Fixed>>,
+    sim: NonSend<SimHandle>,
+) {
+    let Some(assets) = assets else {
+        return;
+    };
+    rings.0.retain(|id, ring| {
+        if selection.contains(*id) {
+            true
+        } else {
+            commands.entity(*ring).despawn();
+            false
+        }
+    });
+    let t = fixed.overstep_fraction();
+    let view = sim.view();
+    for id in &selection.units {
+        let Some(unit) = view.unit(*id) else {
+            continue; // prune_dead drops it this frame
+        };
+        let Some(unit_entity) = entities.0.get(id) else {
+            continue;
+        };
+        let Ok(interp) = interps.get(*unit_entity) else {
+            continue;
+        };
+        let (pos, _) = interp.sample(t);
+        let radius = fx_to_f32(unit.radius) * RING_RADIUS_PER_UNIT_RADIUS;
+        let transform = Transform::from_translation(Vec3::new(pos.x, RING_Y, pos.z))
+            .with_scale(Vec3::splat(radius));
+        match rings.0.get(id) {
+            Some(ring) => {
+                if let Ok(mut ring_transform) = ring_transforms.get_mut(*ring) {
+                    *ring_transform = transform;
+                }
+            }
+            None => {
+                let ring = commands
+                    .spawn((
+                        Name::new("Selection ring"),
+                        SelectionRing(*id),
+                        Gizmo {
+                            handle: assets.selection.clone(),
+                            line_config: ring_line_config(),
+                            ..default()
+                        },
+                        transform,
+                    ))
+                    .id();
+                rings.0.insert(*id, ring);
+            }
+        }
+    }
+}
+
+/// Thin lines for rings and markers.
+fn ring_line_config() -> GizmoLineConfig {
+    GizmoLineConfig {
+        width: RING_LINE_WIDTH_PX,
+        ..default()
+    }
+}
+
+/// Spawn a move marker ring at `at` (world) that expires after
+/// [`MOVE_MARKER_SECS`]. Called by `orders.rs` on a successful ground order.
+pub fn spawn_move_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3, now_secs: f32) {
+    commands.spawn((
+        Name::new("Move marker"),
+        MoveMarker {
+            expires_at: now_secs + MOVE_MARKER_SECS,
+        },
+        Gizmo {
+            handle: assets.marker.clone(),
+            line_config: ring_line_config(),
+            ..default()
+        },
+        Transform::from_translation(Vec3::new(at.x, RING_Y, at.z))
+            .with_scale(Vec3::splat(MOVE_MARKER_RADIUS)),
+    ));
+}
+
+/// `debug` log of the frame and wall-clock time at which the first
+/// selection ring and the first move marker appeared: the first draw of a
+/// new kind of entity is where a synchronous pipeline compile would show,
+/// so a long frame in `frame_stats`' `worst_ms` line can be matched
+/// against these (`RUST_LOG=info,game=debug`).
+fn log_first_gizmo_spawns(
+    rings: Query<(), Added<SelectionRing>>,
+    markers: Query<(), Added<MoveMarker>>,
+    frame: Res<bevy::diagnostic::FrameCount>,
+    time: Res<Time<Real>>,
+    mut seen: Local<(bool, bool)>,
+) {
+    if !seen.0 && !rings.is_empty() {
+        seen.0 = true;
+        debug!(
+            "first selection ring spawned: frame {} at {:.2} s",
+            frame.0,
+            time.elapsed_secs_f64()
+        );
+    }
+    if !seen.1 && !markers.is_empty() {
+        seen.1 = true;
+        debug!(
+            "first move marker spawned: frame {} at {:.2} s",
+            frame.0,
+            time.elapsed_secs_f64()
+        );
+    }
+}
+
+/// Shrinks and despawns move markers past their expiry.
+pub fn expire_move_markers(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut markers: Query<(Entity, &MoveMarker, &mut Transform)>,
+) {
+    let now = time.elapsed_secs();
+    for (entity, marker, mut transform) in &mut markers {
+        if now >= marker.expires_at {
+            commands.entity(entity).despawn();
+        } else {
+            let left = ((marker.expires_at - now) / MOVE_MARKER_SECS).clamp(0.0, 1.0);
+            transform.scale = Vec3::splat(MOVE_MARKER_RADIUS * (0.4 + 0.6 * left));
+        }
+    }
+}
+
+/// Tick at which the dev-only synthetic box selection runs: after the
+/// scenario's spawn during tick 0 and the camera's jump to the units.
+#[cfg(feature = "dev")]
+pub const SYNTHETIC_SELECT_TICK: u32 = 5;
+
+/// Dev builds, `--scenario units200_auto`: once per run, at
+/// [`SYNTHETIC_SELECT_TICK`], select everything through the drag-box code
+/// path ([`select_in_rect`]) with a rectangle covering the whole viewport
+/// and print `selection: <n>` (`selection: FAIL expected <e> got <n>` when
+/// the count differs from the local player's unit count).
+#[cfg(feature = "dev")]
+pub struct SyntheticBoxSelectPlugin;
+
+#[cfg(feature = "dev")]
+impl Plugin for SyntheticBoxSelectPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, synthetic_box_select.in_set(WorldInputSet));
+    }
+}
+
+#[cfg(feature = "dev")]
+fn synthetic_box_select(
+    mut done: Local<bool>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut selection: ResMut<Selection>,
+) {
+    if *done || sim.tick() < SYNTHETIC_SELECT_TICK {
+        return;
+    }
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    let Some(rect) = cam.logical_viewport_rect() else {
+        return;
+    };
+    *done = true;
+    let view = sim.view();
+    let n = select_in_rect(rect, false, cam, cam_tf, &view, &mut selection);
+    let expected = view.units().filter(|u| u.owner == LOCAL_PLAYER).count();
+    if n == expected {
+        println!("selection: {n}");
+    } else {
+        println!("selection: FAIL expected {expected} got {n}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(v: &[u32]) -> Vec<UnitId> {
+        v.iter().copied().map(UnitId).collect()
+    }
+
+    #[test]
+    fn selection_set_toggle_and_groups() {
+        let mut s = Selection::default();
+        assert!(s.is_empty());
+        s.set(ids(&[3, 1, 2]));
+        assert_eq!(s.units.iter().copied().collect::<Vec<_>>(), ids(&[1, 2, 3]));
+        s.toggle(UnitId(2));
+        assert!(!s.contains(UnitId(2)));
+        s.toggle(UnitId(9));
+        assert!(s.contains(UnitId(9)));
+        s.assign_group(1);
+        s.clear();
+        assert!(s.is_empty());
+        assert!(s.recall_group(1));
+        assert_eq!(s.units.iter().copied().collect::<Vec<_>>(), ids(&[1, 3, 9]));
+        assert!(!s.recall_group(2), "empty group leaves the selection alone");
+        assert_eq!(s.units.len(), 3);
+        assert!(!s.recall_group(0));
+        s.assign_group(10);
+        assert!(s.groups.iter().filter(|g| !g.is_empty()).count() == 1);
+        s.prune(|u| u.0 != 9);
+        assert!(!s.contains(UnitId(9)));
+        assert!(!s.groups[0].contains(&UnitId(9)));
+        assert_eq!(Selection::digit_of(KeyCode::Digit7), Some(7));
+        assert_eq!(Selection::digit_of(KeyCode::KeyA), None);
+    }
+
+    #[test]
+    fn drag_rect_distinguishes_clicks() {
+        let click = DragRect {
+            start: Vec2::new(10.0, 10.0),
+            current: Vec2::new(12.0, 11.0),
+        };
+        assert!(click.is_click());
+        let drag = DragRect {
+            start: Vec2::new(100.0, 50.0),
+            current: Vec2::new(20.0, 90.0),
+        };
+        assert!(!drag.is_click());
+        let r = drag.rect();
+        assert_eq!(r.min, Vec2::new(20.0, 50.0));
+        assert_eq!(r.max, Vec2::new(100.0, 90.0));
+    }
+}

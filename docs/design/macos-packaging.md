@@ -128,21 +128,36 @@ Running on Linux or Windows is unsupported in v0.1; the game crate must keep com
 
 On macOS, winit installs a default application menu whose Quit item calls `NSApp terminate:`. winit 0.30 implements only `applicationWillTerminate:`, and Bevy 0.19.1's winit runner reacts to it by clearing windows and the `World` and returning. No schedule runs, no `AppExit` is sent, no observer fires. A Cmd-Q would therefore end the process without the replay's clean-exit `sync_all` or any other exit logic, while the red close button and an in-game Quit (which go through `WindowCloseRequested` and `AppExit`) would work, so the bug would look intermittent. Bevy exposes no hook to disable or replace that menu.
 
-The fix, under `cfg(target_os = "macos")` in `crates/game/src/macos_menu.rs`:
+The fix, under `cfg(target_os = "macos")` in `crates/game/src/macos_menu.rs` (M2, done):
 
-1. A startup system builds a muda 0.21 `Menu` with the usual predefined items (About, Hide, Hide Others, Show All, Services) and a custom `MenuItem` titled "Quit Eonmark" with the Cmd+Q accelerator, then calls `init_for_nsapp()`. It must be a custom item: muda's `PredefinedMenuItem::quit` also calls `terminate:` directly and emits no event.
-2. A per-frame system drains `MenuEvent::receiver().try_recv()` and, when the Quit item's id arrives, writes `AppExit::Success`.
+1. `install_menu`, a `Startup` system, builds a muda 0.21 `Menu` with one application `Submenu` holding `PredefinedMenuItem::about(None, Some(metadata))`, a separator, `services`, a separator, `hide`, `hide_others`, `show_all`, a separator, and the custom `MenuItem::with_id("quit", "Quit Eonmark", true, Some(Accelerator::new(Modifiers::META, Code::KeyQ)))`, then calls `menu.init_for_nsapp()`. Note the muda 0.21 signature: `Accelerator::new(mods: Modifiers, key: Code)` takes a plain `Modifiers`, not an `Option`. It must be a custom item: muda's `PredefinedMenuItem::quit` also calls `terminate:` directly and emits no event. The `Menu` is kept alive in the `MacosMenu` non-send resource; dropping it would remove the menu bar.
+2. `drain_menu_events`, an `Update` system, drains `MenuEvent::receiver().try_recv()` and, when an event's `id` equals the Quit item's id, writes `AppExit::Success`. Every other id (About, Services, Hide, ...) is handled by AppKit itself and ignored here.
 3. Both systems take a `NonSendMarker` parameter so Bevy schedules them on the AppKit main thread; menu work off the main thread is undefined behaviour in AppKit.
+4. Building happens in `Startup`, not in `Plugin::build`: winit installs its own menu in `applicationDidFinishLaunching`, which runs after plugin construction and before the first schedule, so a menu built earlier would be the one replaced.
 
-With this in place Cmd-Q, the close button and the menus all flow through `AppExit`, the replay writer gets its clean-exit signal, and the M2 acceptance ("play 2 minutes, press Cmd-Q, exit code 0, `sim-cli verify` passes") holds.
+Menu item ids: the only id the module reacts to is `quit` (`macos_menu::QUIT_ID`); predefined items have muda-generated ids that are never matched. The About panel shows name `Eonmark`, the crate version, and the copyright line `macos_menu::COPYRIGHT` (the same text `bundle.sh` writes into `NSHumanReadableCopyright`); muda's `website`, `website_label` and `license` fields are filled but AppKit's standard About panel does not display them (muda documents them as Windows and GTK only).
+
+What the menu bar shows when the game runs from `cargo run` (read with `osascript`, see [../PLAYTEST.md](../PLAYTEST.md)): `Apple, eonmark`; the application menu `About eonmark, Services, Hide eonmark, Hide Others, Show All, Quit Eonmark` (Cmd+Q). The predefined items use the process name, so they read `Eonmark` only inside the bundle (`CFBundleName`, M8); the custom Quit item reads `Quit Eonmark` everywhere. winit's default `Quit eonmark` item and its `Window` menu are gone.
+
+The exit path, shared by three triggers:
+
+| Trigger | Where `AppExit::Success` is written | Same frame, in `Last` |
+| --- | --- | --- |
+| Cmd-Q or the `Quit Eonmark` menu item | `macos_menu::drain_menu_events` (`Update`) | `sim_driver::finish_recorder_on_exit` records a final hash checkpoint, sends `Finish`, joins the writer (3 s bound); the file ends with `EONRDONE` |
+| Red close button | `bevy_window::exit_on_all_closed` (`Last`, in `ExitSystems`, from `WindowPlugin`'s default `ExitCondition::OnAllClosed`, after `close_when_requested` despawned the window) | same, because `finish_recorder_on_exit` is ordered `.after(bevy::window::ExitSystems)` |
+| `--exit-after-seconds` | `app::exit_after` (`Update`) | same |
+
+The winit runner checks `App::should_exit` right after `app.update()` and leaves the event loop at once, so there is no next frame: a `Last` system sees an `AppExit` written in `Update` without further care, but one written in `Last` (the close button) only if it is ordered after `ExitSystems`. The proxy `--close-window-after-seconds <s>` (dev builds; writes `WindowCloseRequested` for the primary window, exactly what winit sends for the button) measured this on 2026-10-06: before the ordering constraint three runs out of three exited 0 with no trailer; after it, every run ends with `EONRDONE` and `sim-cli verify` reports no truncation. With this in place Cmd-Q, the close button and the menus all flow through `AppExit`, the replay writer gets its clean-exit signal, and the M2 acceptance ("play 2 minutes, press Cmd-Q, exit code 0, `sim-cli verify` passes") holds.
+
+Automated proxy (dev builds): `--quit-via-menu-after-seconds <s>` inserts a `SyntheticQuit` resource; once `Time<Real>` passes `s`, `drain_menu_events` builds a `MenuEvent { id: quit }` by hand and runs it through the same handler as a real event, printing `quit-via-menu: firing "quit" after <t> s` on stdout. muda's `MenuEvent::send` is `pub(crate)`, so the event cannot be injected into muda's channel itself; the id match, `AppExit`, recorder finish and exit code are the real path. Measured on 2026-10-06: exit 0 after 4 s wall, trailer present, `sim-cli verify` OK. The flag is parsed on every platform, acted on only on macOS with the `dev` feature, and ignored with a stderr note elsewhere. Pressing the real key remains the owner's check in [../PLAYTEST.md](../PLAYTEST.md).
 
 ## Replay writer thread and the no-fsync rule (M2)
 
-Every session records a replay (see [../DETERMINISM.md](../DETERMINISM.md)). The writer is a dedicated `std::thread` fed by a channel of postcard-encoded tick batches from the FixedUpdate driver. It writes and flushes (`BufWriter::flush`, which is a `write(2)`) every 20 ticks, that is once per second, and calls `File::sync_all` exactly once, at clean exit.
+Every windowed session records a replay (see [../DETERMINISM.md](../DETERMINISM.md) for the message protocol). The writer is a dedicated `std::thread` named `eonmark-replay-writer` (`sim_driver::writer_thread`), owning a `sim::replay::ReplayWriter` and fed by an `std::sync::mpsc` channel of `RecorderMessage::{Tick, Hash, Finish}` from the FixedUpdate driver. It writes and flushes (`BufWriter::flush`, which is a `write(2)`) after every 20th tick, that is once per second, and calls `File::sync_all` exactly once, inside `ReplayWriter::finish` on `Finish`, after the `EONRDONE` trailer.
 
-It never calls `sync_all` or `sync_data` per batch. On Apple platforms Rust's standard library implements both as `fcntl(F_FULLFSYNC)`, which forces the drive to flush its cache and costs from a few to tens of milliseconds. Doing that once a second on the FixedUpdate thread would be a visible periodic hitch at the flush cadence, which the M2 acceptance explicitly checks against on the frame-time graph. Surviving `kill -9` does not need it: a hard kill loses at most the last second of un-flushed batches, and the kernel still writes pages that were handed to `write(2)`. Surviving a power loss is not a goal.
+It never calls `sync_all` or `sync_data` per batch. On Apple platforms Rust's standard library implements both as `fcntl(F_FULLFSYNC)`, which forces the drive to flush its cache and costs from a few to tens of milliseconds. Doing that once a second would be a visible periodic hitch at the flush cadence, which the M2 acceptance explicitly checks against on the frame-time graph; doing it on another thread would still contend for the file. Surviving `kill -9` does not need it: a hard kill loses at most the last second of un-flushed batches, and the kernel still writes pages that were handed to `write(2)`. Surviving a power loss is not a goal.
 
-The writer is purely a sink. It never reads sim state and never feeds anything back; the sim does not know it exists. Files go to `ProjectDirs::from("com", "tonianev", "Eonmark").data_dir()/replays/<timestamp>.eonreplay`, or to `--replay-dir <path>` so CI writes into a temporary directory.
+The writer is purely a sink. It never reads sim state and never feeds anything back; the sim does not know it exists, and a dead writer thread only produces one `warn!` line. Files go to `ProjectDirs::from("com", "tonianev", "Eonmark").data_dir()/replays/` (on macOS `~/Library/Application Support/com.tonianev.Eonmark/replays/`), or to `--replay-dir <path>` so CI and the check scripts write into a temporary directory; the file name is `<yyyymmdd-hhmmss>-<seed>.eonreplay` in UTC, and the path is printed as `replay: <path>` on stdout at start. Headless replay runs (`--headless-run <file>`) do not record.
 
 ## Trackpad and input mapping (M2)
 
@@ -184,6 +199,8 @@ Copied from the M8 milestone in [../ROADMAP.md](../ROADMAP.md), plus the M2 line
 M2:
 
 - [ ] Play 2 minutes, press Cmd-Q: the process exits with code 0 and `sim-cli verify` on the newest replay exits 0; `kill -9` mid-session also leaves a replay that verifies.
+
+Automated stand-ins for the M2 line, run on 2026-10-06 (see [../PLAYTEST.md](../PLAYTEST.md) for the commands): `--quit-via-menu-after-seconds 3` exited 0 with the trailer written and `verify` OK; `--exit-after-seconds 10` exited 0 the same way; the `kill -9` check is `scripts/m2_checks.sh` step 4. The key press itself stays with the owner.
 
 M8:
 

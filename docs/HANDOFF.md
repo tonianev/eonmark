@@ -72,7 +72,7 @@ Treat the tree as M0 "in progress" until every M0 acceptance checkbox in
 ```bash
 cargo run -p game --features dev                      # window with ground plane and camera
 cargo run -p sim-cli -- selftest                      # two identical hashes
-cargo run -p game --profile ci -- --headless-run 200  # tick/hash line, exit 0
+cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
 just ci                                               # everything CI runs
 ```
 

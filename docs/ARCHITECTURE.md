@@ -65,8 +65,9 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `fx.rs` | `Fx(I32F32)` newtype, `FxVec2`, `dist_sq_i64` | M0 (types), M1 (vector math) |
 | `ids.rs` | `PlayerId`, monotonic `UnitId` and `BuildingId` from `IdGen`, kind ids, `Tile` | M0 |
 | `map.rs` | `Map`: 128x128 tiles, `u8` cost grid (1 passable, 255 blocked), `cost_grid_generation`, `set_blocked` with eager component rebuild, `neighbors8` (no corner cutting), `nearest_passable` BFS, `spiral`; hashed state with derived components | M1 (done; the RON map loader is `rules::map` from M0) |
-| `command.rs` | The full `Command` enum, `PlayerCommand`, `sort_commands` | M0 (enum and sorting); handlers M1 (Move, Stop, DebugSpawn; done), M3a (Build, Train, Gather, Cancel, SetRally), M4a (Research, AdvanceAge, Attack, AttackMove) |
-| `state.rs` | `Sim`, `MatchSetup` (with `debug_commands`, `scenario`), `State`, `Unit`, `MoveOrder`, `Post` (the spot an arrived unit holds and returns to), `SimEvent`, `RejectReason`, `SubHashes`, `step`, `tick`, `hash`, `sub_hashes`, `snapshot`/`restore` with `rebuild_derived`, `drain_events`, the command delay queue | M0 (skeleton); M1 (done: sub-hashes, events, Move/Stop/DebugSpawn handlers, pathing and movement ticks, return to post) |
+| `command.rs` | The full `Command` enum, `PlayerCommand`, `sort_commands` | M0 (enum and sorting); handlers M1 (Move, Stop, DebugSpawn; done), M2 (AttackMove applied like Move through `apply_move`, a placeholder; done), M3a (Build, Train, Gather, Cancel, SetRally), M4a (Research, AdvanceAge, Attack, real AttackMove) |
+| `state.rs` | `Sim`, `MatchSetup` (with `debug_commands`, `scenario`), `State`, `Unit`, `MoveOrder`, `Post` (the spot an arrived unit holds and returns to), `SimEvent`, `RejectReason`, `SubHashes`, `step`, `tick`, `hash`, `sub_hashes`, `snapshot`/`restore` with `rebuild_derived`, `drain_events`, the command delay queue, `SIM_VERSION` (4 since M2) | M0 (skeleton); M1 (done: sub-hashes, events, Move/Stop/DebugSpawn handlers, pathing and movement ticks, return to post); M2 (done: `apply_move` shared by Move and AttackMove) |
+| `scenarios.rs` | Pure-data command streams (`Stream = Vec<(tick, Vec<PlayerCommand>)>`) with their `MatchSetup` and lengths: `move_500`, `move_500_short`, `group_spiral`, `snapshot_restore` (M1), `units200`, `units200_auto`, `scripted_moves`, `hud_click` (M2); `NAMES` and `by_name` shared by the tests, the benches, `sim-cli record` and the game's `--scenario` | M1 (done), M2 (done) |
 | `pathing.rs` | In-house A* `AStarSearch::resume(map, &mut budget)`, `Pathing` request queue sorted by `(requested_tick, UnitId)`, hashed active search, transparent generation-keyed `PathCache` | M1 (done) |
 | `movement.rs` | `SpatialGrid` (2x2 tiles, derived), `step` (arrival steering, separation, circle correction, repath triggers), `group_targets` (component-aware spiral offsets) | M1 (done) |
 | `replay.rs` | `.eonreplay` v1: `MAGIC`, header, `TickBatch`, `HashRecord` with sub-hashes, `ReplayWriter` (clean-exit trailer), truncation-tolerant `ReplayReader` (`ReplayFile`, `Corrupt` error), `verify` with the four `VerifyOutcome`s | M1 (done; the writer thread lives in `game`, M2) |
@@ -81,7 +82,7 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `attrition.rs` | `SupplyGrid`, Harrying levels, immunities | M5a |
 | `visibility.rs` | Per-player `u8` grid (0 unexplored, 1 explored, 2 visible), hashed | M7 |
 | `influence.rs` | 4x4-tile influence maps, derived and unhashed | M6 |
-| `tests/` | `m0.rs`, `m1.rs` (determinism, snapshot/restore, proptests, path oracle, goldens); fixtures `move_500_short`, `move_500`, `group_spiral`, `snapshot_restore` under `tests/fixtures/` with `.hash` siblings; economy, territory, tech, combat, attrition tests later | M1 (done) onward |
+| `tests/` | `m0.rs`, `m1.rs` (determinism, snapshot/restore, proptests, path oracle, goldens), `m2.rs` (the four M2 scenarios, AttackMove-as-Move); fixtures `move_500_short`, `move_500`, `group_spiral`, `snapshot_restore` under `tests/fixtures/` with `.hash` siblings; economy, territory, tech, combat, attrition tests later | M1 (done), M2 (done) onward |
 | `benches/` | criterion benches `step_500_units`, `astar_budget` (M1, done), `territory_recompute` (M3a) | M1, M3a |
 
 State layout is not an ECS. Units and buildings live in `BTreeMap<UnitId, Unit>` and `BTreeMap<BuildingId, Building>` with the `IdGen` allocator (`IdGen::unit()`, `IdGen::building()`), itself hashed state. Iteration is always id order or sorted order with an id tiebreak. Derived structures (influence maps, spatial grid, connected components, path cache) are rebuilt, never hashed.
@@ -90,11 +91,13 @@ At M0 the crate holds `Fx` and `FxVec2`, every id type and the `IdGen` allocator
 
 At M1 the hashed state gains `map` and `pathing` (queue plus the active A* search; the cache is `serde(skip)`). `Sim::step` runs queue -> AI -> apply -> `Pathing::service` under `path_budget_expansions` -> `SpatialGrid::rebuild` and `movement::step` -> `tick += 1`. `Move` assigns `group_targets` and issues path requests, `Stop` clears the order and cancels the request, and `DebugSpawn` (accepted only when `MatchSetup.debug_commands` is true) places units on a square spiral of passable tiles. `sub_hashes()` returns nine named hashes (`units`, `buildings`, `economy`, `territory`, `tech`, `pathing`, `rng`, `map`, `meta`), `drain_events()` hands out `UnitSpawned`, `UnitArrived`, `PathUnreachable` and `CommandRejected`, and `rebuild_derived()` rebuilds components and the spatial grid and clears the path cache. Unit stats come from `data/rules/units.ron` and are converted once at spawn (`speed` in tiles per tick, `radius` in tiles).
 
+At M2 the sim changes in one place: `Command::AttackMove { units, target }` is applied exactly like `Move` through the shared `Sim::apply_move`, so the game's attack-move placeholder is accepted instead of being rejected with an RNG draw; real attack-move needs combat (M4a). That is a behaviour change, so `SIM_VERSION` is 4 and `rules_version` is 4 (`visuals.ron` joined `rules_hash` at the same time); the golden fixtures were re-recorded with unchanged hashes. `scenarios.rs` gains the four M2 streams. Everything else M2 builds is on the game side.
+
 ### `crates/rules/`
 
 Schema, loader and validator for everything under `data/`. `Rules::load(dir)` reads the RON files, checks every cross-reference, converts authored units to ticks and integers exactly once, and computes `rules_hash`. Errors name the file path and field. The clippy ban list applies here too, so a float can never enter through data.
 
-At M0: `lib.rs` (the `Rules` struct with the full v0.1 field set from `rules.ron`, a validator, `ticks_from_ds` and `rules_hash`), `resources.rs` (the four resources) and `map.rs` (`MapDef`, the tile-row map loader and symmetry validator). `Rules::load` attaches resources and every map under `data/maps/` to the struct, so `rules_hash` covers all three. M1 adds `units.rs` (`UnitKind` with the `_x100` movement fields, `Units::validate`, `Rules::unit_kind(u16)` and `unit_kind_by_id(&str)`; `units.ron` is attached by `load` and is part of `rules_hash`). The remaining content tables (buildings, techs, ages, factions, visuals, AI data) arrive with their milestones (M2, M3a, M4a, M5b).
+At M0: `lib.rs` (the `Rules` struct with the full v0.1 field set from `rules.ron`, a validator, `ticks_from_ds` and `rules_hash`), `resources.rs` (the four resources) and `map.rs` (`MapDef`, the tile-row map loader and symmetry validator). `Rules::load` attaches resources and every map under `data/maps/` to the struct, so `rules_hash` covers all three. M1 adds `units.rs` (`UnitKind` with the `_x100` movement fields, `Units::validate`, `Rules::unit_kind(u16)` and `unit_kind_by_id(&str)`; `units.ron` is attached by `load` and is part of `rules_hash`). M2 adds `visuals.rs` (`Primitive`, `Visual::{Primitive, Scene}`, `Visuals::validate` against the unit kinds, `Rules::visual(kind)`; `data/visuals.ron` is attached by `load` and is part of `rules_hash` although only the game reads it). The remaining content tables (buildings, techs, ages, factions, AI data) arrive with their milestones (M3a, M4a, M5b).
 
 ### `crates/ai/`
 
@@ -109,25 +112,27 @@ The only Bevy crate and the `eonmark` binary. Bevy ECS is used here for presenta
 | Module | Holds | Arrives |
 |---|---|---|
 | `main.rs` | Entry point: dispatches to `headless` or `app` | M0 |
-| `cli.rs` | Flags `--headless-run <ticks>`, `--exit-after-seconds <s>`, `--seed <u64>`, `--data-dir <path>`; data-dir resolution (flag, `$EONMARK_DATA`, checkout `data/`, `<exe dir>/data`) | M0 |
-| `app.rs` | Windowed app: 1280x800 window titled Eonmark, `SimHandle` non-send resource, `FixedUpdate` driver at `tick_rate_hz` | M0; states `Menu`, `Skirmish`, `Paused`, `GameOver` in M2 |
-| `sim_driver.rs` | `FixedUpdate` driver at 20 Hz, `InputSource` trait (Local, Replay), `PendingCommands`, replay writer thread, 8-ticks-per-frame cap | M2 |
-| `present.rs` | `UnitId -> Entity` mirror, prev/current interpolation, `Visual` to primitive or glTF | M2 (primitives), M7 (glTF) |
-| `camera.rs` | Pitch-locked perspective RTS camera: WASD and arrow pan, edge scroll, trackpad `Pixel` pan, wheel `Line` zoom, `PinchGesture` zoom | M0 (pan, zoom, pinch), M2 (finished with selection and orders) |
-| `selection.rs` | Click, drag box, shift add, control groups, double-click same kind | M2 |
-| `orders.rs` | Ray-plane ground hit to `Move`, `Stop`, `AttackMove` | M2 |
+| `cli.rs` | Hand-rolled flags: `--headless-run <ticks \| file.eonreplay>`, `--scenario <name>`, `--max-fps <n>`, `--replay-dir <dir>`, `--hash-every-tick`, `--screenshot <path>` (dev), `--quit-via-menu-after-seconds <s>` (dev, macOS), `--close-window-after-seconds <s>` (dev), `--exit-after-seconds <s>`, `--seed <u64>`, `--data-dir <path>`; data-dir resolution (flag, `$EONMARK_DATA`, checkout `data/`, `<exe dir>/data`) | M0, M2 (done) |
+| `app.rs` | Windowed app: 1280x800 window titled Eonmark, `load_rules`, `build_match` (skirmish with `LocalInput`, or a scenario with `ScenarioInput`), plugin wiring, the replay path, `--exit-after-seconds`, `--close-window-after-seconds` (writes `WindowCloseRequested`, the red-button proxy), `FrameLimiter` (`--max-fps` sleep in `Last`), `ScreenshotRequest` | M0; M2 (done; `SimHandle` moved to `sim_driver.rs`); states `Menu`, `Skirmish`, `Paused`, `GameOver` with the menus (M5b, M6) |
+| `sim_driver.rs` | The meeting point: `SimHandle` non-send resource (the only caller of `Sim::step`), `FixedUpdate` driver at `tick_rate_hz` with `Time<Virtual>::max_delta` 250 ms and the 8-ticks-per-frame cap (`discard_overstep`), `DriverStats`, `PendingCommands` (seq stamped at push), `InputSource` trait with `LocalInput`, `ReplayInput` and `ScenarioInput`, `drive_tick`, `ReplayFinished`, the recorder thread (`RecorderMessage`, `Recorder`, `writer_thread`, `finish_recorder_on_exit` in `Last` after `bevy_window::ExitSystems`), replay path helpers | M2 (done) |
+| `present.rs` | `UnitEntities: HashMap<UnitId, Entity>` mirror synced after each tick (`sync_lifecycle`), per-unit `Interp` lerped by `Time<Fixed>::overstep_fraction()` in `PostUpdate` (`sync_transforms`), yaw from the facing vector in f32, `UnitVisuals` (one mesh and one material per kind and team) from `data/visuals.ron`, `world_from_sim` / `sim_from_world` | M2 (primitives, done), M7 (glTF `Visual::Scene`) |
+| `camera.rs` | Pitch-locked perspective RTS camera: WASD and arrow pan, edge scroll, trackpad `Pixel` pan, wheel `Line` zoom, `PinchGesture` zoom; `RtsCamera` marker carries `MeshPickingCamera` | M0 (pan, zoom, pinch), M2 (done) |
+| `selection.rs` | `MeshPickingPlugin` with `require_markers: true`, `Pickable` on units only; click, shift add, double-click same kind on screen, screen-space drag box, ctrl+1..9 groups; `Selection` resource; retained-gizmo rings and move markers as separate entities keyed by `UnitId` | M2 (done) |
+| `orders.rs` | Ray-plane ground hit (`Camera::viewport_to_world`, y = 0) to `Move` (shift queues), `Stop` (S), `AttackMove` placeholder (A then click); ignores world clicks while `PointerOverUi` | M2 (done) |
 | `ground.rs` | Grid mesh with vertex colors, territory overlay mesh, then `FieldExt` extended material and field texture upload | M0 (plane), M3b (overlay and shader) |
-| `palette.rs` | The matte ground greens, grid, sky, sun and ambient colours | M0 |
-| `hud/` | Resource bar, selection panel, command card, minimap, message line | M2 (skeleton), M3b, M4b, M7 (minimap) |
+| `palette.rs` | The matte ground greens, grid, sky, sun and ambient colours; `TEAM` colours, ring, marker, drag-box and HUD colours | M0, M2 (done) |
+| `hud.rs` | `PointerOverUi` from the picking `HoverMap`; top bar, bottom bar, Stop button; the `hud_click` automated check. Resource bar, selection panel, command card, minimap and message line arrive later and may split this file into a `hud/` directory | M2 (skeleton, done), M3b, M4b, M7 (minimap) |
 | `menu/` | Main menu, pause menu, game-over screen | M5b (New Game), M6, M7 |
-| `macos_menu.rs` | `muda` menu with a custom Quit item routed to `AppExit`, `NonSendMarker` systems | M2 |
+| `macos_menu.rs` | `cfg(target_os = "macos")`: muda menu with a custom `Quit Eonmark` item (id `quit`, Cmd+Q) routed to `AppExit::Success`; `install_menu` (Startup) and `drain_menu_events` (Update) take `NonSendMarker`; `--quit-via-menu-after-seconds` proxy | M2 (done) |
 | `audio.rs` | Thin facade over `bevy_audio` | M7 |
-| `dev_tools.rs` | FPS overlay, hash readout, draw-call counter, `bevy_egui` panels; behind the `dev` feature | M0 (FPS), M2 onward |
-| `headless.rs` | `--headless-run` with `MinimalPlugins`, printing `tick=<n> hash=0x<16 hex>`; the CI smoke test on both OSes | M0 (`<ticks>`), M2 (`<replay>`) |
+| `dev_tools.rs` | FPS overlay, hash readout, `DriverStats`, selection and command counters, mesh/material counts, `bevy_egui` panels; behind the `dev` feature | M0 (FPS), M2 onward |
+| `headless.rs` | `--headless-run` with `MinimalPlugins`, printing `tick=<n> hash=0x<16 hex>` as the last stdout line: `<ticks>` steps the skirmish; `<file.eonreplay>` re-simulates a replay through `ReplayInput` and `drive_tick` and exits 0 only when the final hashes match (the CI hash-parity line on both OSes) | M0 (`<ticks>`), M2 (`<replay>`, done) |
 
 Features: `dev` (dynamic linking, dev tools, egui panels; never shipped) and `ci_testing` (owner screenshot capture; not used in CI). The crate must keep compiling on Linux; CI enforces this with a compile-only clippy job. Running on Linux is unsupported.
 
 At M0: a window titled Eonmark, a flat matte ground plane with a grid, a directional light, a pan/zoom/pinch camera, a `FixedUpdate` sim driver, `--headless-run <ticks>`, and an FPS overlay, inspector and a sim panel (seed, tick, hash) under `dev`.
+
+At M2: the sim runs in `FixedUpdate` from `sim_driver.rs` behind an `InputSource`; units appear as team-coloured primitives interpolated between ticks; left click, shift, double-click, drag box and control groups select; right click moves, S stops, A then click attack-moves; a two-bar HUD with a Stop button blocks world picking; every windowed session writes a replay from the recorder thread; Cmd-Q goes through the muda menu into `AppExit`; `--headless-run <file.eonreplay>` verifies a replay without a window; `--scenario`, `--max-fps`, `--replay-dir`, `--hash-every-tick`, `--screenshot` and `--quit-via-menu-after-seconds` drive the automated checks in [PLAYTEST.md](PLAYTEST.md).
 
 ### `crates/sim-cli/`
 
@@ -142,7 +147,7 @@ Headless tooling that runs on an Ubuntu CI runner with no GPU.
 | `verify <replay>` | Re-simulates a replay and prints exactly one of `OK final_hash=0x... ticks=N`, `DIVERGED at tick N (subsystem: X)`, `SIM VERSION MISMATCH (...)`, `RULES CHANGED since recording (...)`; exit 0 only for OK | M1 (done) |
 | `bench --units N --ticks T` / `bench --astar --budget B` | Mean and p95 step time plus arrival percentage for N movers crossing the map, or the cost of one saturated A* tick (wall clock is allowed in sim-cli, not in sim) | M1 (done); `--combat`, `--bots`, `--territory` later |
 | `fuzz --ticks N --seed S --cases C` | Seeded random command streams run twice and compared | M1 (done) |
-| `record --scenario <name> --ticks N --out <file> [--hash-every-tick]` | Records a scripted scenario (`move_500`, `move_500_short`, `group_spiral`, `snapshot_restore`) to an `.eonreplay`; the goldens are made with it | M1 (done) |
+| `record --scenario <name> --ticks N --out <file> [--hash-every-tick]` | Records a scripted scenario (any name in `sim::scenarios::NAMES`: `move_500`, `move_500_short`, `group_spiral`, `snapshot_restore`, and from M2 `units200`, `units200_auto`, `scripted_moves`, `hud_click`) to an `.eonreplay`; the goldens are made with it | M1 (done), M2 (names) |
 | `play-bots` | Seeded bot-vs-bot games in parallel with a CSV summary | M5b |
 
 A global `--data <dir>` flag (default `data`) selects the data directory. Subcommands that have not landed yet exit with code 2 and print `not implemented until <milestone>`. Scenario command streams are defined once, in an engine-free crate, and shared by `record` and the tests in `crates/sim/tests/m1.rs`, so a fixture and the test that checks it can never disagree about the input.
@@ -165,7 +170,7 @@ Arrives M7, except the font and UI pack which may land earlier with the HUD (M3b
 
 ### `.github/`
 
-`ci.yml` runs five jobs: `check` on macOS (fmt, clippy, nextest, doc, machete, typos, asset and trademark gates, single-Bevy check, headless smoke run, `sim-cli verify --release` of the `move_500` fixture), `headless` on Ubuntu (sim, rules, ai and sim-cli tests with `PROPTEST_CASES=256`, data-check, selftest, `verify --release` of the `move_500`, `group_spiral` and `snapshot_restore` fixtures, engine boundary check, `pathfinding`-is-dev-only check, headless smoke run), `game-linux` on Ubuntu (compile-only clippy of the game crate), `deny` (cargo-deny) and `hash-parity` (diffs the 200-tick smoke line and the `move_500` `OK final_hash=...` line produced on each OS). `release-check.yml` builds release and bundles on pushes to main. `release.yml` publishes on tags. Dependabot ignores Bevy and the two egui crates for minor and major bumps. See [RELEASING.md](RELEASING.md).
+`ci.yml` runs five jobs: `check` on macOS (fmt, clippy, nextest, doc, machete, typos, asset and trademark gates, single-Bevy check, the game's headless replay of the `move_500` fixture, `sim-cli verify --release` of the same fixture), `headless` on Ubuntu (sim, rules, ai and sim-cli tests with `PROPTEST_CASES=256`, data-check, selftest, `verify --release` of the `move_500`, `group_spiral` and `snapshot_restore` fixtures, engine boundary check, `pathfinding`-is-dev-only check, the same headless replay run), `game-linux` on Ubuntu (compile-only clippy of the game crate), `deny` (cargo-deny) and `hash-parity` (diffs the `tick=1200 hash=...` replay line and the `move_500` `OK final_hash=...` line produced on each OS; until M2 the first line was the 200-tick skirmish smoke). `release-check.yml` builds release and bundles on pushes to main. `release.yml` publishes on tags. Dependabot ignores Bevy and the two egui crates for minor and major bumps. See [RELEASING.md](RELEASING.md).
 
 ### `docs/`
 
@@ -173,7 +178,7 @@ This file, [DETERMINISM.md](DETERMINISM.md), [DATA_FORMAT.md](DATA_FORMAT.md), [
 
 ## One frame, end to end
 
-The sim driver and presenter arrive in M2. This is the shape they take.
+The sim driver and presenter landed in M2. This is the shape they take (schedule names are Bevy 0.19.1's).
 
 ```
 one rendered frame in crates/game
@@ -181,42 +186,64 @@ one rendered frame in crates/game
  mouse / keyboard / trackpad / macOS menu
           |
           v
+ [PreUpdate]
+   bevy_picking     hover map from the mesh backend (units only, require_markers) and the UI backend
+   hud.rs           PointerOverUi = any hovered entity has a Node
+   sim_driver.rs    reset_frame_budget (ticks this frame = 0)
+          |
+          v
  [Update]
-   camera.rs      moves the camera in f32; never touches the sim
-   selection.rs   maintains the selection set (render-side state)
-   orders.rs      turns a right-click into Command::Move / AttackMove / Stop
-   hud/           turns a command-card click into Command::Build / Train / Research
-   macos_menu.rs  drains MenuEvent; Quit becomes AppExit::Success
+   camera.rs        moves the camera in f32; never touches the sim
+   selection.rs     click / shift / double-click observer on Pointer<Click>, drag box, ctrl+1..9;
+                    maintains Selection (render-side state); skipped while PointerOverUi
+   orders.rs        right click -> ground_hit (ray-plane y = 0) -> Command::Move (shift queues);
+                    S -> Stop; A then click -> AttackMove; skipped while PointerOverUi
+   hud.rs           Stop button (Interaction::Pressed) -> Command::Stop
+                    (M3b+: command-card clicks -> Build / Train / Research)
+   macos_menu.rs    drains MenuEvent; the `quit` id becomes AppExit::Success
+   app.rs           --exit-after-seconds -> AppExit::Success; --screenshot
           |
           v
  PendingCommands (Resource)
-   Vec<PlayerCommand> for the local player, seq stamped in issue order
+   Vec<PlayerCommand> for the local player; push_local stamps seq in issue order
           |
           v
- [FixedUpdate, Time<Fixed> at 20 Hz, runs 0 to 8 times this frame]
-   sim_driver.rs, for each tick T that is due:
+ [FixedUpdate, Time<Fixed>::from_hz(20), Time<Virtual>::max_delta 250 ms, runs 0 to 8 times]
+   sim_driver.rs step_sim -> drive_tick, for each tick T that is due:
      cmds = InputSource::commands_for(T)     the commands issued during tick T
-         Local  : drains PendingCommands
-         Replay : reads the TickCommands batch for T from the file
-         None   : stall; no step this frame
-     sim.step(cmds)                      the only mutation of sim state:
+         Local    : drains PendingCommands, sorted by (player, seq)
+         Scenario : the scripted stream's commands for T, then the local ones
+         Replay   : the recorded TickBatch for T (Some(empty) when none; end -> ReplayFinished)
+         None     : stall; no step this frame, counted in DriverStats
+     sim.step(&cmds)                     the only mutation of sim state:
                                          queues cmds for tick T + cmd_delay, runs the AI and
                                          queues its commands the same way, then applies every
                                          command due at T in (player, seq) order
-     every 20 ticks: h = sim.hash()
-     channel.send(postcard(TickCommands(T, cmds)), and h when taken)
-                                         the writer thread appends and flushes
-   if more than 8 ticks are due, the remainder is dropped as time dilation
+     recorder.send(Tick { T, cmds })     every tick
+     recorder.send(Hash { T, hash, sub }) every 20 ticks (every tick under --hash-every-tick)
+                                         the writer thread appends; flushes every 20 ticks
+   present.rs sync_lifecycle (after SimSystems::Step)
+                    spawn one Entity per new UnitId (mesh + material per kind and team,
+                    Pickable::default()), despawn missing ids, Interp::advance for the rest;
+                    UnitEntities: HashMap<UnitId, Entity> lives here, on the render side
+   after 8 ticks in one frame: discard_overstep, the remainder is dropped as time dilation
           |
           v
- [after FixedUpdate]
-   present.rs
-     sync_lifecycle      spawn or despawn one Entity per new or removed id;
-                         HashMap<UnitId, Entity> lives here, on the render side
-     sync_transforms     Transform = lerp(prev, current, Time<Fixed>::overstep_fraction());
-                         heading derived in f32 from the sim's facing vector
-     sync_field_texture  upload territory, fog and supply into the 128x128 field texture (M3b+)
-   hud/                  read SimView for stockpiles, rates, cap state, population, selection
+ [PostUpdate, before TransformSystems::Propagate]
+   present.rs sync_transforms   Transform = lerp(prev, curr, Time<Fixed>::overstep_fraction());
+                                yaw derived in f32 from the sim's facing vector
+   selection.rs                 ring entities follow their unit's interpolated Transform
+   (M3b+) sync_field_texture    upload territory, fog and supply into the 128x128 field texture
+   hud.rs                       (M3b+) read SimView for stockpiles, rates, cap state, population
+          |
+          v
+ [Last]
+   bevy_window close_when_requested        despawns a window whose close button was clicked
+   bevy_window exit_on_all_closed          (ExitSystems) no window left -> AppExit::Success
+   sim_driver.rs finish_recorder_on_exit   .after(ExitSystems): on any AppExit this frame,
+                                           final Hash, Finish, join the writer (the runner exits
+                                           right after this frame, so the order is load-bearing)
+   app.rs limit_frame_rate                 --max-fps sleep
           |
           v
  render through wgpu on Metal, PresentMode::AutoVsync
@@ -226,7 +253,7 @@ Three consequences fall out of this shape.
 
 - Frame rate never changes the result. The sim sees tick-stamped commands and nothing else, so 30 fps and 120 fps produce the same hash. Game speed (M6) changes how many ticks are due per frame within the 8-tick cap; replays are unaffected.
 - The scripted AI's commands never appear in `PendingCommands` or the replay. The AI runs inside `step`, its commands are stamped and delayed exactly like a human's, and verification reproduces them by running the same AI. In-flight commands sit in the sim's own delay queue, which is hashed state, so a snapshot carries them.
-- A network peer is one more `InputSource`. Lockstep multiplayer is documented, not built, in v0.1.
+- A network peer is one more `InputSource`. Lockstep multiplayer is documented, not built, in v0.1. The headless replay runner is the first proof: it swaps `LocalInput` for `ReplayInput`, keeps `drive_tick`, drops the recorder, and runs the same `Sim::step` calls without a window.
 
 ## Cross-cutting concerns
 

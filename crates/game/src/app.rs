@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy::window::{PresentMode, WindowResolution};
+use bevy::window::{PresentMode, PrimaryWindow, WindowCloseRequested, WindowResolution};
 use rules::Rules;
 use sim::scenarios;
 
@@ -70,6 +70,17 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
 /// `--exit-after-seconds`: wall-clock deadline for smoke tests.
 #[derive(Resource)]
 struct ExitAfter(Duration);
+
+/// `--close-window-after-seconds`: the red-close-button proxy. After the
+/// delay, write `WindowCloseRequested` for the primary window exactly as
+/// winit does for a click on the button; `bevy_window::close_when_requested`
+/// then despawns it and `exit_on_all_closed` writes `AppExit::Success`,
+/// both in `Last`.
+#[derive(Resource)]
+struct CloseWindowAfter {
+    after: Duration,
+    sent: bool,
+}
 
 /// `--max-fps <n>`: minimum frame duration enforced by a sleep in `Last`
 /// (`limit_frame_rate`). The window runs without vsync under the cap so the
@@ -174,7 +185,13 @@ pub fn run(cli: &Cli) -> AppExit {
     ));
 
     #[cfg(target_os = "macos")]
-    app.add_plugins(crate::macos_menu::MacosMenuPlugin);
+    app.add_plugins(crate::macos_menu::MacosMenuPlugin {
+        quit_via_menu_after: cli.quit_via_menu_after_seconds.map(Duration::from_secs_f64),
+    });
+    #[cfg(not(target_os = "macos"))]
+    if cli.quit_via_menu_after_seconds.is_some() {
+        eprintln!("eonmark: --quit-via-menu-after-seconds is macOS-only; ignored");
+    }
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
@@ -193,6 +210,14 @@ pub fn run(cli: &Cli) -> AppExit {
     // whose achieved rate they document.
     if units200_auto || cli.max_fps.is_some() {
         app.add_plugins(FrameStatsPlugin { arrival });
+    }
+
+    if let Some(secs) = cli.close_window_after_seconds {
+        app.insert_resource(CloseWindowAfter {
+            after: Duration::from_secs_f64(secs),
+            sent: false,
+        })
+        .add_systems(Update, close_window_after);
     }
 
     if let Some(secs) = cli.exit_after_seconds {
@@ -240,6 +265,27 @@ pub fn spawn_total(stream: &scenarios::Stream) -> u32 {
             _ => 0,
         })
         .sum()
+}
+
+/// Request the primary window to close once `after` has elapsed, once.
+fn close_window_after(
+    time: Res<Time<Real>>,
+    mut request: ResMut<CloseWindowAfter>,
+    windows: Query<Entity, With<PrimaryWindow>>,
+    mut close: MessageWriter<WindowCloseRequested>,
+) {
+    if request.sent || time.elapsed() < request.after {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    request.sent = true;
+    println!(
+        "close-window: requesting close after {:.2} s",
+        time.elapsed().as_secs_f64()
+    );
+    close.write(WindowCloseRequested { window });
 }
 
 /// Sleep in `Last` so the frame takes at least `1 / max_fps` seconds: wait

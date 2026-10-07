@@ -13,12 +13,9 @@
 //! [`sim_from_world`] are the only two conversion points; orders and
 //! selection use them too.
 //!
-//! Ownership (M2 contract): agent B owns this file. The pure helpers below
-//! are final and tested; the two systems have their signatures and a
-//! description of what they do, and B fills the bodies.
-// M2-B: remove this allow once sync_lifecycle and sync_transforms use the
-// helpers, Interp and UnitVisuals below.
-#![allow(dead_code)]
+//! When the local player's first units appear, the camera focus jumps once
+//! to their centroid ([`focus_camera_on_first_units`]) so a scenario that
+//! spawns at the west start is on screen from the first frame.
 
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
@@ -28,9 +25,10 @@ use bevy::transform::TransformSystems;
 use rules::{Primitive, Rules, Visual};
 use sim::{Fx, FxVec2, UnitId};
 
+use crate::camera::RtsCamera;
 use crate::ground::HALF_EXTENT;
 use crate::palette;
-use crate::sim_driver::{SimHandle, SimSystems};
+use crate::sim_driver::{LOCAL_PLAYER, SimHandle, SimSystems};
 
 /// Height of a unit's pivot above the ground, in metres: capsules stand on
 /// the ground, so the pivot is half the total height.
@@ -38,6 +36,11 @@ pub const UNIT_Y: f32 = 0.0;
 
 /// Capsule length (cylinder part) as a multiple of the unit's radius.
 pub const CAPSULE_LENGTH_PER_RADIUS: f32 = 1.4;
+
+/// `StandardMaterial::perceptual_roughness` for every unit (`docs/ART_STYLE.md`: matte).
+pub const MATTE_ROUGHNESS: f32 = 0.95;
+/// `StandardMaterial::reflectance` for every unit (`docs/ART_STYLE.md`).
+pub const MATTE_REFLECTANCE: f32 = 0.2;
 
 /// Marks a unit entity and names the sim unit it mirrors. Not `Reflect`:
 /// `sim::UnitId` is engine-free and derives nothing from Bevy; the inspector
@@ -140,8 +143,8 @@ impl UnitVisuals {
             .or_insert_with(|| {
                 materials.add(StandardMaterial {
                     base_color: palette::team_color(team),
-                    perceptual_roughness: 0.9,
-                    reflectance: 0.25,
+                    perceptual_roughness: MATTE_ROUGHNESS,
+                    reflectance: MATTE_REFLECTANCE,
                     metallic: 0.0,
                     ..default()
                 })
@@ -149,7 +152,9 @@ impl UnitVisuals {
             .clone()
     }
 
-    /// Number of distinct meshes and materials created so far (dev panel).
+    /// Number of distinct meshes and materials created so far (dev panel
+    /// readout, so only the `dev` build reads it; the unit test covers it).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub fn counts(&self) -> (usize, usize) {
         (self.meshes.len(), self.materials.len())
     }
@@ -237,7 +242,12 @@ impl Plugin for PresentPlugin {
         app.init_resource::<UnitEntities>()
             .init_resource::<UnitVisuals>()
             .register_type::<Interp>()
-            .add_systems(FixedUpdate, sync_lifecycle.after(SimSystems::Step))
+            .add_systems(
+                FixedUpdate,
+                (sync_lifecycle, focus_camera_on_first_units)
+                    .chain()
+                    .after(SimSystems::Step),
+            )
             .add_systems(
                 PostUpdate,
                 sync_transforms.before(TransformSystems::Propagate),
@@ -252,30 +262,96 @@ impl Plugin for PresentPlugin {
 /// entity whose id is no longer in the view and drop it from the map. Runs
 /// in `FixedUpdate` after [`SimSystems::Step`] so it sees every tick even
 /// when several run in one frame.
-///
-/// M2-B: body to implement.
 pub fn sync_lifecycle(
-    _sim: NonSend<SimHandle>,
-    _entities: ResMut<UnitEntities>,
-    _visuals: ResMut<UnitVisuals>,
-    _meshes: ResMut<Assets<Mesh>>,
-    _materials: ResMut<Assets<StandardMaterial>>,
-    _interps: Query<&mut Interp>,
-    _commands: Commands,
+    sim: NonSend<SimHandle>,
+    mut entities: ResMut<UnitEntities>,
+    mut visuals: ResMut<UnitVisuals>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut interps: Query<&mut Interp>,
+    mut commands: Commands,
 ) {
-    // M2-B: diff ids, spawn/despawn, advance Interp; see the doc comment.
+    let view = sim.view();
+    let rules = sim.rules();
+    for unit in view.units() {
+        let pos = world_from_sim(unit.pos, UNIT_Y);
+        let yaw = yaw_from_facing(unit.facing);
+        match entities.0.get(&unit.id) {
+            Some(entity) => {
+                if let Ok(mut interp) = interps.get_mut(*entity) {
+                    interp.advance(pos, yaw);
+                }
+            }
+            None => {
+                let mesh = visuals.mesh(unit.kind.0, rules, &mut meshes);
+                let material = visuals.material(unit.kind.0, unit.owner.0, &mut materials);
+                let entity = commands
+                    .spawn((
+                        Name::new(format!("Unit {}", unit.id.0)),
+                        UnitRef(unit.id),
+                        Interp::at(pos, yaw),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+                        Pickable::default(),
+                    ))
+                    .id();
+                entities.0.insert(unit.id, entity);
+            }
+        }
+    }
+    if entities.0.len() > view.unit_count() {
+        entities.0.retain(|id, entity| {
+            if view.unit(*id).is_some() {
+                true
+            } else {
+                commands.entity(*entity).despawn();
+                false
+            }
+        });
+    }
 }
 
 /// Every frame: `transform.translation, yaw = interp.sample(fixed.overstep_fraction())`,
 /// `transform.rotation = Quat::from_rotation_y(yaw)`. Runs in `PostUpdate`
 /// before transform propagation so the frame renders the interpolated pose.
-///
-/// M2-B: body to implement.
 pub fn sync_transforms(
-    _fixed: Res<Time<Fixed>>,
-    _units: Query<(&Interp, &mut Transform), With<UnitRef>>,
+    fixed: Res<Time<Fixed>>,
+    mut units: Query<(&Interp, &mut Transform), With<UnitRef>>,
 ) {
-    // M2-B: lerp by overstep fraction; see the doc comment.
+    let t = fixed.overstep_fraction();
+    for (interp, mut transform) in &mut units {
+        let (pos, yaw) = interp.sample(t);
+        transform.translation = pos;
+        transform.rotation = Quat::from_rotation_y(yaw);
+    }
+}
+
+/// Once per session, when the local player first has units, point the RTS
+/// camera at their centroid (the start position). Later spawns never move
+/// the camera; a skirmish with no units leaves it at the map centre.
+pub fn focus_camera_on_first_units(
+    sim: NonSend<SimHandle>,
+    mut cameras: Query<&mut RtsCamera>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let view = sim.view();
+    let (sum, n) = view
+        .units()
+        .filter(|u| u.owner == LOCAL_PLAYER)
+        .map(|u| world_from_sim(u.pos, 0.0))
+        .fold((Vec3::ZERO, 0u32), |(s, n), p| (s + p, n + 1));
+    if n == 0 {
+        return;
+    }
+    *done = true;
+    let centroid = sum / n as f32;
+    for mut cam in &mut cameras {
+        cam.focus = Vec3::new(centroid.x, 0.0, centroid.z);
+    }
 }
 
 #[cfg(test)]

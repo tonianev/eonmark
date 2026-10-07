@@ -2,9 +2,6 @@
 //! The full contract (<= 12 base hues plus two team colours) lands with
 //! `docs/ART_STYLE.md` in M7. Judge changes on a P3 display and an sRGB
 //! screenshot; wgpu can oversaturate on wide-gamut surfaces.
-// M2-B: remove this allow once present.rs, selection.rs and hud.rs use the
-// team, ring, marker and HUD colours.
-#![allow(dead_code)]
 
 use bevy::prelude::*;
 

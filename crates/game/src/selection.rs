@@ -11,25 +11,32 @@
 //! by `UnitId`, never children of unit entities, so unit transforms stay
 //! flat and a despawned unit never drags a child with it.
 //!
-//! Ownership (M2 contract): agent B owns this file. The `Selection` state
-//! machine is final and tested; systems have their signatures and a
-//! description, bodies are B's.
-// M2-B: remove this allow once the selection systems use the constants,
-// DragBox, LastClick and the ring helpers below.
-#![allow(dead_code)]
+//! Input paths: a `Pointer<Click>` observer handles clicks that land on a
+//! unit (the mesh backend decides what was hit); the drag box and the
+//! click-on-empty-ground deselect read raw `ButtonInput<MouseButton>` and
+//! the window cursor in [`WorldInputSet`], guarded by `PointerOverUi`. Box
+//! selection takes the local player's units only.
 
 use std::collections::{BTreeSet, HashMap};
 
+use bevy::gizmos::config::GizmoLineConfig;
 use bevy::picking::events::{Click, Pointer};
+use bevy::picking::hover::HoverMap;
 use bevy::picking::mesh_picking::{MeshPickingCamera, MeshPickingPlugin, MeshPickingSettings};
+use bevy::picking::pointer::{PointerButton, PointerId};
 use bevy::prelude::*;
+use bevy::transform::TransformSystems;
 use bevy::window::PrimaryWindow;
-use sim::UnitId;
+use sim::{SimView, UnitId};
 
 use crate::camera::RtsCamera;
-use crate::hud::PointerOverUi;
-use crate::present::{Interp, UnitEntities, UnitRef};
-use crate::sim_driver::SimHandle;
+use crate::hud::{PointerOverUi, WorldInputSet};
+use crate::orders::OrderMode;
+use crate::palette;
+use crate::present::{
+    Interp, UNIT_Y, UnitEntities, UnitRef, flat_on_ground, fx_to_f32, world_from_sim,
+};
+use crate::sim_driver::{LOCAL_PLAYER, SimHandle};
 
 /// A left press that moves less than this (logical px) before release is a
 /// click, not a drag box.
@@ -44,6 +51,10 @@ pub const MOVE_MARKER_RADIUS: f32 = 0.5;
 pub const MOVE_MARKER_SECS: f32 = 0.6;
 /// Rings float this far above the ground to avoid z-fighting.
 pub const RING_Y: f32 = 0.03;
+/// Segments per ring circle.
+pub const RING_RESOLUTION: u32 = 48;
+/// Ring and marker line width, pixels (thin and calm, `docs/ART_STYLE.md`).
+pub const RING_LINE_WIDTH_PX: f32 = 1.5;
 
 /// The selected units and the nine control groups. Render-side state: the
 /// sim knows nothing about selection.
@@ -164,6 +175,10 @@ impl DragRect {
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct DragBox(pub Option<DragRect>);
 
+/// The `bevy_ui` node that draws the drag box (`Pickable::IGNORE`).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DragBoxNode;
+
 /// Remembers the last click for double-click detection.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
 pub struct LastClick {
@@ -211,7 +226,8 @@ impl Plugin for SelectionPlugin {
             .init_resource::<DragBox>()
             .init_resource::<LastClick>()
             .init_resource::<SelectionRings>()
-            .add_systems(Startup, (mark_picking_camera, create_ring_assets))
+            .add_systems(Startup, (create_ring_assets, spawn_drag_box_node))
+            .add_systems(PostStartup, mark_picking_camera)
             .add_observer(on_unit_click)
             .add_systems(
                 Update,
@@ -221,15 +237,22 @@ impl Plugin for SelectionPlugin {
                     clear_selection_on_escape,
                     expire_move_markers,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(WorldInputSet),
             )
-            .add_systems(PostUpdate, (prune_dead, sync_selection_rings).chain());
+            .add_systems(Update, draw_drag_box.after(WorldInputSet))
+            .add_systems(
+                PostUpdate,
+                (prune_dead, sync_selection_rings)
+                    .chain()
+                    .before(TransformSystems::Propagate),
+            );
     }
 }
 
-/// Adds `MeshPickingCamera` to the RTS camera (`camera.rs` spawns it in its
-/// own Startup system; ordering is not needed because this runs as a
-/// command-flushed query on the next frame if the camera is not there yet).
+/// Adds `MeshPickingCamera` to the RTS camera. `camera.rs` spawns it with
+/// `Commands` in `Startup`, so this runs in `PostStartup`, after that
+/// schedule's commands were applied.
 fn mark_picking_camera(
     mut commands: Commands,
     cameras: Query<Entity, (With<RtsCamera>, Without<MeshPickingCamera>)>,
@@ -240,59 +263,220 @@ fn mark_picking_camera(
 }
 
 /// Builds the two shared ring assets: a unit circle laid flat
-/// (`present::flat_on_ground()`), resolution 48.
-///
-/// M2-B: body to implement (`GizmoAsset::new()`, `.circle(..)`, `gizmo_assets.add`).
+/// (`present::flat_on_ground()`), [`RING_RESOLUTION`] segments.
 fn create_ring_assets(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
-    // M2-B: replace these empty assets with the two circles.
-    let selection = gizmo_assets.add(GizmoAsset::new());
-    let marker = gizmo_assets.add(GizmoAsset::new());
-    commands.insert_resource(RingAssets { selection, marker });
+    let flat = Isometry3d::new(Vec3::ZERO, flat_on_ground());
+    let mut selection = GizmoAsset::new();
+    selection
+        .circle(flat, 1.0, palette::SELECTION_RING)
+        .resolution(RING_RESOLUTION);
+    let mut marker = GizmoAsset::new();
+    marker
+        .circle(flat, 1.0, palette::MOVE_MARKER)
+        .resolution(RING_RESOLUTION);
+    commands.insert_resource(RingAssets {
+        selection: gizmo_assets.add(selection),
+        marker: gizmo_assets.add(marker),
+    });
+}
+
+/// Spawns the hidden drag-box node; [`draw_drag_box`] shows and sizes it.
+fn spawn_drag_box_node(mut commands: Commands) {
+    commands.spawn((
+        Name::new("Drag box"),
+        DragBoxNode,
+        Node {
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            border: UiRect::all(Val::Px(1.0)),
+            ..default()
+        },
+        BackgroundColor(palette::DRAG_BOX_FILL),
+        BorderColor::all(palette::DRAG_BOX_BORDER),
+        GlobalZIndex(10),
+        Pickable::IGNORE,
+    ));
+}
+
+/// Shift held (either key).
+fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
 }
 
 /// Primary click on a unit entity: plain click selects it alone; shift
 /// toggles it; a second primary click on the same entity within
 /// [`DOUBLE_CLICK_SECS`] selects every unit of the same kind whose
 /// projected position is inside the camera's logical viewport rect.
-/// Ignored while [`PointerOverUi`] is set or the target has no [`UnitRef`]
-/// (the event propagates to the window entity too).
-///
-/// M2-B: body to implement.
+/// Ignored while [`PointerOverUi`] is set, in attack-move mode, when the
+/// release ends a box drag, or when the target has no [`UnitRef`] (the
+/// event propagates to the window entity too).
 #[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
 pub fn on_unit_click(
-    _click: On<Pointer<Click>>,
-    _units: Query<&UnitRef>,
-    _selection: ResMut<Selection>,
-    _over_ui: Res<PointerOverUi>,
-    _keys: Res<ButtonInput<KeyCode>>,
-    _last: ResMut<LastClick>,
-    _time: Res<Time>,
-    _sim: NonSend<SimHandle>,
-    _camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    click: On<Pointer<Click>>,
+    units: Query<&UnitRef>,
+    mut selection: ResMut<Selection>,
+    over_ui: Res<PointerOverUi>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut last: ResMut<LastClick>,
+    time: Res<Time>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    drag: Res<DragBox>,
+    mode: Res<OrderMode>,
 ) {
-    // M2-B: see the doc comment.
+    let target = click.event().entity;
+    let Ok(unit) = units.get(target) else {
+        return;
+    };
+    if click.event().event.button != PointerButton::Primary
+        || over_ui.0
+        || *mode != OrderMode::Normal
+        || drag.0.is_some_and(|d| !d.is_click())
+    {
+        return;
+    }
+    let shift = shift_held(&keys);
+    let now = time.elapsed_secs();
+    let double = last
+        .previous
+        .is_some_and(|(e, t)| e == target && now > t && now - t <= DOUBLE_CLICK_SECS);
+    if !double {
+        last.previous = Some((target, now));
+        if shift {
+            selection.toggle(unit.0);
+        } else {
+            selection.set([unit.0]);
+        }
+        return;
+    }
+    last.previous = None;
+    let view = sim.view();
+    let Some(kind) = view.unit(unit.0).map(|u| u.kind) else {
+        return;
+    };
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    let Some(rect) = cam.logical_viewport_rect() else {
+        return;
+    };
+    let same_kind = units_in_rect(
+        rect,
+        cam,
+        cam_tf,
+        view.units()
+            .filter(|u| u.kind == kind && u.owner == LOCAL_PLAYER)
+            .map(|u| (u.id, world_from_sim(u.pos, UNIT_Y))),
+    );
+    if shift {
+        selection.extend(same_kind);
+    } else {
+        selection.set(same_kind);
+    }
 }
 
-/// Left button: on press (not over UI) start a [`DragRect`] at the cursor;
-/// while held, update `current`; on release, if `!is_click()`, select the
-/// units whose sim position projects inside the rect (shift extends) via
-/// [`units_in_rect`]; a release that is still a click on empty ground
-/// clears the selection unless shift is held. Units clicked directly are
-/// handled by [`on_unit_click`], which fires on the same release.
-///
-/// M2-B: body to implement.
+/// Left button: on press (not over UI, in `Normal` mode) start a
+/// [`DragRect`] at the cursor; while held, update `current`; on release, if
+/// `!is_click()`, select the units whose sim position projects inside the
+/// rect (shift extends) via [`select_in_rect`]; a release that is still a
+/// click on empty ground clears the selection unless shift is held. Units
+/// clicked directly are handled by [`on_unit_click`], which fires on the
+/// same release; the hover map tells the two apart.
 #[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
 pub fn update_drag_box(
-    _buttons: Res<ButtonInput<MouseButton>>,
-    _keys: Res<ButtonInput<KeyCode>>,
-    _windows: Query<&Window, With<PrimaryWindow>>,
-    _over_ui: Res<PointerOverUi>,
-    _drag: ResMut<DragBox>,
-    _selection: ResMut<Selection>,
-    _sim: NonSend<SimHandle>,
-    _camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    over_ui: Res<PointerOverUi>,
+    mode: Res<OrderMode>,
+    hover: Res<HoverMap>,
+    units: Query<(), With<UnitRef>>,
+    mut drag: ResMut<DragBox>,
+    mut selection: ResMut<Selection>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
 ) {
-    // M2-B: see the doc comment.
+    let cursor = windows.single().ok().and_then(Window::cursor_position);
+    if buttons.just_pressed(MouseButton::Left)
+        && !over_ui.0
+        && *mode == OrderMode::Normal
+        && let Some(c) = cursor
+    {
+        drag.0 = Some(DragRect {
+            start: c,
+            current: c,
+        });
+    }
+    if buttons.pressed(MouseButton::Left)
+        && let (Some(d), Some(c)) = (drag.0.as_mut(), cursor)
+    {
+        d.current = c;
+    }
+    if !buttons.just_released(MouseButton::Left) {
+        return;
+    }
+    let Some(d) = drag.0.take() else {
+        return;
+    };
+    let shift = shift_held(&keys);
+    if d.is_click() {
+        let over_unit = hover
+            .get(&PointerId::Mouse)
+            .is_some_and(|hits| hits.keys().any(|e| units.contains(*e)));
+        if !over_ui.0 && !over_unit && !shift {
+            selection.clear();
+        }
+        return;
+    }
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    select_in_rect(d.rect(), shift, cam, cam_tf, &sim.view(), &mut selection);
+}
+
+/// Box selection: the local player's units whose positions project inside
+/// `rect` replace the selection (or extend it). Returns how many matched.
+pub fn select_in_rect(
+    rect: Rect,
+    extend: bool,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    view: &SimView<'_>,
+    selection: &mut Selection,
+) -> usize {
+    let hits = units_in_rect(
+        rect,
+        camera,
+        camera_transform,
+        view.units()
+            .filter(|u| u.owner == LOCAL_PLAYER)
+            .map(|u| (u.id, world_from_sim(u.pos, UNIT_Y))),
+    );
+    let n = hits.len();
+    if extend {
+        selection.extend(hits);
+    } else {
+        selection.set(hits);
+    }
+    n
+}
+
+/// Shows the drag-box node over the current [`DragRect`] once it is past
+/// the click threshold; hides it otherwise.
+fn draw_drag_box(drag: Res<DragBox>, mut nodes: Query<&mut Node, With<DragBoxNode>>) {
+    for mut node in &mut nodes {
+        match drag.0.filter(|d| !d.is_click()) {
+            Some(d) => {
+                let r = d.rect();
+                node.display = Display::Flex;
+                node.left = Val::Px(r.min.x);
+                node.top = Val::Px(r.min.y);
+                node.width = Val::Px(r.width());
+                node.height = Val::Px(r.height());
+            }
+            None => node.display = Display::None,
+        }
+    }
 }
 
 /// The ids whose world positions project inside `rect` (logical pixels).
@@ -355,21 +539,76 @@ pub fn prune_dead(sim: NonSend<SimHandle>, mut selection: ResMut<Selection>) {
 /// ring at the unit entity's interpolated position (`Interp::sample` with
 /// the overstep fraction) at [`RING_Y`], scaled by the kind's radius times
 /// [`RING_RADIUS_PER_UNIT_RADIUS`]. Rings are never children of units.
-///
-/// M2-B: body to implement.
 #[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
 pub fn sync_selection_rings(
-    _commands: Commands,
-    _selection: Res<Selection>,
-    _rings: ResMut<SelectionRings>,
-    _assets: Option<Res<RingAssets>>,
-    _entities: Res<UnitEntities>,
-    _interps: Query<&Interp>,
-    _ring_transforms: Query<&mut Transform, With<SelectionRing>>,
-    _fixed: Res<Time<Fixed>>,
-    _sim: NonSend<SimHandle>,
+    mut commands: Commands,
+    selection: Res<Selection>,
+    mut rings: ResMut<SelectionRings>,
+    assets: Option<Res<RingAssets>>,
+    entities: Res<UnitEntities>,
+    interps: Query<&Interp>,
+    mut ring_transforms: Query<&mut Transform, With<SelectionRing>>,
+    fixed: Res<Time<Fixed>>,
+    sim: NonSend<SimHandle>,
 ) {
-    // M2-B: see the doc comment.
+    let Some(assets) = assets else {
+        return;
+    };
+    rings.0.retain(|id, ring| {
+        if selection.contains(*id) {
+            true
+        } else {
+            commands.entity(*ring).despawn();
+            false
+        }
+    });
+    let t = fixed.overstep_fraction();
+    let view = sim.view();
+    for id in &selection.units {
+        let Some(unit) = view.unit(*id) else {
+            continue; // prune_dead drops it this frame
+        };
+        let Some(unit_entity) = entities.0.get(id) else {
+            continue;
+        };
+        let Ok(interp) = interps.get(*unit_entity) else {
+            continue;
+        };
+        let (pos, _) = interp.sample(t);
+        let radius = fx_to_f32(unit.radius) * RING_RADIUS_PER_UNIT_RADIUS;
+        let transform = Transform::from_translation(Vec3::new(pos.x, RING_Y, pos.z))
+            .with_scale(Vec3::splat(radius));
+        match rings.0.get(id) {
+            Some(ring) => {
+                if let Ok(mut ring_transform) = ring_transforms.get_mut(*ring) {
+                    *ring_transform = transform;
+                }
+            }
+            None => {
+                let ring = commands
+                    .spawn((
+                        Name::new("Selection ring"),
+                        SelectionRing(*id),
+                        Gizmo {
+                            handle: assets.selection.clone(),
+                            line_config: ring_line_config(),
+                            ..default()
+                        },
+                        transform,
+                    ))
+                    .id();
+                rings.0.insert(*id, ring);
+            }
+        }
+    }
+}
+
+/// Thin lines for rings and markers.
+fn ring_line_config() -> GizmoLineConfig {
+    GizmoLineConfig {
+        width: RING_LINE_WIDTH_PX,
+        ..default()
+    }
 }
 
 /// Spawn a move marker ring at `at` (world) that expires after
@@ -382,6 +621,7 @@ pub fn spawn_move_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3,
         },
         Gizmo {
             handle: assets.marker.clone(),
+            line_config: ring_line_config(),
             ..default()
         },
         Transform::from_translation(Vec3::new(at.x, RING_Y, at.z))
@@ -403,6 +643,53 @@ pub fn expire_move_markers(
             let left = ((marker.expires_at - now) / MOVE_MARKER_SECS).clamp(0.0, 1.0);
             transform.scale = Vec3::splat(MOVE_MARKER_RADIUS * (0.4 + 0.6 * left));
         }
+    }
+}
+
+/// Tick at which the dev-only synthetic box selection runs: after the
+/// scenario's spawn during tick 0 and the camera's jump to the units.
+#[cfg(feature = "dev")]
+pub const SYNTHETIC_SELECT_TICK: u32 = 5;
+
+/// Dev builds, `--scenario units200_auto`: once per run, at
+/// [`SYNTHETIC_SELECT_TICK`], select everything through the drag-box code
+/// path ([`select_in_rect`]) with a rectangle covering the whole viewport
+/// and print `selection: <n>` (`selection: FAIL expected <e> got <n>` when
+/// the count differs from the local player's unit count).
+#[cfg(feature = "dev")]
+pub struct SyntheticBoxSelectPlugin;
+
+#[cfg(feature = "dev")]
+impl Plugin for SyntheticBoxSelectPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, synthetic_box_select.in_set(WorldInputSet));
+    }
+}
+
+#[cfg(feature = "dev")]
+fn synthetic_box_select(
+    mut done: Local<bool>,
+    sim: NonSend<SimHandle>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut selection: ResMut<Selection>,
+) {
+    if *done || sim.tick() < SYNTHETIC_SELECT_TICK {
+        return;
+    }
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    let Some(rect) = cam.logical_viewport_rect() else {
+        return;
+    };
+    *done = true;
+    let view = sim.view();
+    let n = select_in_rect(rect, false, cam, cam_tf, &view, &mut selection);
+    let expected = view.units().filter(|u| u.owner == LOCAL_PLAYER).count();
+    if n == expected {
+        println!("selection: {n}");
+    } else {
+        println!("selection: FAIL expected {expected} got {n}");
     }
 }
 

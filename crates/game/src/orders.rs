@@ -9,21 +9,19 @@
 //! Every order goes through `PendingCommands::push_local`, which stamps the
 //! seq; nothing here touches the sim.
 //!
-//! Ownership (M2 contract): agent B owns this file. `ground_hit` and the
-//! `issue_*` helpers are final and tested; the input systems have their
-//! signatures and a description, bodies are B's.
-// M2-B: remove this allow once order_mode_keys and issue_pointer_orders call
-// ground_hit and the issue_* helpers.
-#![allow(dead_code)]
+//! Keys: S = Stop, A = attack-move mode (when something is selected), Esc
+//! or a right click cancels the mode. The camera also pans on A and S
+//! (`camera.rs`, WASD): the keybinding table in `docs/PLAYTEST.md` is the
+//! place to settle that, not this file.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use sim::{Command, FxVec2};
 
 use crate::camera::RtsCamera;
-use crate::hud::PointerOverUi;
+use crate::hud::{PointerOverUi, WorldInputSet};
 use crate::present::sim_from_world;
-use crate::selection::{RingAssets, Selection};
+use crate::selection::{RingAssets, Selection, spawn_move_marker};
 use crate::sim_driver::PendingCommands;
 
 /// What the next left click on the ground means.
@@ -98,23 +96,35 @@ pub struct OrdersPlugin;
 
 impl Plugin for OrdersPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OrderMode>()
-            .add_systems(Update, (order_mode_keys, issue_pointer_orders).chain());
+        app.init_resource::<OrderMode>().add_systems(
+            Update,
+            (order_mode_keys, issue_pointer_orders)
+                .chain()
+                .in_set(WorldInputSet),
+        );
     }
 }
 
-/// A enters [`OrderMode::AttackMove`] when something is selected; Esc or
-/// right click returns to `Normal`; S issues a Stop (`issue_stop`).
-///
-/// M2-B: body to implement.
+/// A enters [`OrderMode::AttackMove`] when something is selected; Esc
+/// returns to `Normal` (a right click does too, in
+/// [`issue_pointer_orders`]); S issues a Stop (`issue_stop`).
 pub fn order_mode_keys(
-    _keys: Res<ButtonInput<KeyCode>>,
-    _buttons: Res<ButtonInput<MouseButton>>,
-    _mode: ResMut<OrderMode>,
-    _selection: Res<Selection>,
-    _pending: ResMut<PendingCommands>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<OrderMode>,
+    selection: Res<Selection>,
+    mut pending: ResMut<PendingCommands>,
 ) {
-    // M2-B: see the doc comment.
+    if keys.just_pressed(KeyCode::Escape) && *mode != OrderMode::Normal {
+        *mode = OrderMode::Normal;
+    }
+    if keys.just_pressed(KeyCode::KeyA) && !selection.is_empty() {
+        *mode = OrderMode::AttackMove;
+    }
+    if keys.just_pressed(KeyCode::KeyS)
+        && let Some(seq) = issue_stop(&mut pending, &selection)
+    {
+        info!("Stop seq {seq} for {} units", selection.units.len());
+    }
 }
 
 /// On right-button release (Normal) or left-button release (`AttackMove`),
@@ -122,24 +132,58 @@ pub fn order_mode_keys(
 /// `issue_move(.., queue = shift held)` or `issue_attack_move`; on success
 /// `selection::spawn_move_marker` at the hit and the mode returns to
 /// `Normal`. A right click in `AttackMove` mode only cancels the mode.
-///
-/// M2-B: body to implement.
 #[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
 pub fn issue_pointer_orders(
-    _buttons: Res<ButtonInput<MouseButton>>,
-    _keys: Res<ButtonInput<KeyCode>>,
-    _windows: Query<&Window, With<PrimaryWindow>>,
-    _camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    _over_ui: Res<PointerOverUi>,
-    _mode: ResMut<OrderMode>,
-    _selection: Res<Selection>,
-    _pending: ResMut<PendingCommands>,
-    _ring_assets: Option<Res<RingAssets>>,
-    _time: Res<Time>,
-    _commands: Commands,
+    buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    over_ui: Res<PointerOverUi>,
+    mut mode: ResMut<OrderMode>,
+    selection: Res<Selection>,
+    mut pending: ResMut<PendingCommands>,
+    ring_assets: Option<Res<RingAssets>>,
+    time: Res<Time>,
+    mut commands: Commands,
 ) {
-    // M2-B: see the doc comment. Target conversion: `sim_from_world(hit)`.
-    let _ = sim_from_world;
+    let right = buttons.just_released(MouseButton::Right);
+    let left = buttons.just_released(MouseButton::Left);
+    if !(right || left) {
+        return;
+    }
+    if *mode == OrderMode::AttackMove && right {
+        *mode = OrderMode::Normal;
+        return;
+    }
+    if over_ui.0 {
+        return;
+    }
+    let Some(cursor) = windows.single().ok().and_then(Window::cursor_position) else {
+        return;
+    };
+    let Ok((cam, cam_tf)) = camera.single() else {
+        return;
+    };
+    let Some(hit) = ground_hit(cam, cam_tf, cursor) else {
+        return;
+    };
+    let target = sim_from_world(hit);
+    let issued = match *mode {
+        OrderMode::Normal if right => {
+            let queue = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+            issue_move(&mut pending, &selection, target, queue)
+        }
+        OrderMode::AttackMove if left => {
+            *mode = OrderMode::Normal;
+            issue_attack_move(&mut pending, &selection, target)
+        }
+        _ => None,
+    };
+    if issued.is_some()
+        && let Some(assets) = ring_assets.as_deref()
+    {
+        spawn_move_marker(&mut commands, assets, hit, time.elapsed_secs());
+    }
 }
 
 #[cfg(test)]

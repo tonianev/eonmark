@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -617,6 +618,7 @@ pub struct Recorder {
     tx: Option<Sender<RecorderMessage>>,
     thread: Option<JoinHandle<Result<u64, ReplayError>>>,
     path: PathBuf,
+    warned_dead: AtomicBool,
 }
 
 impl Recorder {
@@ -642,6 +644,7 @@ impl Recorder {
             tx: Some(tx),
             thread: Some(thread),
             path: path.to_path_buf(),
+            warned_dead: AtomicBool::new(false),
         })
     }
 
@@ -650,12 +653,20 @@ impl Recorder {
     pub fn send(&self, msg: RecorderMessage) {
         if let Some(tx) = &self.tx
             && tx.send(msg).is_err()
+            && self.first_dead_send()
         {
             warn!(
                 "replay writer thread is gone; {} stays truncated",
                 self.path.display()
             );
         }
+    }
+
+    /// `true` only the first time a send found the writer gone: after a
+    /// writer error the sim keeps sending 20+ messages a second, and one
+    /// warning is enough.
+    fn first_dead_send(&self) -> bool {
+        !self.warned_dead.swap(true, Ordering::Relaxed)
     }
 
     /// File being written.
@@ -1227,6 +1238,36 @@ mod tests {
         assert_eq!(finished.final_tick, hash_tick);
         assert_eq!(finished.recorded_hash, Some(hash));
         assert!(finished.matches(), "{finished:?}");
+    }
+
+    #[test]
+    fn a_dead_writer_is_reported_once() {
+        // A writer thread that died (disk full, write error) drops its
+        // receiver; every later send fails.
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let rec = Recorder {
+            tx: Some(tx),
+            thread: None,
+            path: PathBuf::from("dead.eonreplay"),
+            warned_dead: AtomicBool::new(false),
+        };
+        for tick in 0..3 {
+            rec.send(RecorderMessage::Tick {
+                tick,
+                cmds: Vec::new(),
+            });
+        }
+        assert!(
+            !rec.first_dead_send(),
+            "the first failed send already used up the one warning"
+        );
+        let fresh = Recorder {
+            warned_dead: AtomicBool::new(false),
+            ..rec
+        };
+        assert!(fresh.first_dead_send());
+        assert!(!fresh.first_dead_send());
     }
 
     #[test]

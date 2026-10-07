@@ -8,6 +8,8 @@
 //! - [`app`]: the windowed Bevy app and plugin wiring.
 //! - [`background`]: `--background` / `EONMARK_BACKGROUND=1` for automated
 //!   windowed runs (unfocused, below other windows; macOS hands focus back).
+//! - [`monitor_loss`]: keeps the window open when its monitor disappears
+//!   (display sleep, screen lock), which Bevy 0.19.1 would treat as closed.
 //! - [`sim_driver`]: `SimHandle`, the `FixedUpdate` driver, `InputSource`
 //!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
 //! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals.
@@ -35,6 +37,7 @@ pub mod headless;
 pub mod hud;
 #[cfg(target_os = "macos")]
 pub mod macos_menu;
+pub mod monitor_loss;
 pub mod orders;
 pub mod palette;
 pub mod present;

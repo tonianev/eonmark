@@ -110,7 +110,7 @@ cargo deny check
 scripts/check_assets.sh
 scripts/check_trademark.sh
 test "$(cargo tree -i bevy_ecs --depth 0 | wc -l)" -eq 1
-cargo run -p game --locked --profile ci -- --headless-run 200   # M1: crates/sim/tests/fixtures/smoke.eonreplay
+cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay   # M2: the hash-parity fixture
 ```
 
 Plus, when the PR touches the sim boundary:

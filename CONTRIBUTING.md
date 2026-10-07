@@ -26,7 +26,7 @@ cd eonmark
 cargo run -p game --features dev
 ```
 
-The first build compiles Bevy and takes several minutes. [docs/BUILD_TIMES.md](docs/BUILD_TIMES.md) has measured numbers. The `dev` feature turns on dynamic linking and the inspector panels. Never ship a build with it. Most iteration happens in `crates/sim` with `cargo test -p sim`, which does not compile Bevy at all.
+The first build compiles Bevy and takes several minutes. [docs/BUILD_TIMES.md](docs/BUILD_TIMES.md) has measured numbers. The `dev` feature turns on dynamic linking and the inspector panels (the egui World Inspector is hidden until F12). Never ship a build with it. Most iteration happens in `crates/sim` with `cargo test -p sim`, which does not compile Bevy at all.
 
 ## Before you push: `just ci`
 
@@ -46,7 +46,7 @@ The first build compiles Bevy and takes several minutes. [docs/BUILD_TIMES.md](d
 | Assets | `scripts/check_assets.sh` |
 | Naming | `scripts/check_trademark.sh` |
 | One Bevy | `cargo tree -i bevy_ecs --depth 0` must print exactly one line |
-| Headless smoke | `cargo run -p game --locked --profile ci -- --headless-run 200` must print a `tick=200 hash=0x...` line (replay fixture from M1) |
+| Headless replay | `cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay` must end with a `tick=1200 hash=0x...` line and exit 0 (the game re-simulates the golden and compares hashes; `--headless-run <ticks>` still runs a plain skirmish) |
 
 Other recipes in the [justfile](justfile):
 

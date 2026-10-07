@@ -198,7 +198,7 @@ one rendered frame in crates/game
                     maintains Selection (render-side state); skipped while PointerOverUi
    orders.rs        right click -> ground_hit (ray-plane y = 0) -> Command::Move (shift queues);
                     S -> Stop; A then click -> AttackMove; skipped while PointerOverUi
-   hud.rs           Stop button (Interaction::Pressed) -> Command::Stop
+   hud.rs           Stop button (Pointer<Click> observer) -> Command::Stop
                     (M3b+: command-card clicks -> Build / Train / Research)
    macos_menu.rs    drains MenuEvent; the `quit` id becomes AppExit::Success
    app.rs           --exit-after-seconds -> AppExit::Success; --screenshot

@@ -33,6 +33,10 @@ pub const ARRIVED_TILES: i64 = 3;
 /// `ARRIVED_TILES` squared, in `FxVec2::dist_sq_i64` scale.
 const ARRIVED_DIST_SQ: i64 = (ARRIVED_TILES * ARRIVED_TILES) << 32;
 
+/// Prefix of every line `print_on_exit` writes to stdout, so scripts can
+/// pick the frame-time report out of the log (`grep '^frame_stats:'`).
+pub const STDOUT_PREFIX: &str = "frame_stats: ";
+
 /// Frames flagged after each flush: the flush frame itself and the next.
 const FLUSH_WINDOW_FRAMES: u8 = 2;
 
@@ -205,18 +209,20 @@ fn print_on_exit(
         return;
     }
     exits.clear();
-    println!("{}", stats.frame_line());
-    println!("{}", stats.rate_line());
+    // Every line carries the `frame_stats: ` prefix that
+    // `scripts/m2_checks.sh` (check 6) and docs/PLAYTEST.md grep for.
+    println!("{STDOUT_PREFIX}{}", stats.frame_line());
+    println!("{STDOUT_PREFIX}{}", stats.rate_line());
     println!(
-        "ticks={} dropped_ticks={} stalled_ticks={} flushes={} (every {FLUSH_EVERY_TICKS} ticks)",
+        "{STDOUT_PREFIX}ticks={} dropped_ticks={} stalled_ticks={} flushes={} (every {FLUSH_EVERY_TICKS} ticks)",
         sim.tick(),
         driver.dropped_ticks,
         driver.stalled_ticks,
         driver.flushes_sent
     );
     if let Some(arrival) = arrival {
-        println!("{}", arrival.line(sim.tick()));
-        println!("{}", arrival.within_line());
+        println!("{STDOUT_PREFIX}{}", arrival.line(sim.tick()));
+        println!("{STDOUT_PREFIX}{}", arrival.within_line());
     }
 }
 

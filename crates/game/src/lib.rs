@@ -18,7 +18,7 @@
 //! - [`frame_stats`]: frame-time and arrival lines printed on exit
 //!   (`--scenario units200_auto`, `--max-fps`).
 //! - `macos_menu`: muda menu with the custom Cmd-Q item (macOS only).
-//! - `dev_tools`: FPS overlay, egui inspector and sim panel (`dev` only).
+//! - `dev_tools`: FPS overlay, egui inspector (F12) and sim panel (`dev` only).
 #![forbid(unsafe_code)]
 
 pub mod app;

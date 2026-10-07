@@ -1,9 +1,11 @@
 //! Developer-only overlays, compiled only with `--features dev`:
-//! Bevy's FPS overlay, the egui world inspector and a small sim panel.
+//! Bevy's FPS overlay, the egui world inspector (hidden until F12) and a
+//! small sim panel.
 
 use std::time::Duration;
 
 use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin, FrameTimeGraphConfig};
+use bevy::input::common_conditions::input_toggle_active;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
@@ -37,7 +39,9 @@ impl Plugin for DevToolsPlugin {
             },
             // The inspector asserts that EguiPlugin was added before it.
             EguiPlugin::default(),
-            WorldInspectorPlugin::new(),
+            // Hidden until F12: listing every entity (200 units, 200 rings)
+            // each frame costs several milliseconds and covers the map.
+            WorldInspectorPlugin::new().run_if(input_toggle_active(false, KeyCode::F12)),
         ))
         .register_type::<RtsCamera>()
         .add_systems(EguiPrimaryContextPass, sim_panel);
@@ -114,12 +118,22 @@ fn sim_panel(
                 ));
                 ui.end_row();
                 ui.label("recording");
-                ui.monospace(
-                    recorder
-                        .0
-                        .as_ref()
-                        .map_or_else(|| "off".to_owned(), |r| r.path().display().to_string()),
-                );
+                // File name only: the full path would stretch the panel
+                // across the window and hide the units (it is on stdout as
+                // `replay: <path>`, and here on hover).
+                match recorder.0.as_ref() {
+                    None => {
+                        ui.monospace("off");
+                    }
+                    Some(r) => {
+                        let path = r.path();
+                        let name = path.file_name().map_or_else(
+                            || path.display().to_string(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        ui.monospace(name).on_hover_text(path.display().to_string());
+                    }
+                }
                 ui.end_row();
                 ui.label("flushes");
                 ui.monospace(stats.flushes_sent.to_string());

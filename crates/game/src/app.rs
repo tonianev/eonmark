@@ -196,7 +196,7 @@ pub fn run(cli: &Cli) -> AppExit {
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
     #[cfg(feature = "dev")]
-    if cli.scenario.as_deref() == Some("units200_auto") {
+    if units200_auto {
         app.add_plugins(crate::selection::SyntheticBoxSelectPlugin);
     }
 
@@ -324,6 +324,16 @@ fn take_screenshot(
         "screenshot: capturing the primary window to {}",
         request.path.display()
     );
+    // Overwrite semantics, and a stale file must not look like this run's
+    // capture to anything waiting for the PNG (the `hud_click` check).
+    if let Err(err) = std::fs::remove_file(&request.path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(
+            "screenshot: cannot remove the old {}: {err}",
+            request.path.display()
+        );
+    }
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(request.path.clone()));

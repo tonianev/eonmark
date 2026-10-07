@@ -61,6 +61,10 @@ pub const HUD_CLICK_SETTLE_FRAMES: u32 = 30;
 /// Frames between two synthetic pointer steps: the hover map updates in
 /// the next frame's `PreUpdate`, `Pointer<Click>` fires the frame after.
 pub const HUD_CLICK_STEP_FRAMES: u32 = 3;
+/// With `--screenshot`, how many frames after the capture was requested the
+/// `hud_click` check waits for the PNG to land before printing its verdict
+/// (and exiting) anyway.
+pub const HUD_CLICK_SCREENSHOT_FRAMES: u32 = 120;
 
 /// `true` while the mouse pointer is over any `bevy_ui` node. World input
 /// (selection, orders, drag box) is ignored while set.
@@ -434,6 +438,7 @@ pub fn run_hud_click_check(
     mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>,
     bars: Query<(&ComputedNode, &UiGlobalTransform), With<BottomBar>>,
     button: Query<(&ComputedNode, &UiGlobalTransform), With<StopButton>>,
+    screenshot: Option<Res<crate::app::ScreenshotRequest>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     use HudClickStage as S;
@@ -445,6 +450,20 @@ pub fn run_hud_click_check(
     const STEP: u32 = HUD_CLICK_STEP_FRAMES;
 
     if check.stage == S::Verdict {
+        // `--screenshot`: hold the verdict, and with it the exit, until the
+        // capture was requested and its PNG is on disk (`take_screenshot`
+        // removes a stale file first), so the owner proxy's picture shows
+        // the HUD with the selection intact. Bounded so a failed save still
+        // ends the check.
+        if let Some(shot) = screenshot.as_deref() {
+            if !shot.taken {
+                check.frames_in_stage = 0;
+                return;
+            }
+            if frame < HUD_CLICK_SCREENSHOT_FRAMES && !shot.path.exists() {
+                return;
+            }
+        }
         check.tally(&pending);
         println!("{}", verdict_line(check.failure.as_deref()));
         exit.write(match check.failure {

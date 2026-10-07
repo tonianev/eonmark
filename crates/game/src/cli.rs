@@ -20,8 +20,8 @@ Options:
                                last stdout line is `tick=<n> hash=0x<16 hex>`.
   --scenario <NAME>            Windowed scenario (sim::scenarios::by_name): the scripted
                                commands run alongside your own input.
-  --max-fps <N>                Cap the frame rate at N frames per second (sleep in Last);
-                               the simulation stays at its tick rate.
+  --max-fps <N>                Cap the frame rate at N frames per second (sleep in Last,
+                               vsync off); the simulation stays at its tick rate.
   --replay-dir <DIR>           Write this session's replay under DIR instead of the
                                platform data directory.
   --hash-every-tick            Record a hash checkpoint every tick instead of every 20.

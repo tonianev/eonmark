@@ -12,7 +12,7 @@ use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use crate::camera::RtsCamera;
 use crate::present::UnitVisuals;
 use crate::selection::Selection;
-use crate::sim_driver::{DriverStats, PendingCommands, SimHandle};
+use crate::sim_driver::{ActiveInput, DriverStats, PendingCommands, ReplayRecorder, SimHandle};
 
 /// Adds every dev overlay. Never shipped.
 pub struct DevToolsPlugin;
@@ -51,6 +51,8 @@ fn sim_panel(
     fixed: Res<Time<Fixed>>,
     stats: Res<DriverStats>,
     pending: Res<PendingCommands>,
+    input: Res<ActiveInput>,
+    recorder: Res<ReplayRecorder>,
     selection: Res<Selection>,
     visuals: Res<UnitVisuals>,
     cameras: Query<&RtsCamera>,
@@ -91,11 +93,36 @@ fn sim_panel(
                 ui.label("selected");
                 ui.monospace(selection.units.len().to_string());
                 ui.end_row();
+                ui.label("input");
+                ui.monospace(input.0.describe());
+                ui.end_row();
                 ui.label("pending cmds");
-                ui.monospace(pending.len().to_string());
+                let kinds: Vec<&str> = pending
+                    .peek()
+                    .iter()
+                    .map(|c| command_kind(&c.cmd))
+                    .collect();
+                ui.monospace(format!("{} {}", pending.len(), kinds.join(" ")));
                 ui.end_row();
                 ui.label("recorded cmds");
                 ui.monospace(stats.commands_recorded.to_string());
+                ui.end_row();
+                ui.label("rejected / events");
+                ui.monospace(format!(
+                    "{} / {}",
+                    stats.commands_rejected, stats.events_seen
+                ));
+                ui.end_row();
+                ui.label("recording");
+                ui.monospace(
+                    recorder
+                        .0
+                        .as_ref()
+                        .map_or_else(|| "off".to_owned(), |r| r.path().display().to_string()),
+                );
+                ui.end_row();
+                ui.label("flushes");
+                ui.monospace(stats.flushes_sent.to_string());
                 ui.end_row();
                 let (meshes, materials) = visuals.counts();
                 ui.label("meshes / materials");
@@ -112,4 +139,16 @@ fn sim_panel(
             });
         });
     Ok(())
+}
+
+/// Short label for a queued command.
+fn command_kind(cmd: &sim::Command) -> &'static str {
+    match cmd {
+        sim::Command::Move { .. } => "Move",
+        sim::Command::Stop { .. } => "Stop",
+        sim::Command::AttackMove { .. } => "AttackMove",
+        sim::Command::DebugSpawn { .. } => "DebugSpawn",
+        sim::Command::Surrender => "Surrender",
+        _ => "other",
+    }
 }

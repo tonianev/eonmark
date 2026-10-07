@@ -12,6 +12,8 @@
 //! - [`camera`]: the yaw-locked RTS camera.
 //! - [`ground`] and [`palette`]: the flat 128 x 128 m ground mesh and colours.
 //! - [`headless`]: `--headless-run <ticks | replay>` on `MinimalPlugins`.
+//! - [`frame_stats`]: frame-time and arrival lines printed on exit
+//!   (`--scenario units200_auto`, `--max-fps`).
 //! - `macos_menu`: muda menu with the custom Cmd-Q item (macOS only).
 //! - `dev_tools`: FPS overlay, egui inspector and sim panel (`dev` only).
 #![forbid(unsafe_code)]
@@ -21,6 +23,7 @@ mod camera;
 mod cli;
 #[cfg(feature = "dev")]
 mod dev_tools;
+mod frame_stats;
 mod ground;
 mod headless;
 mod hud;

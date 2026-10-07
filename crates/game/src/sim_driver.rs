@@ -17,15 +17,10 @@
 //! wait, so Cmd-Q (through `macos_menu`), the close button and
 //! `--exit-after-seconds` all leave a replay with the clean-exit trailer.
 //!
-//! Ownership (M2 contract): agent A owns this file. What exists here is the
-//! complete public API with working bodies for the parts the skeleton
-//! needs to keep the M0 window running; A finishes `--max-fps`, the headless
-//! replay runner, the `units200_auto` frame-time stats and the end-to-end
-//! `sim-cli verify` checks.
-// M2-A: remove this allow once the headless replay runner uses ReplayInput /
-// ReplayFinished::matches and the dev panel or HUD use the PendingCommands
-// and SimHandle accessors.
-#![allow(dead_code)]
+//! The headless replay runner (`headless.rs`) reuses [`drive_tick`],
+//! [`ReplayInput`] and [`ReplayFinished`] without the fixed clock or the
+//! recorder; `frame_stats.rs` reads [`DriverStats::flushes_sent`] to
+//! attribute frame-time spikes to the recorder flush.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -130,7 +125,7 @@ impl SimHandle {
 
     /// Ticks per second the match runs at.
     pub fn tick_rate_hz(&self) -> u32 {
-        self.sim.rules().tick_rate_hz
+        self.rules().tick_rate_hz
     }
 
     /// Seed the match was created with.
@@ -175,6 +170,14 @@ pub struct DriverStats {
     pub ticks_last_frame: u32,
     /// Commands handed to the recorder so far.
     pub commands_recorded: u64,
+    /// Ticks after which the recorder was asked to flush (every
+    /// [`FLUSH_EVERY_TICKS`]). `frame_stats` watches this to find the frame
+    /// of each flush. Cumulative.
+    pub flushes_sent: u32,
+    /// `SimEvent::CommandRejected` drained so far. Cumulative.
+    pub commands_rejected: u64,
+    /// Every `SimEvent` drained so far. Cumulative.
+    pub events_seen: u64,
 }
 
 /// Commands the UI issued this frame for the local player, stamped with a
@@ -210,12 +213,15 @@ impl PendingCommands {
         out
     }
 
-    /// Queued commands not yet handed to the sim, in push order.
+    /// Queued commands not yet handed to the sim, in push order (the dev
+    /// panel lists them; the HUD may from M3b).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub fn peek(&self) -> &[PlayerCommand] {
         &self.queue
     }
 
-    /// Number of queued commands.
+    /// Number of queued commands (the dev panel shows it).
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -266,6 +272,13 @@ pub trait InputSource: Send + Sync + 'static {
 
     /// Name for logs and the dev panel.
     fn name(&self) -> &'static str;
+
+    /// One line for logs and the dev panel: the name plus whatever the
+    /// source knows about its progress (a replay names its file and the
+    /// batches left).
+    fn describe(&self) -> String {
+        self.name().to_owned()
+    }
 }
 
 /// The player's own commands: drains [`PendingCommands`] every tick.
@@ -278,6 +291,9 @@ impl InputSource for LocalInput {
         _tick: u32,
         local: &mut PendingCommands,
     ) -> Option<Vec<PlayerCommand>> {
+        if local.is_empty() {
+            return Some(Vec::new());
+        }
         Some(local.drain_sorted())
     }
 
@@ -292,6 +308,9 @@ pub struct ReplayInput {
     batches: VecDeque<TickBatch>,
     end: ReplayEnd,
     path: PathBuf,
+    truncated: bool,
+    undecoded_bytes: usize,
+    records: usize,
 }
 
 impl ReplayInput {
@@ -308,6 +327,7 @@ impl ReplayInput {
         let mut batches = VecDeque::new();
         let mut last_hash: Option<(u32, u64)> = None;
         let mut last_batch_tick: Option<u32> = None;
+        let records = file.records.len();
         for record in file.records {
             match record {
                 Record::Tick(batch) => {
@@ -333,8 +353,31 @@ impl ReplayInput {
                 batches,
                 end,
                 path: path.to_path_buf(),
+                truncated: file.truncated,
+                undecoded_bytes: file.undecoded_bytes,
+                records,
             },
         )
+    }
+
+    /// `true` when the file has no clean-exit trailer (the recording was
+    /// cut by `kill -9` or a crash); the batches up to the last complete
+    /// record are replayed, like `sim-cli verify`.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// The `warning:` line `sim-cli verify` prints for a truncated file, or
+    /// `None` for a cleanly finished one.
+    pub fn truncation_warning(&self) -> Option<String> {
+        self.truncated().then(|| {
+            format!(
+                "warning: {} has no clean-exit trailer (recording was cut); replaying {} complete records, {} trailing bytes dropped",
+                self.path().display(),
+                self.records,
+                self.undecoded_bytes
+            )
+        })
     }
 
     /// The file being replayed.
@@ -375,6 +418,15 @@ impl InputSource for ReplayInput {
     fn name(&self) -> &'static str {
         "replay"
     }
+
+    fn describe(&self) -> String {
+        format!(
+            "replay {} ({} batches left, ends at tick {})",
+            self.path().display(),
+            self.remaining_batches(),
+            self.end.final_tick
+        )
+    }
 }
 
 /// A `sim::scenarios` stream merged with the player's input: the scripted
@@ -400,11 +452,6 @@ impl ScenarioInput {
         }
     }
 
-    /// The scripted stream.
-    pub fn stream(&self) -> &Stream {
-        &self.stream
-    }
-
     /// Highest scripted seq per player, so local stamps start above it.
     fn seed_local_seq(&mut self, local: &mut PendingCommands) {
         if self.seeded_local_seq {
@@ -419,8 +466,8 @@ impl ScenarioInput {
             }
         }
         for (player, seq) in max_seq {
-            let next = local.next_seq.entry(player).or_insert(0);
-            *next = (*next).max(seq);
+            let next = local.next_seq(player).max(seq);
+            local.next_seq.insert(player, next);
         }
     }
 }
@@ -439,6 +486,14 @@ impl InputSource for ScenarioInput {
 
     fn name(&self) -> &'static str {
         "scenario"
+    }
+
+    fn describe(&self) -> String {
+        let scripted: usize = self.stream.iter().map(|(_, cmds)| cmds.len()).sum();
+        format!(
+            "scenario ({scripted} scripted commands over {} ticks) + local",
+            self.stream.last().map_or(0, |(tick, _)| tick + 1)
+        )
     }
 }
 
@@ -772,6 +827,7 @@ impl Plugin for SimPlugin {
             None => None,
         };
 
+        info!("input source: {}", input.describe());
         app.world_mut().insert_non_send(handle);
         app.insert_resource(ActiveInput(input))
             .insert_resource(Time::<Fixed>::from_hz(hz))
@@ -845,6 +901,9 @@ pub fn drive_tick(
         stats.commands_recorded += cmds.len() as u64;
         rec.send(RecorderMessage::Tick { tick, cmds });
         let done = sim.tick();
+        if done.is_multiple_of(FLUSH_EVERY_TICKS) {
+            stats.flushes_sent += 1;
+        }
         if done.is_multiple_of(cadence.every.max(1)) {
             rec.send(RecorderMessage::Hash {
                 tick: done,
@@ -886,7 +945,18 @@ fn step_sim(
         *cadence,
         &mut stats,
     ) {
-        TickOutcome::Stepped { .. } | TickOutcome::Stalled => {}
+        TickOutcome::Stepped { .. } => {
+            // Events are not hashed state and nothing reads them yet (the
+            // HUD message line arrives in M3b); drain them so the buffer
+            // never grows for the length of a session, and count them.
+            for event in sim.drain_events() {
+                stats.events_seen += 1;
+                if matches!(event, sim::SimEvent::CommandRejected { .. }) {
+                    stats.commands_rejected += 1;
+                }
+            }
+        }
+        TickOutcome::Stalled => {}
         TickOutcome::Finished(end) => {
             if !budget.finished {
                 budget.finished = true;
@@ -931,6 +1001,7 @@ fn finish_recorder_on_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim::replay::HashRecord;
     use std::path::Path;
 
     fn rules() -> Rules {
@@ -1116,6 +1187,234 @@ mod tests {
         };
         assert!(file.truncated);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn local_input_assigns_seq_in_push_order_and_sorts_by_player_then_seq() {
+        let mut p = PendingCommands::default();
+        let mut src = LocalInput;
+        // Interleaved pushes for two players: each player's seq counts on
+        // its own, and the drained batch is ordered (player, seq).
+        assert_eq!(p.push(PlayerId(1), Command::Surrender), 0);
+        assert_eq!(p.push_local(Command::Surrender), 0);
+        assert_eq!(p.push(PlayerId(1), Command::Surrender), 1);
+        assert_eq!(p.push_local(Command::Surrender), 1);
+        assert_eq!(p.push_local(Command::Surrender), 2);
+        let batch = src.commands_for(7, &mut p).unwrap();
+        let keys: Vec<_> = batch.iter().map(PlayerCommand::sort_key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                (PlayerId(0), 0),
+                (PlayerId(0), 1),
+                (PlayerId(0), 2),
+                (PlayerId(1), 0),
+                (PlayerId(1), 1),
+            ]
+        );
+        assert!(src.commands_for(8, &mut p).unwrap().is_empty());
+        // A later tick's pushes continue the per-player counters.
+        assert_eq!(p.push_local(Command::Surrender), 3);
+        assert_eq!(p.push(PlayerId(1), Command::Surrender), 2);
+        assert_eq!(p.next_seq(PlayerId(2)), 0);
+    }
+
+    #[test]
+    fn replay_input_end_detection_without_hash_records() {
+        let rules = rules();
+        let setup = MatchSetup::scenario(&rules, 5);
+        // A cut recording that never reached its first hash checkpoint: the
+        // end is one past the last batch and there is nothing to compare.
+        let file = ReplayFile {
+            setup: setup.clone(),
+            records: vec![
+                Record::Tick(TickBatch {
+                    tick: 0,
+                    cmds: vec![PlayerCommand::new(PlayerId(0), 0, Command::Surrender)],
+                }),
+                Record::Tick(TickBatch {
+                    tick: 7,
+                    cmds: vec![PlayerCommand::new(PlayerId(0), 1, Command::Surrender)],
+                }),
+            ],
+            truncated: true,
+            undecoded_bytes: 3,
+        };
+        let (_, mut src) = ReplayInput::from_file(Path::new("cut.eonreplay"), file);
+        assert!(src.truncated());
+        assert!(
+            src.truncation_warning()
+                .unwrap()
+                .starts_with("warning: cut.eonreplay")
+        );
+        assert_eq!(
+            src.end_of_input(),
+            Some(ReplayEnd {
+                final_tick: 8,
+                final_hash: None,
+            })
+        );
+        let mut p = PendingCommands::default();
+        for tick in 0..8 {
+            let cmds = src.commands_for(tick, &mut p).unwrap();
+            assert_eq!(
+                cmds.len(),
+                usize::from(tick == 0 || tick == 7),
+                "tick {tick}"
+            );
+        }
+        assert!(src.commands_for(8, &mut p).is_none());
+        assert!(src.describe().contains("0 batches left"));
+
+        // A hash record past the last batch sets the end; an empty file ends at 0.
+        let file = ReplayFile {
+            setup: setup.clone(),
+            records: vec![
+                Record::Tick(TickBatch {
+                    tick: 3,
+                    cmds: vec![PlayerCommand::new(PlayerId(0), 0, Command::Surrender)],
+                }),
+                Record::Hash(HashRecord {
+                    tick: 20,
+                    hash: 0xabc,
+                    sub: SubHashes::default(),
+                }),
+            ],
+            truncated: false,
+            undecoded_bytes: 0,
+        };
+        let (_, src) = ReplayInput::from_file(Path::new("x.eonreplay"), file);
+        assert!(!src.truncated());
+        assert!(src.truncation_warning().is_none());
+        assert_eq!(
+            src.end_of_input(),
+            Some(ReplayEnd {
+                final_tick: 20,
+                final_hash: Some(0xabc),
+            })
+        );
+        let empty = ReplayFile {
+            setup,
+            records: Vec::new(),
+            truncated: false,
+            undecoded_bytes: 0,
+        };
+        let (_, src) = ReplayInput::from_file(Path::new("e.eonreplay"), empty);
+        assert_eq!(src.end_of_input().unwrap().final_tick, 0);
+        // drive_tick finishes such a source immediately, matching trivially.
+        let mut sim = SimHandle::from_setup(MatchSetup::scenario(&rules, 5), rules);
+        let mut stats = DriverStats::default();
+        let mut src = src;
+        let TickOutcome::Finished(f) = drive_tick(
+            &mut sim,
+            &mut src,
+            &mut p,
+            None,
+            HashCadence::default(),
+            &mut stats,
+        ) else {
+            panic!("an empty replay is finished at tick 0");
+        };
+        assert_eq!(f.final_tick, 0);
+        assert!(f.matches());
+    }
+
+    /// A `MinimalPlugins` app with the sim plugin and a manual clock, after
+    /// its first update (which only primes `Time<Real>`).
+    fn fixed_clock_app(input: Box<dyn InputSource>) -> App {
+        let handle = SimHandle::skirmish(rules(), 1);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::ZERO,
+        ));
+        app.add_plugins(SimPlugin::new(handle, input));
+        app.update();
+        assert_eq!(app.world().non_send::<SimHandle>().tick(), 0);
+        app
+    }
+
+    fn advance(app: &mut App, by: Duration) {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(by));
+        app.update();
+    }
+
+    #[test]
+    fn a_one_second_stall_is_clamped_to_max_delta() {
+        let mut app = fixed_clock_app(Box::new(LocalInput));
+        assert_eq!(
+            app.world().resource::<Time<Virtual>>().max_delta(),
+            MAX_DELTA,
+            "configure_virtual_time ran at Startup"
+        );
+        advance(&mut app, Duration::from_secs(1));
+        // 250 ms at 20 Hz = 5 ticks; nothing reaches the 8-tick cap.
+        assert_eq!(app.world().non_send::<SimHandle>().tick(), 5);
+        let stats = *app.world().resource::<DriverStats>();
+        assert_eq!(stats.ticks_this_frame, 5);
+        assert_eq!(stats.dropped_ticks, 0);
+        assert_eq!(stats.stalled_ticks, 0);
+        assert_eq!(
+            app.world().resource::<Time<Fixed>>().overstep(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn tick_cap_runs_exactly_eight_ticks_and_discards_the_overstep() {
+        let mut app = fixed_clock_app(Box::new(LocalInput));
+        // Lift the clamp so the whole stall reaches the fixed clock: a
+        // 1 s stall at 20 Hz asks for 20 ticks.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(2));
+        advance(&mut app, Duration::from_secs(1));
+        assert_eq!(
+            app.world().non_send::<SimHandle>().tick(),
+            MAX_TICKS_PER_FRAME
+        );
+        let stats = *app.world().resource::<DriverStats>();
+        assert_eq!(stats.ticks_this_frame, MAX_TICKS_PER_FRAME);
+        assert_eq!(stats.dropped_ticks, 20 - MAX_TICKS_PER_FRAME);
+        assert_eq!(
+            app.world().resource::<Time<Fixed>>().overstep(),
+            Duration::ZERO,
+            "the remaining overstep was discarded, not carried over"
+        );
+        // The next frame starts from a clean budget: 100 ms = 2 ticks.
+        advance(&mut app, Duration::from_millis(100));
+        assert_eq!(
+            app.world().non_send::<SimHandle>().tick(),
+            MAX_TICKS_PER_FRAME + 2
+        );
+        let stats = *app.world().resource::<DriverStats>();
+        assert_eq!(stats.ticks_this_frame, 2);
+        assert_eq!(stats.ticks_last_frame, MAX_TICKS_PER_FRAME);
+        assert_eq!(stats.dropped_ticks, 20 - MAX_TICKS_PER_FRAME, "cumulative");
+    }
+
+    #[test]
+    fn a_stalling_source_steps_nothing_and_counts_the_stall() {
+        struct Never;
+        impl InputSource for Never {
+            fn commands_for(
+                &mut self,
+                _tick: u32,
+                _local: &mut PendingCommands,
+            ) -> Option<Vec<PlayerCommand>> {
+                None
+            }
+            fn name(&self) -> &'static str {
+                "never"
+            }
+        }
+        let mut app = fixed_clock_app(Box::new(Never));
+        advance(&mut app, Duration::from_millis(100));
+        assert_eq!(app.world().non_send::<SimHandle>().tick(), 0);
+        let stats = *app.world().resource::<DriverStats>();
+        assert_eq!(stats.stalled_ticks, 2);
+        assert_eq!(stats.ticks_this_frame, 0);
+        assert_eq!(stats.dropped_ticks, 0);
     }
 
     #[test]

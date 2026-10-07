@@ -85,12 +85,15 @@ jobs:
       - name: exactly one Bevy in the graph
         run: test "$(cargo tree -i bevy_ecs --depth 0 | wc -l | tr -d ' ')" -eq 1
 
-      - name: headless smoke (200 ticks)
-        # M2: switch to a fixture replay once `--headless-run <replay>` exists.
-        # Only the `tick=... hash=...` line is kept so hash-parity diffs cleanly.
+      - name: headless replay (move_500 fixture)
+        # The game re-simulates the 1200-tick golden through its own driver
+        # (`sim_driver::ReplayInput`) and exits 0 only if the recorded final
+        # hash matches; the last stdout line is `tick=1200 hash=0x...`, kept
+        # alone so hash-parity diffs cleanly. Reuses the ci-profile artifacts
+        # from clippy/nextest above.
         run: |
-          cargo run -p game --locked --profile ci -- --headless-run 200 | grep '^tick=' | tee hash-macos.txt
-          test -s hash-macos.txt
+          cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1 | tee hash-macos.txt
+          grep -q '^tick=1200 hash=0x[0-9a-f]\{16\}$' hash-macos.txt
 
       - name: verify golden fixture move_500 (release)
         # The same command runs in the headless job on Linux; hash-parity
@@ -178,12 +181,12 @@ jobs:
           git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
           scripts/check_fixture_policy.sh "${{ github.event.pull_request.base.sha }}"
 
-      - name: headless smoke (200 ticks)
-        # M2: switch to a fixture replay. Same command as the macOS job; the
-        # two outputs must be byte-identical (hash-parity job).
+      - name: headless replay (move_500 fixture)
+        # Same command as the macOS job; the two `tick=1200 hash=0x...` lines
+        # must be byte-identical (hash-parity job).
         run: |
-          cargo run -p game --locked --profile ci -- --headless-run 200 | grep '^tick=' | tee hash-linux.txt
-          test -s hash-linux.txt
+          cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1 | tee hash-linux.txt
+          grep -q '^tick=1200 hash=0x[0-9a-f]\{16\}$' hash-linux.txt
 
       - uses: actions/upload-artifact@v7
         with:
@@ -241,7 +244,10 @@ jobs:
         with:
           name: hash-linux
           path: hashes/linux
-      - name: compare headless smoke (200 ticks)
+      - name: compare headless replay (move_500 fixture)
+        # Both files hold exactly the `tick=1200 hash=0x...` line the game's
+        # `--headless-run crates/sim/tests/fixtures/move_500.eonreplay`
+        # printed last on each OS.
         run: |
           echo "macOS:"; cat hashes/macos/hash-macos.txt
           echo "Linux:"; cat hashes/linux/hash-linux.txt

@@ -66,9 +66,10 @@ ci:
     step exactly one Bevy
     test "$(cargo tree -i bevy_ecs --depth 0 | wc -l | tr -d ' ')" -eq 1
 
-    step headless smoke
-    # M1: switch to fixture (crates/sim/tests/fixtures/smoke.eonreplay).
-    cargo run -p game --locked --profile ci -- --headless-run 200 | grep '^tick='
+    step headless replay
+    # The game re-simulates the golden through its own driver; the last line
+    # is `tick=1200 hash=0x...` and the exit code is 0 only on a hash match.
+    cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1
 
     echo; echo "ci: all steps passed"
 
@@ -84,9 +85,13 @@ fmt-check:
 run *ARGS:
     cargo run -p game --features dev -- {{ARGS}}
 
-# Run the simulation headless for N ticks and print the final hash.
-headless TICKS="200":
-    cargo run -p game --locked --profile ci -- --headless-run {{TICKS}}
+# Run the simulation headless (N ticks, or a .eonreplay to re-simulate) and print the final hash.
+headless RUN="200":
+    cargo run -p game --locked --profile ci -- --headless-run {{RUN}}
+
+# M2 acceptance proxies end to end (headless fixture time, 30 vs 120 fps hashes, clean exit, kill -9, hud_click, units200_auto); see scripts/m2_checks.sh.
+m2-checks SCRATCH="":
+    scripts/m2_checks.sh {{SCRATCH}}
 
 # Determinism self-test: scripted ticks twice on two threads, hashes must match.
 selftest:

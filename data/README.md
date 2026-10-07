@@ -16,13 +16,29 @@ reads these files; it never defines gameplay constants of its own.
 | `maps/plains_1v1.ron` | The one 128x128 mirrored two-player map | `crates/rules/src/map.rs` | M0 |
 | `rules/ages.ron`, `units.ron`, `buildings.ron`, `techs.ron`, `factions.ron` | Content tables | not yet written | M3a, M4a |
 | `rules/strings/en.ron` | UI strings | not yet written | M3b |
-| `visuals.ron` | Visual kind to primitive or `.glb` mapping | not yet written | M2 |
+| `visuals.ron` | How each unit kind is drawn: `Primitive(Capsule \| Cuboid \| Cylinder \| Sphere)` now, `Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` from M7; keyed by unit kind id, every kind in `units.ron` must appear | `crates/rules/src/visuals.rs` (`Visuals`) | M2 |
 | `ai/` | Build orders, personalities, difficulty table | not yet written | M5b |
 
 Each subdirectory has its own README with the schema in plain English and a
 worked example: [rules/README.md](rules/README.md),
 [maps/README.md](maps/README.md), [ai/README.md](ai/README.md). The format
 reference for contributors is [../docs/DATA_FORMAT.md](../docs/DATA_FORMAT.md).
+
+## visuals.ron
+
+Read by the game's presenter, never by the simulation, but loaded and
+validated by `Rules::load` so a missing visual is caught before a window
+opens and so the file is part of `rules_hash`. Schema `crates/rules/src/visuals.rs`.
+
+| Field | Meaning |
+|-------|---------|
+| `units` | Map from unit kind id (`units.ron` `id`) to a `Visual`. Every kind must have an entry; an unknown key is an error naming `units["<id>"]`. |
+| `Primitive(Capsule)` / `Cuboid` / `Cylinder` / `Sphere` | One shared mesh per kind, sized from the kind's `radius_tiles_x100`, tinted with the owner's team colour (M2). |
+| `Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` | glTF under `assets/` (`.glb` or `.gltf`), uniform scale in hundredths (1..=10000), vertical offset in hundredths of a tile, extra yaw in whole degrees (-360..=360). Parsed and validated now, used from M7. |
+
+```ron
+(units: { "yeoman": Primitive(Capsule) })
+```
 
 ## Conventions
 

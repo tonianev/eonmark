@@ -1,8 +1,12 @@
-//! The windowed Bevy app plus the shared simulation driver.
+//! The windowed Bevy app: window, plugins, the sim driver with its input
+//! source and recorder, and the `--exit-after-seconds` / `--max-fps` /
+//! `--screenshot` smoke-test helpers.
 //!
-//! The simulation is a `!Send` value at M0 (`Box<dyn AiController>` carries
-//! no `Send + Sync` bound), so it lives in a non-send resource and is only
-//! touched by main-thread systems. See `notesForOtherFiles` in the M0 report.
+//! Which input source runs (M2 decision 2): `--scenario <name>` builds the
+//! sim from `MatchSetup::scenario` (debug commands on) and feeds a
+//! `ScenarioInput` (scripted stream + the player's commands); otherwise a
+//! skirmish with `LocalInput`. Every windowed session records a replay
+//! (decision 3) to `--replay-dir` or the platform data directory.
 
 use std::time::Duration;
 
@@ -10,63 +14,20 @@ use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::window::{PresentMode, WindowResolution};
 use rules::Rules;
-use sim::{MatchSetup, PlayerCommand, Sim};
+use sim::scenarios;
 
 use crate::cli::Cli;
+use crate::hud::HudPlugin;
+use crate::orders::OrdersPlugin;
+use crate::present::PresentPlugin;
+use crate::selection::SelectionPlugin;
+use crate::sim_driver::{
+    InputSource, LocalInput, ScenarioInput, SimHandle, SimPlugin, new_replay_path, replay_dir,
+};
 use crate::{camera, ground, palette};
-
-/// Hard cap on simulation ticks stepped in one rendered frame. With
-/// `Time<Virtual>::max_delta` at 250 ms and a 20 Hz tick the fixed schedule
-/// never asks for more than 5, so this only guards against a future
-/// higher tick rate or a larger max delta.
-pub const MAX_TICKS_PER_FRAME: u32 = 8;
 
 /// Default logical window size.
 pub const WINDOW_SIZE: (u32, u32) = (1280, 800);
-
-/// The running match. Non-send resource; see the module docs.
-pub struct SimHandle {
-    sim: Sim,
-    /// Ticks skipped because [`MAX_TICKS_PER_FRAME`] was reached.
-    pub dropped_ticks: u32,
-}
-
-impl SimHandle {
-    /// Build a skirmish from loaded rules and a seed with the passive bot.
-    pub fn skirmish(rules: Rules, seed: u64) -> Self {
-        let setup = MatchSetup::skirmish(&rules, seed);
-        Self {
-            sim: Sim::new(setup, rules, Box::new(ai::Passive)),
-            dropped_ticks: 0,
-        }
-    }
-
-    /// Advance one tick with no human commands (M0: no input mapping yet).
-    pub fn step_once(&mut self) {
-        let no_commands: [PlayerCommand; 0] = [];
-        self.sim.step(&no_commands);
-    }
-
-    /// Completed ticks.
-    pub fn tick(&self) -> u32 {
-        self.sim.tick()
-    }
-
-    /// Hash of the current simulation state.
-    pub fn hash(&self) -> u64 {
-        self.sim.hash()
-    }
-
-    /// Ticks per second the match runs at.
-    pub fn tick_rate_hz(&self) -> u32 {
-        self.sim.rules().tick_rate_hz
-    }
-
-    /// Seed the match was created with.
-    pub fn seed(&self) -> u64 {
-        self.sim.setup().seed
-    }
-}
 
 /// Load `data/` for `cli`, or print why it failed.
 pub fn load_rules(cli: &Cli) -> Option<Rules> {
@@ -80,51 +41,77 @@ pub fn load_rules(cli: &Cli) -> Option<Rules> {
     }
 }
 
-#[derive(Resource, Default)]
-struct TickBudget {
-    used: u32,
-}
-
-/// Install the sim as a non-send resource and drive it from `FixedUpdate`
-/// at the rules' tick rate. Not a `Plugin`: `Plugin` values must be
-/// `Send + Sync` and the sim is not (see the module docs).
-pub fn install_sim(app: &mut App, handle: SimHandle) {
-    let hz = f64::from(handle.tick_rate_hz());
-    app.world_mut().insert_non_send(handle);
-    app.insert_resource(Time::<Fixed>::from_hz(hz))
-        .init_resource::<TickBudget>()
-        .add_systems(Startup, configure_virtual_time)
-        .add_systems(PreUpdate, reset_tick_budget)
-        .add_systems(FixedUpdate, step_sim);
-}
-
-fn configure_virtual_time(mut time: ResMut<Time<Virtual>>) {
-    time.set_max_delta(Duration::from_millis(250));
-}
-
-fn reset_tick_budget(mut budget: ResMut<TickBudget>) {
-    budget.used = 0;
-}
-
-fn step_sim(mut sim: NonSendMut<SimHandle>, mut budget: ResMut<TickBudget>) {
-    if budget.used >= MAX_TICKS_PER_FRAME {
-        sim.dropped_ticks += 1;
-        return;
+/// The sim and the input source a windowed session starts with.
+pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputSource>), String> {
+    match &cli.scenario {
+        None => Ok((SimHandle::skirmish(rules, cli.seed), Box::new(LocalInput))),
+        Some(name) => {
+            let Some((mut setup, stream, _ticks)) = scenarios::by_name(name, &rules) else {
+                return Err(format!(
+                    "unknown scenario {name:?}; one of {}",
+                    scenarios::NAMES.join(", ")
+                ));
+            };
+            // `--seed` overrides the scenario's own seed only when given
+            // explicitly (the default 1 would otherwise clobber it).
+            if cli.seed != Cli::default().seed {
+                setup.seed = cli.seed;
+            }
+            Ok((
+                SimHandle::from_setup(setup, rules),
+                Box::new(ScenarioInput::new(stream)),
+            ))
+        }
     }
-    budget.used += 1;
-    sim.step_once();
 }
 
 /// `--exit-after-seconds`: wall-clock deadline for smoke tests.
 #[derive(Resource)]
 struct ExitAfter(Duration);
 
+/// `--max-fps <n>`: minimum frame duration enforced by a sleep in `Last`.
+///
+/// M2-A: the limiter system is a stub; implement `limit_frame_rate` (sleep
+/// until `last_frame + 1/n`, spin for the final sub-millisecond) so camera
+/// travel and the `scripted_moves` 30 vs 120 fps hash check can be run.
+#[derive(Resource, Debug, Clone, Copy)]
+#[allow(dead_code)] // M2-A: remove once limit_frame_rate reads max_fps.
+pub struct FrameLimiter {
+    /// Target frames per second.
+    pub max_fps: u32,
+}
+
+/// `--screenshot <path>`: capture the primary window about one second
+/// before the exit deadline (or at the deadline when it is under a second).
+///
+/// M2-B: the capture system is a stub; implement with
+/// `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))`
+/// once `Time<Real>::elapsed() >= deadline - 1 s`, exactly once.
+#[derive(Resource, Debug, Clone)]
+#[allow(dead_code)] // M2-B: remove once take_screenshot reads these.
+pub struct ScreenshotRequest {
+    /// Output PNG path.
+    pub path: std::path::PathBuf,
+    /// When to capture, in wall-clock seconds since start.
+    pub at_secs: f64,
+    /// Set once the capture was requested.
+    pub taken: bool,
+}
+
 /// Run the windowed game. Returns the exit status for `main`.
 pub fn run(cli: &Cli) -> AppExit {
     let Some(rules) = load_rules(cli) else {
         return AppExit::error();
     };
-    let handle = SimHandle::skirmish(rules, cli.seed);
+    let (handle, input) = match build_match(cli, rules) {
+        Ok(pair) => pair,
+        Err(message) => {
+            eprintln!("eonmark: {message}");
+            return AppExit::from_code(2);
+        }
+    };
+    let replay_path = new_replay_path(&replay_dir(cli.replay_dir.as_deref()), handle.seed());
+    let hud_click_check = cli.scenario.as_deref() == Some("hud_click");
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -140,15 +127,44 @@ pub fn run(cli: &Cli) -> AppExit {
         ..default()
     }));
     app.insert_resource(ClearColor(palette::SKY));
-    install_sim(&mut app, handle);
-    app.add_plugins((camera::CameraPlugin, ground::GroundPlugin));
+    app.add_plugins(
+        SimPlugin::new(handle, input)
+            .recording(Some(replay_path))
+            .hash_every(cli.hash_every()),
+    );
+    app.add_plugins((
+        camera::CameraPlugin,
+        ground::GroundPlugin,
+        PresentPlugin,
+        SelectionPlugin,
+        OrdersPlugin,
+        HudPlugin { hud_click_check },
+    ));
+
+    #[cfg(target_os = "macos")]
+    app.add_plugins(crate::macos_menu::MacosMenuPlugin);
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
 
+    if let Some(max_fps) = cli.max_fps {
+        app.insert_resource(FrameLimiter { max_fps })
+            .add_systems(Last, limit_frame_rate);
+    }
+
     if let Some(secs) = cli.exit_after_seconds {
         app.insert_resource(ExitAfter(Duration::from_secs_f64(secs)))
             .add_systems(Update, exit_after);
+        if let Some(path) = &cli.screenshot {
+            app.insert_resource(ScreenshotRequest {
+                path: path.clone(),
+                at_secs: (secs - 1.0).max(0.0),
+                taken: false,
+            })
+            .add_systems(Update, take_screenshot);
+        }
+    } else if cli.screenshot.is_some() {
+        eprintln!("eonmark: --screenshot needs --exit-after-seconds to know when to capture");
     }
 
     app.run()
@@ -169,4 +185,24 @@ fn exit_after(
         );
         exit.write(AppExit::Success);
     }
+}
+
+/// Sleep in `Last` so the frame takes at least `1 / max_fps` seconds.
+///
+/// M2-A: body to implement (track the previous frame's `Instant` in a
+/// `Local`; the sim is unaffected because `FixedUpdate` catches up).
+fn limit_frame_rate(_limiter: Res<FrameLimiter>, _time: Res<Time<Real>>) {
+    // M2-A: see the doc comment.
+}
+
+/// Capture the primary window once `at_secs` has passed.
+///
+/// M2-B: body to implement (`bevy::render::view::screenshot::{Screenshot,
+/// save_to_disk}`; dev builds only in practice, the code compiles everywhere).
+fn take_screenshot(
+    _time: Res<Time<Real>>,
+    _request: ResMut<ScreenshotRequest>,
+    _commands: Commands,
+) {
+    // M2-B: see the doc comment.
 }

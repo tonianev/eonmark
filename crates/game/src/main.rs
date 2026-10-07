@@ -1,12 +1,18 @@
 //! The `eonmark` binary: the windowed game, or a headless simulation run.
 //!
-//! Module map (M0):
+//! Module map (M2):
 //! - [`cli`]: hand-rolled argument parsing and data directory resolution.
-//! - [`app`]: the windowed Bevy app, the `SimHandle` non-send resource and
-//!   the fixed-step driver.
+//! - [`app`]: the windowed Bevy app and plugin wiring.
+//! - [`sim_driver`]: `SimHandle`, the `FixedUpdate` driver, `InputSource`
+//!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
+//! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals.
+//! - [`selection`]: picking, click/box/group selection, rings and markers.
+//! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`.
+//! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
 //! - [`camera`]: the yaw-locked RTS camera.
 //! - [`ground`] and [`palette`]: the flat 128 x 128 m ground mesh and colours.
-//! - [`headless`]: `--headless-run <ticks>` on `MinimalPlugins`.
+//! - [`headless`]: `--headless-run <ticks | replay>` on `MinimalPlugins`.
+//! - `macos_menu`: muda menu with the custom Cmd-Q item (macOS only).
 //! - `dev_tools`: FPS overlay, egui inspector and sim panel (`dev` only).
 #![forbid(unsafe_code)]
 
@@ -17,7 +23,14 @@ mod cli;
 mod dev_tools;
 mod ground;
 mod headless;
+mod hud;
+#[cfg(target_os = "macos")]
+mod macos_menu;
+mod orders;
 mod palette;
+mod present;
+mod selection;
+mod sim_driver;
 
 use std::process::ExitCode;
 
@@ -36,8 +49,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit = match cli.headless_run {
-        Some(ticks) => headless::run(&cli, ticks),
+    let exit = match &cli.headless_run {
+        Some(mode) => headless::run(&cli, mode),
         None => app::run(&cli),
     };
 

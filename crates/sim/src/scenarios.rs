@@ -1,7 +1,9 @@
-//! Scripted M1 scenarios: pure, deterministic command streams shared by the
-//! acceptance tests (`crates/sim/tests/m1.rs`), the criterion benches,
-//! `sim-cli record` / `bench`, and the golden fixtures under
-//! `crates/sim/tests/fixtures/`.
+//! Scripted scenarios: pure, deterministic command streams shared by the
+//! acceptance tests (`crates/sim/tests/m1.rs`, `m2.rs`), the criterion
+//! benches, `sim-cli record` / `bench`, the golden fixtures under
+//! `crates/sim/tests/fixtures/`, and (M2) the game's `--scenario <name>`
+//! flag, which feeds a stream through `game::sim_driver::ScenarioInput`
+//! alongside the player's own commands.
 //!
 //! A scenario is a [`MatchSetup`] (built with [`MatchSetup::scenario`], so
 //! debug commands are accepted and both slots are human) plus a [`Stream`]:
@@ -47,12 +49,32 @@ pub const SNAPSHOT_RESTORE_SNAPSHOT_TICK: u32 = 300;
 /// Tick during which [`snapshot_restore`] issues its second spawn.
 pub const SNAPSHOT_RESTORE_SPAWN_TICK: u32 = 301;
 
-/// Scenario names accepted by [`by_name`] and `sim-cli record --scenario`.
-pub const NAMES: [&str; 4] = [
+/// Length of [`units200`]: 60 s of game time, the M2 acceptance window for
+/// 200 units to cross the map after the player's own order.
+pub const UNITS200_TICKS: u32 = 1200;
+/// Length of [`units200_auto`].
+pub const UNITS200_AUTO_TICKS: u32 = 1200;
+/// Tick during which [`units200_auto`] orders all 200 units east.
+pub const UNITS200_AUTO_MOVE_TICK: u32 = 20;
+/// Length of [`scripted_moves`]: the last order is issued during tick 450
+/// and the fixture ends while the units walk, enough to lock the stream.
+pub const SCRIPTED_MOVES_TICKS: u32 = 600;
+/// Length of [`hud_click`]: the automated HUD check in the game crate
+/// finishes well inside it (10 s of game time).
+pub const HUD_CLICK_TICKS: u32 = 200;
+
+/// Scenario names accepted by [`by_name`], `sim-cli record --scenario` and
+/// the game's `--scenario`. The first four are the M1 golden fixtures; the
+/// M2 names are windowed scenarios (they may be recorded too).
+pub const NAMES: [&str; 8] = [
     "move_500",
     "move_500_short",
     "group_spiral",
     "snapshot_restore",
+    "units200",
+    "units200_auto",
+    "scripted_moves",
+    "hud_click",
 ];
 
 /// Spawn rows of [`bench_cross`]: a band along the west side from the
@@ -100,6 +122,10 @@ fn mv(owner: u8, seq: u32, units: Vec<UnitId>, target: FxVec2) -> PlayerCommand 
 
 fn stop(owner: u8, seq: u32, units: Vec<UnitId>) -> PlayerCommand {
     PlayerCommand::new(PlayerId(owner), seq, Command::Stop { units })
+}
+
+fn attack_move(owner: u8, seq: u32, units: Vec<UnitId>, target: FxVec2) -> PlayerCommand {
+    PlayerCommand::new(PlayerId(owner), seq, Command::AttackMove { units, target })
 }
 
 /// The fixed M1 crossing: 500 Yeomen spawned at the west start during tick
@@ -180,6 +206,86 @@ pub fn snapshot_restore(rules: &Rules) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
+/// M2 interactive scenario: 200 Yeomen (ids 1..=200) spawned at the west
+/// start during tick 0 and nothing else; the player drag-boxes them and
+/// orders them across the map (`--scenario units200`). Seed 1. Length
+/// [`UNITS200_TICKS`] (informational: the windowed game runs until exit).
+pub fn units200(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, 1);
+    let stream = vec![(0, vec![spawn(0, 0, WEST, 200)])];
+    (setup, stream)
+}
+
+/// [`units200`] plus a scripted Move of all 200 units to the east start
+/// during tick [`UNITS200_AUTO_MOVE_TICK`]: the automated proxy for the
+/// units200 acceptance line (the game also prints frame-time stats). Seed 1.
+/// Length [`UNITS200_AUTO_TICKS`].
+pub fn units200_auto(rules: &Rules) -> (MatchSetup, Stream) {
+    let (setup, mut stream) = units200(rules);
+    stream.push((UNITS200_AUTO_MOVE_TICK, vec![mv(0, 1, ids(1..=200), EAST)]));
+    (setup, stream)
+}
+
+/// Scripted orders only, no local input needed: 100 Yeomen (ids 1..=100)
+/// spawned at the west start during tick 0; during tick 20 the first half
+/// goes to the north band `(20, 35)` and the second half to the south band
+/// `(20, 92)`; during tick 200 everyone is ordered to the east start; during
+/// tick 400 every fourth id Stops; during tick 450 everyone `AttackMove`s to
+/// `(20, 54)` (the M2 placeholder is applied like Move). Recorded by the
+/// game at `--max-fps 30` and `--max-fps 120`, the two replays must end on
+/// the same hash. Seed 3. Length [`SCRIPTED_MOVES_TICKS`].
+pub fn scripted_moves(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, 3);
+    let stream = vec![
+        (0, vec![spawn(0, 0, WEST, 100)]),
+        (
+            20,
+            vec![
+                mv(0, 1, ids(1..=50), FxVec2::from_ints(BENCH_CROSS_WEST_X, 35)),
+                mv(
+                    0,
+                    2,
+                    ids(51..=100),
+                    FxVec2::from_ints(BENCH_CROSS_WEST_X, 92),
+                ),
+            ],
+        ),
+        (200, vec![mv(0, 3, ids(1..=100), EAST)]),
+        (
+            400,
+            vec![stop(
+                0,
+                4,
+                (1..=100u32)
+                    .filter(|i| i.is_multiple_of(4))
+                    .map(UnitId)
+                    .collect(),
+            )],
+        ),
+        (
+            450,
+            vec![attack_move(
+                0,
+                5,
+                ids(1..=100),
+                FxVec2::from_ints(BENCH_CROSS_WEST_X, 54),
+            )],
+        ),
+    ];
+    (setup, stream)
+}
+
+/// 20 Yeomen (ids 1..=20) at the west start during tick 0 for the game's
+/// automated HUD check (`--scenario hud_click`): the game selects them, then
+/// writes synthetic pointer input over the bottom HUD panel and the Stop
+/// button and asserts that no Move was queued and the selection is
+/// unchanged. Seed 1. Length [`HUD_CLICK_TICKS`].
+pub fn hud_click(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, 1);
+    let stream = vec![(0, vec![spawn(0, 0, WEST, 20)])];
+    (setup, stream)
+}
+
 /// The `sim-cli bench --units n` crossing: `n` Yeomen spawned during tick 0
 /// in one group per row of [`BENCH_CROSS_ROWS`], of (as near as possible)
 /// equal size, at `(BENCH_CROSS_WEST_X, row)` in
@@ -243,6 +349,22 @@ pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
         "snapshot_restore" => {
             let (s, c) = snapshot_restore(rules);
             (s, c, SNAPSHOT_RESTORE_TICKS)
+        }
+        "units200" => {
+            let (s, c) = units200(rules);
+            (s, c, UNITS200_TICKS)
+        }
+        "units200_auto" => {
+            let (s, c) = units200_auto(rules);
+            (s, c, UNITS200_AUTO_TICKS)
+        }
+        "scripted_moves" => {
+            let (s, c) = scripted_moves(rules);
+            (s, c, SCRIPTED_MOVES_TICKS)
+        }
+        "hud_click" => {
+            let (s, c) = hud_click(rules);
+            (s, c, HUD_CLICK_TICKS)
         }
         _ => return None,
     };

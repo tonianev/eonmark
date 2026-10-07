@@ -179,13 +179,15 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
         _ => {}
     }
     if tick % 7 == 3 {
+        // `AdvanceAge` stays unimplemented until M4a. (`AttackMove` was used
+        // here through M1; since M2 the sim applies it like `Move`, which
+        // would break this stream's no-movement promise.)
         let player = u8::try_from(tick % 2).expect("0 or 1");
         out.push(PlayerCommand::new(
             PlayerId(player),
             tick,
-            Command::AttackMove {
-                units: vec![UnitId(1 + tick % 16)],
-                target: FxVec2::from_ints(64, 64),
+            Command::AdvanceAge {
+                player: PlayerId(player),
             },
         ));
     }
@@ -297,14 +299,14 @@ pub fn random_commands(
             rejected.push((PlayerId(0), seq[0]));
             seq[0] += 1;
         } else if bad < 36 {
-            // NotImplemented (counted, advances the rng).
-            let target = point(&mut rng);
+            // NotImplemented (counted, advances the rng). `AdvanceAge` is
+            // unimplemented until M4a; `AttackMove` no longer qualifies
+            // since M2 applies it like `Move`.
             cmds.push(PlayerCommand::new(
                 PlayerId(0),
                 seq[0],
-                Command::AttackMove {
-                    units: vec![UnitId(1)],
-                    target,
+                Command::AdvanceAge {
+                    player: PlayerId(0),
                 },
             ));
             rejected.push((PlayerId(0), seq[0]));

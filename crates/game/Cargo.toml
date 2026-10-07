@@ -31,10 +31,14 @@ ai.workspace = true
 bevy = { workspace = true, features = ["gestures"] }
 bevy_egui = { workspace = true, optional = true }
 bevy-inspector-egui = { workspace = true, optional = true }
+# Replay directory (`ProjectDirs::from("com", "tonianev", "Eonmark").data_dir()/replays`).
+directories.workspace = true
 
-# `muda` (native macOS menu, Cmd-Q routing) arrives in M2; `directories`
-# (replay directory) arrives with the replay writer thread, also in M2. Neither is used
-# at M0, so neither is listed here (cargo-machete must stay clean).
+# Native macOS menu with the custom Cmd-Q item (`macos_menu.rs`). Mac only, so the
+# Linux clippy job never compiles it; `default-features = false` drops muda's
+# `gtk3` default so gtk never enters Cargo.lock (see deny.toml).
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

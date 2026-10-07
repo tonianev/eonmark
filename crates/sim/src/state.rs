@@ -37,7 +37,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 3: an arrived unit keeps a [`Post`] (`Unit::post`, new hashed state) and
 /// walks straight back to it when pushed farther than its kind's
 /// `return_to_post_radius_tiles_x100`.
-pub const SIM_VERSION: u32 = 3;
+///
+/// 4: `Command::AttackMove` is applied exactly like `Command::Move` (M2
+/// placeholder until combat in M4a) instead of being rejected with
+/// `NotImplemented` and drawing from the RNG.
+pub const SIM_VERSION: u32 = 4;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +575,39 @@ impl Sim {
             .collect()
     }
 
+    /// Order the owned subset of `units` to `target`: one spiral-offset goal
+    /// per unit, a path request each, posts cleared. Shared by `Move` and
+    /// the M2 `AttackMove` placeholder. Rejects with `NoValidUnits` when no
+    /// unit qualifies.
+    fn apply_move(&mut self, pc: &PlayerCommand, units: &[UnitId], target: FxVec2) {
+        let tick = self.state.tick;
+        let movers = self.owned_units(pc.player, units);
+        if movers.is_empty() {
+            self.reject(pc, RejectReason::NoValidUnits);
+            return;
+        }
+        let targets = movement::group_targets(&self.state.map, target, movers.len());
+        let repath_at = tick + self.rules.repath_interval_ticks();
+        for (unit, goal) in movers.into_iter().zip(targets) {
+            let u = self.state.units.get_mut(&unit).expect("validated");
+            u.order = Some(MoveOrder {
+                goal,
+                path: Vec::new(),
+                next: 0,
+                repath_at,
+            });
+            u.post = None;
+            let from = self.state.map.tile_of(u.pos);
+            let to = self.state.map.tile_of(goal);
+            self.state.pathing.request(PathRequest {
+                requested_tick: tick,
+                unit,
+                from,
+                to,
+            });
+        }
+    }
+
     /// Apply one command. Every command, applied or rejected, increments
     /// `commands_applied` so the hash reflects the command stream.
     fn apply(&mut self, pc: PlayerCommand) {
@@ -583,7 +620,6 @@ impl Sim {
             self.reject(&pc, RejectReason::Surrendered);
             return;
         }
-        let tick = self.state.tick;
         match &pc.cmd {
             Command::Surrender => {
                 if let Some(p) = self.state.players.iter_mut().find(|p| p.id == pc.player) {
@@ -593,31 +629,13 @@ impl Sim {
             Command::Move { units, target, .. } => {
                 // `queue` is ignored in M1: a unit holds one order. Queued
                 // orders arrive with the command card in M2.
-                let movers = self.owned_units(pc.player, units);
-                if movers.is_empty() {
-                    self.reject(&pc, RejectReason::NoValidUnits);
-                    return;
-                }
-                let targets = movement::group_targets(&self.state.map, *target, movers.len());
-                let repath_at = tick + self.rules.repath_interval_ticks();
-                for (unit, goal) in movers.into_iter().zip(targets) {
-                    let u = self.state.units.get_mut(&unit).expect("validated");
-                    u.order = Some(MoveOrder {
-                        goal,
-                        path: Vec::new(),
-                        next: 0,
-                        repath_at,
-                    });
-                    u.post = None;
-                    let from = self.state.map.tile_of(u.pos);
-                    let to = self.state.map.tile_of(goal);
-                    self.state.pathing.request(PathRequest {
-                        requested_tick: tick,
-                        unit,
-                        from,
-                        to,
-                    });
-                }
+                self.apply_move(&pc, units, *target);
+            }
+            Command::AttackMove { units, target } => {
+                // M2 placeholder: identical to Move until combat (M4a) adds
+                // target acquisition on the way. The sim must accept it so
+                // the game's A-then-click order never produces a rejection.
+                self.apply_move(&pc, units, *target);
             }
             Command::Stop { units } => {
                 let stopped = self.owned_units(pc.player, units);
@@ -682,8 +700,7 @@ impl Sim {
                     self.events.push(SimEvent::UnitSpawned { unit: id });
                 }
             }
-            Command::AttackMove { .. }
-            | Command::Attack { .. }
+            Command::Attack { .. }
             | Command::Gather { .. }
             | Command::Build { .. }
             | Command::Cancel { .. }

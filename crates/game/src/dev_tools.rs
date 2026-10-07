@@ -9,8 +9,10 @@ use bevy::text::FontSize;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
-use crate::app::SimHandle;
 use crate::camera::RtsCamera;
+use crate::present::UnitVisuals;
+use crate::selection::Selection;
+use crate::sim_driver::{DriverStats, PendingCommands, SimHandle};
 
 /// Adds every dev overlay. Never shipped.
 pub struct DevToolsPlugin;
@@ -42,10 +44,15 @@ impl Plugin for DevToolsPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one egui panel reads many resources
 fn sim_panel(
     mut contexts: EguiContexts,
     sim: NonSend<SimHandle>,
     fixed: Res<Time<Fixed>>,
+    stats: Res<DriverStats>,
+    pending: Res<PendingCommands>,
+    selection: Res<Selection>,
+    visuals: Res<UnitVisuals>,
     cameras: Query<&RtsCamera>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -69,8 +76,30 @@ fn sim_panel(
                 ui.label("overstep");
                 ui.monospace(format!("{:.2}", fixed.overstep_fraction()));
                 ui.end_row();
+                ui.label("ticks / frame");
+                ui.monospace(stats.ticks_last_frame.to_string());
+                ui.end_row();
                 ui.label("dropped ticks");
-                ui.monospace(sim.dropped_ticks.to_string());
+                ui.monospace(stats.dropped_ticks.to_string());
+                ui.end_row();
+                ui.label("stalled ticks");
+                ui.monospace(stats.stalled_ticks.to_string());
+                ui.end_row();
+                ui.label("units");
+                ui.monospace(sim.view().unit_count().to_string());
+                ui.end_row();
+                ui.label("selected");
+                ui.monospace(selection.units.len().to_string());
+                ui.end_row();
+                ui.label("pending cmds");
+                ui.monospace(pending.len().to_string());
+                ui.end_row();
+                ui.label("recorded cmds");
+                ui.monospace(stats.commands_recorded.to_string());
+                ui.end_row();
+                let (meshes, materials) = visuals.counts();
+                ui.label("meshes / materials");
+                ui.monospace(format!("{meshes} / {materials}"));
                 ui.end_row();
                 if let Ok(cam) = cameras.single() {
                     ui.label("focus");

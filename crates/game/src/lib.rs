@@ -1,0 +1,36 @@
+//! Eonmark's engine-side crate: the Bevy presentation layer. The `eonmark`
+//! binary (`src/main.rs`) is a thin wrapper that parses the command line and
+//! calls [`app::run`] or [`headless::run`]; everything else lives here as a
+//! library so integration tests (`tests/`) can drive the real `SimPlugin`.
+//!
+//! Module map (M2):
+//! - [`cli`]: hand-rolled argument parsing and data directory resolution.
+//! - [`app`]: the windowed Bevy app and plugin wiring.
+//! - [`sim_driver`]: `SimHandle`, the `FixedUpdate` driver, `InputSource`
+//!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
+//! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals.
+//! - [`selection`]: picking, click/box/group selection, rings and markers.
+//! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`.
+//! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
+//! - [`camera`]: the yaw-locked RTS camera.
+//! - [`ground`] and [`palette`]: the flat 128 x 128 m ground mesh and colours.
+//! - [`headless`]: `--headless-run <ticks | replay>` on `MinimalPlugins`.
+//! - `macos_menu`: muda menu with the custom Cmd-Q item (macOS only).
+//! - `dev_tools`: FPS overlay, egui inspector and sim panel (`dev` only).
+#![forbid(unsafe_code)]
+
+pub mod app;
+pub mod camera;
+pub mod cli;
+#[cfg(feature = "dev")]
+pub mod dev_tools;
+pub mod ground;
+pub mod headless;
+pub mod hud;
+#[cfg(target_os = "macos")]
+pub mod macos_menu;
+pub mod orders;
+pub mod palette;
+pub mod present;
+pub mod selection;
+pub mod sim_driver;

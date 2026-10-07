@@ -9,9 +9,13 @@
 //! [`DriverStats::flushes_sent`]) and the frame after it, where a blocking
 //! write would show up. `frames=<n> seconds=<s> fps=<f>` is the plain mean
 //! rate for the `--max-fps` check. With the arrival proxy on,
-//! `arrived=<n>/<total> by tick <t>` counts units within
-//! [`ARRIVED_TILES`] of the scenario's goal: `n` at exit, `t` the tick the
-//! count first reached `total` (or the exit tick when it never did).
+//! `arrived=<n>/<total> by tick <t>` counts units whose move order has
+//! completed and that hold a `Post` (the sim's own arrival state, what
+//! `UnitArrived` reported): `n` at exit, `t` the tick the count first
+//! reached `total` (or the exit tick when it never did). The next line,
+//! `within_3_tiles=<k>/<total>`, is the `sim-cli bench` gate (units within
+//! [`ARRIVED_TILES`] of the goal); 200 units of radius 0.35 cannot all pack
+//! into that circle, so it is informational for a single-point goal.
 
 use std::time::Duration;
 
@@ -21,7 +25,7 @@ use sim::FxVec2;
 
 use crate::sim_driver::{DriverStats, FLUSH_EVERY_TICKS, SimHandle};
 
-/// A unit counts as arrived within this many tiles of its goal, the same
+/// The `within_3_tiles` line counts units this close to the goal, the same
 /// gate `sim-cli bench` uses (docs/design/pathing.md). A measurement
 /// threshold for the proxy line, not a gameplay number.
 pub const ARRIVED_TILES: i64 = 3;
@@ -106,8 +110,10 @@ pub struct ArrivalProxy {
     pub goal: FxVec2,
     /// Units expected to arrive.
     pub total: u32,
-    /// Units within [`ARRIVED_TILES`] of `goal` after the latest tick.
+    /// Units holding a `Post` (order completed) after the latest tick.
     pub arrived: u32,
+    /// Units within [`ARRIVED_TILES`] of `goal` after the latest tick.
+    pub within: u32,
     /// First tick at which `arrived == total`.
     pub all_arrived_at: Option<u32>,
 }
@@ -119,16 +125,21 @@ impl ArrivalProxy {
             goal,
             total,
             arrived: 0,
+            within: 0,
             all_arrived_at: None,
         }
     }
 
-    /// Count after a tick; `tick` is the completed tick.
-    pub fn observe(&mut self, positions: impl Iterator<Item = FxVec2>, tick: u32) {
-        let arrived = positions
-            .filter(|pos| pos.dist_sq_i64(self.goal) <= ARRIVED_DIST_SQ)
-            .count();
-        self.arrived = u32::try_from(arrived).unwrap_or(u32::MAX);
+    /// Count after a tick from `(position, holds a post)` pairs; `tick` is
+    /// the completed tick.
+    pub fn observe(&mut self, units: impl Iterator<Item = (FxVec2, bool)>, tick: u32) {
+        let (mut arrived, mut within) = (0u32, 0u32);
+        for (pos, posted) in units {
+            arrived += u32::from(posted);
+            within += u32::from(pos.dist_sq_i64(self.goal) <= ARRIVED_DIST_SQ);
+        }
+        self.arrived = arrived;
+        self.within = within;
         if self.arrived >= self.total && self.all_arrived_at.is_none() {
             self.all_arrived_at = Some(tick);
         }
@@ -141,6 +152,14 @@ impl ArrivalProxy {
             self.arrived,
             self.total,
             self.all_arrived_at.unwrap_or(exit_tick)
+        )
+    }
+
+    /// The `within_3_tiles=...` line.
+    pub fn within_line(&self) -> String {
+        format!(
+            "within_{ARRIVED_TILES}_tiles={}/{}",
+            self.within, self.total
         )
     }
 }
@@ -172,7 +191,7 @@ fn sample_frame(time: Res<Time<Real>>, driver: Res<DriverStats>, mut stats: ResM
 
 fn observe_arrivals(sim: NonSend<SimHandle>, mut proxy: ResMut<ArrivalProxy>) {
     let view = sim.view();
-    proxy.observe(view.units().map(|u| u.pos), sim.tick());
+    proxy.observe(view.units().map(|u| (u.pos, u.post.is_some())), sim.tick());
 }
 
 fn print_on_exit(
@@ -197,6 +216,7 @@ fn print_on_exit(
     );
     if let Some(arrival) = arrival {
         println!("{}", arrival.line(sim.tick()));
+        println!("{}", arrival.within_line());
     }
 }
 
@@ -239,13 +259,19 @@ mod tests {
         let mut a = ArrivalProxy::new(goal, 2);
         let far = FxVec2::from_ints(10, 64);
         let near = FxVec2::from_ints(102, 65);
-        a.observe([far, near].into_iter(), 5);
-        assert_eq!(a.arrived, 1);
+        // One unit still walking (far, no post), one that arrived.
+        a.observe([(far, false), (near, true)].into_iter(), 5);
+        assert_eq!((a.arrived, a.within), (1, 1));
         assert_eq!(a.all_arrived_at, None);
         assert_eq!(a.line(5), "arrived=1/2 by tick 5");
-        a.observe([near, goal].into_iter(), 9);
+        assert_eq!(a.within_line(), "within_3_tiles=1/2");
+        // Both hold a post; one was pushed out of the 3-tile circle.
+        a.observe([(near, true), (far, true)].into_iter(), 9);
+        assert_eq!((a.arrived, a.within), (2, 1));
         assert_eq!(a.all_arrived_at, Some(9));
-        a.observe([far, far].into_iter(), 12);
+        // A Stop clears the posts; the first full tick is remembered.
+        a.observe([(far, false), (goal, false)].into_iter(), 12);
         assert_eq!(a.line(12), "arrived=0/2 by tick 9");
+        assert_eq!(a.within_line(), "within_3_tiles=1/2");
     }
 }

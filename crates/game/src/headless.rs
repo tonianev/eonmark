@@ -6,17 +6,16 @@
 //!
 //! `<path.eonreplay>` (M2): build the sim from the replay header, drive it
 //! with `sim_driver::ReplayInput` through `sim_driver::drive_tick` (no
-//! recorder), and when `ReplayFinished` arrives print the same
+//! recorder, no fixed clock), and when the source is finished print the same
 //! `tick=<n> hash=0x<16 hex>` line as the LAST stdout line and exit 0 if
 //! the recorded final hash matches, 1 otherwise. A `RULES CHANGED` or
 //! `SIM VERSION MISMATCH` header is reported on stderr with exit 1 before
-//! simulating, like `sim-cli verify`. Must finish `move_500` (1200 ticks)
-//! in under 10 s on the dev Mac in the `ci` profile: step as many ticks per
-//! `Update` as needed (never through `FixedUpdate`, which would be wall
-//! clock bound).
-//!
-//! Ownership (M2 contract): agent A owns the replay mode; it is stubbed
-//! here and prints `headless replay: not implemented` with exit 1.
+//! simulating, like `sim-cli verify`; a file that does not decode is
+//! `error: ...` with exit 2; a truncated recording (no clean-exit trailer)
+//! is replayed up to its last complete record with a `warning:` on stderr.
+//! `move_500` (1200 ticks) finishes in well under 10 s on the dev Mac in
+//! the `ci` profile because the runner steps [`REPLAY_TICKS_PER_UPDATE`]
+//! ticks per `Update` and never waits on wall time (`FixedUpdate` would).
 
 use std::path::Path;
 use std::time::Duration;
@@ -24,9 +23,20 @@ use std::time::Duration;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
 
+use sim::SIM_VERSION;
+use sim::replay::VerifyOutcome;
+
 use crate::app::load_rules;
 use crate::cli::{Cli, HeadlessRun};
-use crate::sim_driver::SimHandle;
+use crate::sim_driver::{
+    ActiveInput, DriverStats, HashCadence, PendingCommands, ReplayInput, SimHandle, TickOutcome,
+    drive_tick,
+};
+
+/// Ticks the replay runner steps per `Update` before letting the schedule
+/// run once more: large enough that the runner's per-update cost is noise,
+/// small enough that `AppExit` is seen promptly.
+pub const REPLAY_TICKS_PER_UPDATE: u32 = 256;
 
 #[derive(Resource)]
 struct Target(u32);
@@ -75,20 +85,103 @@ fn step_and_report(
 }
 
 /// `--headless-run <path.eonreplay>`. See the module docs for the contract.
-///
-/// M2-A: body to implement with `ReplayInput::open`, `SimHandle::from_setup`,
-/// `SimPlugin::new(handle, Box::new(input))` (not recording) or a direct
-/// `drive_tick` loop in `Update`, and a `MessageReader<ReplayFinished>`
-/// that prints `hash_line(final_tick, sim_hash)` last and exits 0/1.
 fn run_replay(cli: &Cli, path: &Path) -> AppExit {
-    let Some(_rules) = load_rules(cli) else {
+    let Some(rules) = load_rules(cli) else {
         return AppExit::error();
     };
-    eprintln!(
-        "eonmark: headless replay: not implemented (M2-A); asked for {}",
-        path.display()
-    );
-    AppExit::error()
+    let (setup, input) = match ReplayInput::open(path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return AppExit::from_code(2);
+        }
+    };
+    // Header checks in `sim-cli verify` order: version, then rules, before
+    // anything is simulated. Both lines are `VerifyOutcome`'s own text.
+    if setup.sim_version != SIM_VERSION {
+        eprintln!(
+            "{}",
+            VerifyOutcome::SimVersionMismatch {
+                replay: setup.sim_version,
+                binary: SIM_VERSION,
+            }
+        );
+        return AppExit::error();
+    }
+    if setup.rules_hash != rules.rules_hash() {
+        eprintln!(
+            "{}",
+            VerifyOutcome::RulesChanged {
+                replay: setup.rules_hash,
+                loaded: rules.rules_hash(),
+            }
+        );
+        return AppExit::error();
+    }
+    if let Some(warning) = input.truncation_warning() {
+        eprintln!("{warning}");
+    }
+    let handle = SimHandle::from_setup(setup, rules);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO)));
+    app.world_mut().insert_non_send(handle);
+    app.insert_resource(ActiveInput(Box::new(input)))
+        .insert_resource(HashCadence {
+            every: cli.hash_every(),
+        })
+        .init_resource::<PendingCommands>()
+        .init_resource::<DriverStats>()
+        .add_systems(Update, replay_and_report);
+    app.run()
+}
+
+/// Step up to [`REPLAY_TICKS_PER_UPDATE`] ticks; at the end of the
+/// recording print the hash line and exit 0 (match) or 1 (divergence).
+fn replay_and_report(
+    mut sim: NonSendMut<SimHandle>,
+    mut input: ResMut<ActiveInput>,
+    mut pending: ResMut<PendingCommands>,
+    cadence: Res<HashCadence>,
+    mut stats: ResMut<DriverStats>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for _ in 0..REPLAY_TICKS_PER_UPDATE {
+        match drive_tick(
+            &mut sim,
+            input.0.as_mut(),
+            &mut pending,
+            None,
+            *cadence,
+            &mut stats,
+        ) {
+            TickOutcome::Stepped { .. } => {}
+            TickOutcome::Stalled => {
+                // A replay source never stalls before its end; if one did,
+                // looping here would spin forever.
+                eprintln!("eonmark: replay source stalled at tick {}", sim.tick());
+                exit.write(AppExit::error());
+                return;
+            }
+            TickOutcome::Finished(f) => {
+                if !f.matches() {
+                    eprintln!(
+                        "DIVERGED at tick {} (recorded {:#018x}, re-simulated {:#018x})",
+                        f.final_tick,
+                        f.recorded_hash.unwrap_or_default(),
+                        f.sim_hash
+                    );
+                }
+                println!("{}", hash_line(f.final_tick, f.sim_hash));
+                exit.write(if f.matches() {
+                    AppExit::Success
+                } else {
+                    AppExit::error()
+                });
+                return;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

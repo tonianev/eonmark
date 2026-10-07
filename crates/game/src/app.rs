@@ -8,7 +8,7 @@
 //! skirmish with `LocalInput`. Every windowed session records a replay
 //! (decision 3) to `--replay-dir` or the platform data directory.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -17,6 +17,7 @@ use rules::Rules;
 use sim::scenarios;
 
 use crate::cli::Cli;
+use crate::frame_stats::FrameStatsPlugin;
 use crate::hud::HudPlugin;
 use crate::orders::OrdersPlugin;
 use crate::present::PresentPlugin;
@@ -69,16 +70,38 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
 #[derive(Resource)]
 struct ExitAfter(Duration);
 
-/// `--max-fps <n>`: minimum frame duration enforced by a sleep in `Last`.
-///
-/// M2-A: the limiter system is a stub; implement `limit_frame_rate` (sleep
-/// until `last_frame + 1/n`, spin for the final sub-millisecond) so camera
-/// travel and the `scripted_moves` 30 vs 120 fps hash check can be run.
+/// `--max-fps <n>`: minimum frame duration enforced by a sleep in `Last`
+/// (`limit_frame_rate`). The window runs without vsync under the cap so the
+/// display's refresh rate cannot quantise the frame period (a 33 ms sleep
+/// plus a 60 Hz vsync would settle at 50 ms, not 33); the sim is unaffected
+/// either way because `FixedUpdate` catches up.
 #[derive(Resource, Debug, Clone, Copy)]
-#[allow(dead_code)] // M2-A: remove once limit_frame_rate reads max_fps.
 pub struct FrameLimiter {
     /// Target frames per second.
     pub max_fps: u32,
+}
+
+impl FrameLimiter {
+    /// The frame period the limiter enforces.
+    pub fn period(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / f64::from(self.max_fps.max(1)))
+    }
+}
+
+/// `limit_frame_rate` sleeps until this much before the deadline and spins
+/// the rest: `thread::sleep` on macOS overshoots by up to about a
+/// millisecond, which at 30 fps would cost 3 %.
+const SPIN_MARGIN: Duration = Duration::from_micros(1200);
+
+/// When the deadline for the next frame should be, given the last deadline
+/// and the current time: the previous deadline plus one period (so sleep
+/// jitter does not accumulate), unless the frame overran by more than a
+/// period, in which case the clock resynchronises from `now`.
+pub fn next_deadline(previous: Option<Instant>, now: Instant, period: Duration) -> Instant {
+    match previous {
+        Some(prev) if now <= prev + period => prev + period,
+        _ => now + period,
+    }
 }
 
 /// `--screenshot <path>`: capture the primary window about one second
@@ -103,6 +126,13 @@ pub fn run(cli: &Cli) -> AppExit {
     let Some(rules) = load_rules(cli) else {
         return AppExit::error();
     };
+    let units200_auto = cli.scenario.as_deref() == Some("units200_auto");
+    // The `units200_auto` arrival proxy needs the scripted move's goal and
+    // the spawn count before `rules` moves into the match.
+    let arrival = units200_auto.then(|| {
+        let (_, stream) = scenarios::units200_auto(&rules);
+        (scenarios::EAST, spawn_total(&stream))
+    });
     let (handle, input) = match build_match(cli, rules) {
         Ok(pair) => pair,
         Err(message) => {
@@ -112,6 +142,11 @@ pub fn run(cli: &Cli) -> AppExit {
     };
     let replay_path = new_replay_path(&replay_dir(cli.replay_dir.as_deref()), handle.seed());
     let hud_click_check = cli.scenario.as_deref() == Some("hud_click");
+    let present_mode = if cli.max_fps.is_some() {
+        PresentMode::AutoNoVsync
+    } else {
+        PresentMode::AutoVsync
+    };
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -121,7 +156,7 @@ pub fn run(cli: &Cli) -> AppExit {
             title: "Eonmark".into(),
             // Logical size: winit reads this as a LogicalSize at creation.
             resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
-            present_mode: PresentMode::AutoVsync,
+            present_mode,
             ..default()
         }),
         ..default()
@@ -150,6 +185,13 @@ pub fn run(cli: &Cli) -> AppExit {
     if let Some(max_fps) = cli.max_fps {
         app.insert_resource(FrameLimiter { max_fps })
             .add_systems(Last, limit_frame_rate);
+    }
+
+    // Frame-time lines on exit: the `units200_auto` owner proxy (with the
+    // arrival count for its scripted move to EAST) and any `--max-fps` run,
+    // whose achieved rate they document.
+    if units200_auto || cli.max_fps.is_some() {
+        app.add_plugins(FrameStatsPlugin { arrival });
     }
 
     if let Some(secs) = cli.exit_after_seconds {
@@ -187,12 +229,36 @@ fn exit_after(
     }
 }
 
-/// Sleep in `Last` so the frame takes at least `1 / max_fps` seconds.
-///
-/// M2-A: body to implement (track the previous frame's `Instant` in a
-/// `Local`; the sim is unaffected because `FixedUpdate` catches up).
-fn limit_frame_rate(_limiter: Res<FrameLimiter>, _time: Res<Time<Real>>) {
-    // M2-A: see the doc comment.
+/// Units a scenario stream spawns: the sum of its `DebugSpawn` counts.
+pub fn spawn_total(stream: &scenarios::Stream) -> u32 {
+    stream
+        .iter()
+        .flat_map(|(_, cmds)| cmds.iter())
+        .map(|c| match &c.cmd {
+            sim::Command::DebugSpawn { count, .. } => u32::from(*count),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Sleep in `Last` so the frame takes at least `1 / max_fps` seconds: wait
+/// until the deadline set by the previous frame (sleep, then spin the last
+/// [`SPIN_MARGIN`]), then schedule the next deadline one period later.
+fn limit_frame_rate(limiter: Res<FrameLimiter>, mut deadline: Local<Option<Instant>>) {
+    let period = limiter.period();
+    let now = Instant::now();
+    if let Some(target) = *deadline
+        && now < target
+    {
+        let remaining = target - now;
+        if remaining > SPIN_MARGIN {
+            std::thread::sleep(remaining - SPIN_MARGIN);
+        }
+        while Instant::now() < target {
+            std::hint::spin_loop();
+        }
+    }
+    *deadline = Some(next_deadline(*deadline, Instant::now(), period));
 }
 
 /// Capture the primary window once `at_secs` has passed.
@@ -205,4 +271,39 @@ fn take_screenshot(
     _commands: Commands,
 ) {
     // M2-B: see the doc comment.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn units200_auto_spawns_200() {
+        let rules =
+            Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .unwrap();
+        let (_, stream) = scenarios::units200_auto(&rules);
+        assert_eq!(spawn_total(&stream), 200);
+        assert_eq!(spawn_total(&Vec::new()), 0);
+    }
+
+    #[test]
+    fn frame_limiter_period_and_deadlines() {
+        let period = FrameLimiter { max_fps: 30 }.period();
+        assert!((period.as_secs_f64() - 1.0 / 30.0).abs() < 1e-9);
+        assert_eq!(FrameLimiter { max_fps: 0 }.period(), Duration::from_secs(1));
+        let t0 = Instant::now();
+        // First frame: one period from now.
+        assert_eq!(next_deadline(None, t0, period), t0 + period);
+        // On time (or early): advance from the previous deadline, not from now.
+        let d1 = t0 + period;
+        assert_eq!(
+            next_deadline(Some(d1), d1 + Duration::from_millis(1), period),
+            d1 + period
+        );
+        assert_eq!(next_deadline(Some(d1), d1, period), d1 + period);
+        // Overran by more than a period: resynchronise from now.
+        let late = d1 + period + Duration::from_millis(5);
+        assert_eq!(next_deadline(Some(d1), late, period), late + period);
+    }
 }

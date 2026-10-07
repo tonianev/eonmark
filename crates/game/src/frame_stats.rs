@@ -8,7 +8,16 @@
 //! recorder flush (every [`FLUSH_EVERY_TICKS`], see
 //! [`DriverStats::flushes_sent`]) and the frame after it, where a blocking
 //! write would show up. `frames=<n> seconds=<s> fps=<f>` is the plain mean
-//! rate for the `--max-fps` check. With the arrival proxy on,
+//! rate for the `--max-fps` check. `worst_ms=<ms>@<s>s/f<n> ...` lists the
+//! [`WORST_FRAMES`] longest frames with the wall-clock second each ended at
+//! and its `FrameCount`, so a one-off stall can be placed in time and
+//! matched against the `debug` log (first ring and marker spawns). `window focused=<n>/<frames>
+//! occluded=<n>/<frames> events=...` says how many frames ran with the
+//! primary window focused and fully covered, and when that changed: an
+//! unfocused window runs Bevy's `reactive_low_power` 60 Hz update mode
+//! unless background mode switched to `continuous`, and a covered window is
+//! not presented at all on macOS, so both change what the frame times
+//! mean. With the arrival proxy on,
 //! `arrived=<n>/<total> by tick <t>` counts units whose move order has
 //! completed and that hold a `Post` (the sim's own arrival state, what
 //! `UnitArrived` reported): `n` at exit, `t` the tick the count first
@@ -20,7 +29,9 @@
 use std::time::Duration;
 
 use bevy::app::AppExit;
+use bevy::diagnostic::FrameCount;
 use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, WindowFocused, WindowOccluded};
 use sim::FxVec2;
 
 use crate::sim_driver::{DriverStats, FLUSH_EVERY_TICKS, SimHandle};
@@ -40,6 +51,12 @@ pub const STDOUT_PREFIX: &str = "frame_stats: ";
 /// Frames flagged after each flush: the flush frame itself and the next.
 const FLUSH_WINDOW_FRAMES: u8 = 2;
 
+/// How many of the longest frames the `worst_ms` line lists.
+pub const WORST_FRAMES: usize = 3;
+
+/// Window focus / occlusion changes kept for the `window` line.
+const MAX_WINDOW_EVENTS: usize = 12;
+
 /// Collected frame periods and flush attribution.
 #[derive(Resource, Debug, Default)]
 pub struct FrameStats {
@@ -51,6 +68,17 @@ pub struct FrameStats {
     flushes_seen: u32,
     /// Frames still to attribute to the latest flush.
     flush_window: u8,
+    /// The longest frames as `(ms, wall-clock seconds at the frame's end,
+    /// frame number)`, longest first, at most [`WORST_FRAMES`].
+    pub worst: Vec<(f64, f64, u32)>,
+    /// Frames sampled while the primary window had focus.
+    pub focused_frames: u32,
+    /// Frames sampled while the primary window was reported fully covered.
+    pub occluded_frames: u32,
+    /// The window is currently reported fully covered (`WindowOccluded`).
+    occluded: bool,
+    /// Focus and occlusion changes as `(label, seconds)`.
+    window_events: Vec<(&'static str, f64)>,
 }
 
 /// Mean, 95th percentile and maximum of the samples (milliseconds).
@@ -69,10 +97,16 @@ impl FrameStats {
     /// Record one frame period and attribute it to a flush window when due.
     /// `flushes_sent` is the driver's counter as of the frame that is
     /// running now; the period of that frame is the next sample, so a
-    /// change opens the window after this one.
-    pub fn record(&mut self, frame: Duration, flushes_sent: u32) {
+    /// change opens the window after this one. `at_secs` (wall clock at
+    /// the end of the frame) and `frame_no` place it on the `worst_ms` line.
+    pub fn record(&mut self, frame: Duration, flushes_sent: u32, at_secs: f64, frame_no: u32) {
         let ms = frame.as_secs_f64() * 1000.0;
         self.samples_ms.push(ms);
+        let slot = self.worst.partition_point(|(w, _, _)| *w >= ms);
+        if slot < WORST_FRAMES {
+            self.worst.insert(slot, (ms, at_secs, frame_no));
+            self.worst.truncate(WORST_FRAMES);
+        }
         if self.flush_window > 0 {
             self.flush_window -= 1;
             self.max_at_flush_ms = self.max_at_flush_ms.max(ms);
@@ -89,6 +123,53 @@ impl FrameStats {
         format!(
             "frame_ms mean={mean:.2} p95={p95:.2} max={max:.2} max_at_flush={:.2}",
             self.max_at_flush_ms
+        )
+    }
+
+    /// Count this frame's window state.
+    pub fn record_window(&mut self, focused: bool) {
+        self.focused_frames += u32::from(focused);
+        self.occluded_frames += u32::from(self.occluded);
+    }
+
+    /// Note a focus (`focused`) or occlusion (`occluded`) change at `secs`.
+    pub fn window_event(&mut self, label: &'static str, secs: f64) {
+        match label {
+            "occluded" => self.occluded = true,
+            "visible" => self.occluded = false,
+            _ => {}
+        }
+        if self.window_events.len() < MAX_WINDOW_EVENTS {
+            self.window_events.push((label, secs));
+        }
+    }
+
+    /// The `worst_ms=...` line.
+    pub fn worst_line(&self) -> String {
+        let frames: Vec<String> = self
+            .worst
+            .iter()
+            .map(|(ms, at, n)| format!("{ms:.2}@{at:.2}s/f{n}"))
+            .collect();
+        format!("worst_ms={}", frames.join(" "))
+    }
+
+    /// The `window ...` line.
+    pub fn window_line(&self) -> String {
+        let n = self.samples_ms.len();
+        let mut events: Vec<String> = self
+            .window_events
+            .iter()
+            .map(|(label, at)| format!("{label}@{at:.2}s"))
+            .collect();
+        if events.is_empty() {
+            events.push("none".to_string());
+        }
+        format!(
+            "window focused={}/{n} occluded={}/{n} events={}",
+            self.focused_frames,
+            self.occluded_frames,
+            events.join(",")
         )
     }
 
@@ -177,7 +258,7 @@ pub struct FrameStatsPlugin {
 impl Plugin for FrameStatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameStats>()
-            .add_systems(Update, sample_frame)
+            .add_systems(Update, (window_events, sample_frame).chain())
             .add_systems(Last, print_on_exit);
         if let Some((goal, total)) = self.arrival {
             app.insert_resource(ArrivalProxy::new(goal, total))
@@ -186,10 +267,43 @@ impl Plugin for FrameStatsPlugin {
     }
 }
 
-fn sample_frame(time: Res<Time<Real>>, driver: Res<DriverStats>, mut stats: ResMut<FrameStats>) {
+fn sample_frame(
+    time: Res<Time<Real>>,
+    frame: Res<FrameCount>,
+    driver: Res<DriverStats>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut stats: ResMut<FrameStats>,
+) {
     // The first frame's delta is zero (the clock has no previous update).
     if time.delta() > Duration::ZERO {
-        stats.record(time.delta(), driver.flushes_sent);
+        stats.record(
+            time.delta(),
+            driver.flushes_sent,
+            time.elapsed().as_secs_f64(),
+            frame.0,
+        );
+        stats.record_window(windows.single().is_ok_and(|w| w.focused));
+    }
+}
+
+/// Primary-window focus and occlusion changes, with their wall-clock time.
+fn window_events(
+    mut focus: MessageReader<WindowFocused>,
+    mut occlusion: MessageReader<WindowOccluded>,
+    primary: Query<(), With<PrimaryWindow>>,
+    time: Res<Time<Real>>,
+    mut stats: ResMut<FrameStats>,
+) {
+    let secs = time.elapsed().as_secs_f64();
+    for msg in focus.read() {
+        if primary.contains(msg.window) {
+            stats.window_event(if msg.focused { "focused" } else { "unfocused" }, secs);
+        }
+    }
+    for msg in occlusion.read() {
+        if primary.contains(msg.window) {
+            stats.window_event(if msg.occluded { "occluded" } else { "visible" }, secs);
+        }
     }
 }
 
@@ -213,6 +327,8 @@ fn print_on_exit(
     // `scripts/m2_checks.sh` (check 6) and docs/PLAYTEST.md grep for.
     println!("{STDOUT_PREFIX}{}", stats.frame_line());
     println!("{STDOUT_PREFIX}{}", stats.rate_line());
+    println!("{STDOUT_PREFIX}{}", stats.worst_line());
+    println!("{STDOUT_PREFIX}{}", stats.window_line());
     println!(
         "{STDOUT_PREFIX}ticks={} dropped_ticks={} stalled_ticks={} flushes={} (every {FLUSH_EVERY_TICKS} ticks)",
         sim.tick(),
@@ -245,11 +361,11 @@ mod tests {
     fn flush_window_covers_the_flush_frame_and_the_next() {
         let mut s = FrameStats::default();
         let f = |ms: u64| Duration::from_millis(ms);
-        s.record(f(10), 0); // quiet frame
-        s.record(f(10), 1); // the flush was sent in the frame measured NEXT
-        s.record(f(30), 1); // flush frame
-        s.record(f(25), 1); // frame after
-        s.record(f(90), 1); // outside the window
+        s.record(f(10), 0, 0.01, 1); // quiet frame
+        s.record(f(10), 1, 0.02, 2); // the flush was sent in the frame measured NEXT
+        s.record(f(30), 1, 0.05, 3); // flush frame
+        s.record(f(25), 1, 0.08, 4); // frame after
+        s.record(f(90), 1, 0.17, 5); // outside the window
         assert_eq!(s.max_at_flush_ms, 30.0);
         assert_eq!(s.samples_ms.len(), 5);
         assert_eq!(
@@ -257,6 +373,33 @@ mod tests {
             "frame_ms mean=33.00 p95=90.00 max=90.00 max_at_flush=30.00"
         );
         assert_eq!(s.rate_line(), "frames=5 seconds=0.17 fps=30.3");
+        assert_eq!(
+            s.worst_line(),
+            "worst_ms=90.00@0.17s/f5 30.00@0.05s/f3 25.00@0.08s/f4"
+        );
+    }
+
+    #[test]
+    fn window_line_counts_focus_and_occlusion() {
+        let mut s = FrameStats::default();
+        assert_eq!(
+            s.window_line(),
+            "window focused=0/0 occluded=0/0 events=none"
+        );
+        let f = Duration::from_millis(8);
+        s.record(f, 0, 0.1, 1);
+        s.record_window(true);
+        s.window_event("unfocused", 0.15);
+        s.window_event("occluded", 0.2);
+        s.record(f, 0, 0.2, 2);
+        s.record_window(false);
+        s.window_event("visible", 0.3);
+        s.record(f, 0, 0.3, 3);
+        s.record_window(false);
+        assert_eq!(
+            s.window_line(),
+            "window focused=1/3 occluded=1/3 events=unfocused@0.15s,occluded@0.20s,visible@0.30s"
+        );
     }
 
     #[test]

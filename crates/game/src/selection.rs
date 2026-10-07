@@ -241,6 +241,12 @@ impl Plugin for SelectionPlugin {
                     .in_set(WorldInputSet),
             )
             .add_systems(Update, draw_drag_box.after(WorldInputSet))
+            // Before `FrameCount` advances, so the frame number matches the
+            // one `frame_stats` records for this frame.
+            .add_systems(
+                Last,
+                log_first_gizmo_spawns.before(bevy::diagnostic::update_frame_count),
+            )
             .add_systems(
                 PostUpdate,
                 (prune_dead, sync_selection_rings)
@@ -627,6 +633,36 @@ pub fn spawn_move_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3,
         Transform::from_translation(Vec3::new(at.x, RING_Y, at.z))
             .with_scale(Vec3::splat(MOVE_MARKER_RADIUS)),
     ));
+}
+
+/// `debug` log of the frame and wall-clock time at which the first
+/// selection ring and the first move marker appeared: the first draw of a
+/// new kind of entity is where a synchronous pipeline compile would show,
+/// so a long frame in `frame_stats`' `worst_ms` line can be matched
+/// against these (`RUST_LOG=info,game=debug`).
+fn log_first_gizmo_spawns(
+    rings: Query<(), Added<SelectionRing>>,
+    markers: Query<(), Added<MoveMarker>>,
+    frame: Res<bevy::diagnostic::FrameCount>,
+    time: Res<Time<Real>>,
+    mut seen: Local<(bool, bool)>,
+) {
+    if !seen.0 && !rings.is_empty() {
+        seen.0 = true;
+        debug!(
+            "first selection ring spawned: frame {} at {:.2} s",
+            frame.0,
+            time.elapsed_secs_f64()
+        );
+    }
+    if !seen.1 && !markers.is_empty() {
+        seen.1 = true;
+        debug!(
+            "first move marker spawned: frame {} at {:.2} s",
+            frame.0,
+            time.elapsed_secs_f64()
+        );
+    }
 }
 
 /// Shrinks and despawns move markers past their expiry.

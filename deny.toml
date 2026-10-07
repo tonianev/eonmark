@@ -21,9 +21,10 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 # Every entry needs a reason. Re-check this list when bumping Bevy (M9).
 ignore = [
-  # M2 (muda menu): muda pulls gtk3 -> proc-macro-error (RUSTSEC-2024-0370,
-  # unmaintained, Linux target only, never compiled on macOS). Add an ignore
-  # entry for it here when muda lands.
+  # M2 (muda menu): the game crate pulls muda with `default-features = false`,
+  # so its gtk3 feature (the only path to gtk -> proc-macro-error,
+  # RUSTSEC-2024-0370) is off and no ignore entry is needed. Re-check if
+  # muda's features change (docs/DEPENDENCIES.md, cargo-deny table).
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained (not a vulnerability). Reached only through sctk-adwaita <- winit (Wayland client-side decorations) on the Linux target; a fix must come from winit/Bevy upstream." },
 ]
 

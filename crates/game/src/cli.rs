@@ -27,6 +27,14 @@ Options:
   --hash-every-tick            Record a hash checkpoint every tick instead of every 20.
   --screenshot <PATH>          Dev builds: save a PNG of the window about one second
                                before --exit-after-seconds fires.
+  --quit-via-menu-after-seconds <S>
+                               Dev builds, macOS: after S seconds feed the `Quit Eonmark`
+                               menu id through the same path a real Cmd-Q takes
+                               (AppExit::Success, replay trailer). Ignored elsewhere.
+  --close-window-after-seconds <S>
+                               Dev builds: after S seconds request the primary window to
+                               close, the path the red close button takes (bevy_window
+                               despawns it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
   --seed <U64>                 Match seed (default 1).
   --data-dir <PATH>            Override the data directory (default: see below).
@@ -85,6 +93,13 @@ pub struct Cli {
     pub hash_every_tick: bool,
     /// `--screenshot <path>`.
     pub screenshot: Option<PathBuf>,
+    /// `--quit-via-menu-after-seconds <s>`: the automated Cmd-Q proxy
+    /// (`macos_menu`, dev builds on macOS). Parsed everywhere so the flag
+    /// is never "unknown"; other configurations print a note and ignore it.
+    pub quit_via_menu_after_seconds: Option<f64>,
+    /// `--close-window-after-seconds <s>`: the automated red-close-button
+    /// proxy (`app::close_window_after`).
+    pub close_window_after_seconds: Option<f64>,
 }
 
 impl Default for Cli {
@@ -99,6 +114,8 @@ impl Default for Cli {
             replay_dir: None,
             hash_every_tick: false,
             screenshot: None,
+            quit_via_menu_after_seconds: None,
+            close_window_after_seconds: None,
         }
     }
 }
@@ -154,6 +171,20 @@ impl Cli {
                 "--replay-dir" => cli.replay_dir = Some(parse_path(&arg, args.next())?),
                 "--hash-every-tick" => cli.hash_every_tick = true,
                 "--screenshot" => cli.screenshot = Some(parse_path(&arg, args.next())?),
+                "--quit-via-menu-after-seconds" => {
+                    let secs: f64 = parse_value(&arg, args.next())?;
+                    if !secs.is_finite() || secs < 0.0 {
+                        return Err(format!("{arg}: expected a non-negative number"));
+                    }
+                    cli.quit_via_menu_after_seconds = Some(secs);
+                }
+                "--close-window-after-seconds" => {
+                    let secs: f64 = parse_value(&arg, args.next())?;
+                    if !secs.is_finite() || secs < 0.0 {
+                        return Err(format!("{arg}: expected a non-negative number"));
+                    }
+                    cli.close_window_after_seconds = Some(secs);
+                }
                 other => return Err(format!("unknown argument `{other}`")),
             }
         }
@@ -163,6 +194,16 @@ impl Cli {
             }
             if cli.screenshot.is_some() {
                 return Err("--screenshot needs a window; drop --headless-run".into());
+            }
+            if cli.quit_via_menu_after_seconds.is_some() {
+                return Err(
+                    "--quit-via-menu-after-seconds needs a window; drop --headless-run".into(),
+                );
+            }
+            if cli.close_window_after_seconds.is_some() {
+                return Err(
+                    "--close-window-after-seconds needs a window; drop --headless-run".into(),
+                );
             }
         }
         Ok(Parsed::Run(cli))
@@ -266,6 +307,8 @@ mod tests {
                 replay_dir: Some(PathBuf::from("/tmp/replays")),
                 hash_every_tick: true,
                 screenshot: None,
+                quit_via_menu_after_seconds: None,
+                close_window_after_seconds: None,
             })
         );
         let Parsed::Run(cli) = parsed else {
@@ -294,6 +337,44 @@ mod tests {
                 ..Cli::default()
             })
         );
+    }
+
+    #[test]
+    fn quit_via_menu_proxy_flag_parses() {
+        let parsed = parse(&[
+            "--quit-via-menu-after-seconds",
+            "3",
+            "--exit-after-seconds",
+            "20",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Parsed::Run(Cli {
+                quit_via_menu_after_seconds: Some(3.0),
+                exit_after_seconds: Some(20.0),
+                ..Cli::default()
+            })
+        );
+        assert!(parse(&["--quit-via-menu-after-seconds"]).is_err());
+        assert!(parse(&["--quit-via-menu-after-seconds", "-1"]).is_err());
+        assert!(parse(&["--quit-via-menu-after-seconds", "soon"]).is_err());
+        assert!(parse(&["--headless-run", "10", "--quit-via-menu-after-seconds", "1"]).is_err());
+    }
+
+    #[test]
+    fn close_window_proxy_flag_parses() {
+        let parsed = parse(&["--close-window-after-seconds", "2.5"]).unwrap();
+        assert_eq!(
+            parsed,
+            Parsed::Run(Cli {
+                close_window_after_seconds: Some(2.5),
+                ..Cli::default()
+            })
+        );
+        assert!(parse(&["--close-window-after-seconds"]).is_err());
+        assert!(parse(&["--close-window-after-seconds", "-1"]).is_err());
+        assert!(parse(&["--headless-run", "10", "--close-window-after-seconds", "1"]).is_err());
     }
 
     #[test]

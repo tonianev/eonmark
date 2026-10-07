@@ -786,7 +786,15 @@ impl Plugin for SimPlugin {
             .add_systems(Startup, configure_virtual_time)
             .add_systems(PreUpdate, reset_frame_budget)
             .add_systems(FixedUpdate, step_sim.in_set(SimSystems::Step))
-            .add_systems(Last, finish_recorder_on_exit);
+            // After `bevy_window::ExitSystems`: the red close button's
+            // `AppExit` is written by `exit_on_all_closed` in `Last`, and the
+            // winit runner exits right after this frame, so the recorder must
+            // run later in `Last` or the trailer is skipped. The set is only
+            // a label when `WindowPlugin` is absent (headless), which is fine.
+            .add_systems(
+                Last,
+                finish_recorder_on_exit.after(bevy::window::ExitSystems),
+            );
     }
 }
 
@@ -896,10 +904,13 @@ fn step_sim(
     }
 }
 
-/// Runs in `Last`: on the frame an `AppExit` was written, record a final
-/// hash checkpoint, send `Finish` and join the writer (bounded wait). The
-/// winit runner checks `App::should_exit` only after the frame, so this
-/// system always sees the message first.
+/// Runs in `Last`, after `bevy_window::ExitSystems`: on the frame an
+/// `AppExit` was written, record a final hash checkpoint, send `Finish` and
+/// join the writer (bounded wait). The winit runner checks
+/// `App::should_exit` only after the frame, so this system sees messages
+/// written in `Update` (Cmd-Q, `--exit-after-seconds`) and, thanks to the
+/// ordering, the one `exit_on_all_closed` writes in `Last` for the close
+/// button (verified with `--close-window-after-seconds`, M2-C).
 fn finish_recorder_on_exit(
     mut exits: MessageReader<AppExit>,
     sim: NonSend<SimHandle>,

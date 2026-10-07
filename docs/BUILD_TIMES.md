@@ -27,9 +27,12 @@ This document records measured build, test and CI wall times on the development 
 | `cargo clippy -p sim -p rules -p ai -p sim-cli --all-targets` | 2026-10-05 | same | 0.37 | Warm. |
 | `cargo run -q -p sim-cli -- data-check data` | 2026-10-05 | same | 1.8 | Warm target dir, debug profile. |
 | `cargo deny check` | 2026-10-05 | same | about 5 | Warm advisory database. |
-| `cargo run -p game --profile ci -- --headless-run 200` | 2026-10-05 | same | 3.65 | Including cargo. Budget: under 10 s. M2 switches to a replay fixture. |
+| `cargo run -p game --profile ci -- --headless-run 200` | 2026-10-05 | same | 3.65 | Including cargo. Budget: under 10 s. M2 switched CI to the replay fixture row below. |
+| `cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay` (1200 ticks, 500 units; the CI hash-parity step since M2) | TBD (M2 integration) | same | TBD (M2 integration) | Budget: under 10 s (ROADMAP M2 acceptance). Measured by `scripts/m2_checks.sh` check 1 with `M2_CHECKS_CI_PROFILE=1` (`/usr/bin/time -p` on the built binary, so cargo is excluded); record the dev-build figure in Notes. |
+| `cargo test -p game` (`tests/headless_replay.rs`: `move_500_short` through `SimPlugin` on `MinimalPlugins`, one tick per update) | TBD (M2 integration) | same | TBD (M2 integration) | Budget: a few seconds for the non-ignored test; the 1200-tick variant is `#[ignore]`. |
 | `just ci`, everything warm | 2026-10-05 | same | 7.5 | All steps cached; the cost is the gates themselves, not compilation. |
 | Windowed `dev` build, FPS overlay | 2026-10-05 | same | 89-120 fps | 1280x800 logical (Retina 2x), AutoVsync on a 120 Hz display. |
+| Windowed `dev` build, `--scenario units200_auto` frame time (200 Yeomen crossing the map; `frame_stats:` lines printed on exit) | TBD (M2 integration) | same | mean TBD ms, p95 TBD ms, max TBD ms, dropped ticks TBD | Proxy for the ROADMAP M2 line "FPS >= 60, no periodic hitch at the 1 s replay flush": mean under 16.7 ms and p95 well under 33 ms with 0 dropped ticks. From `scripts/m2_checks.sh` check 6 (`--exit-after-seconds 65`, `--replay-dir` in the scratch dir). |
 
 ## CI job wall times
 

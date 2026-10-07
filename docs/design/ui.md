@@ -1,6 +1,6 @@
 # HUD, menus, picking and controls
 
-This document specifies the shipped user interface of Eonmark: the `bevy_ui` HUD and its panels, the three menus, the picking rules that keep HUD clicks and world clicks apart, the control scheme, the camera, HiDPI handling, how health bars and selection rings are drawn, and the developer-only egui panels. Shipped builds use `bevy_ui` only; `bevy_egui` and `bevy-inspector-egui` exist behind the `dev` feature and never reach a release. Everything here lives in `crates/game` (`hud/`, `menu/`, `selection.rs`, `orders.rs`, `camera.rs`, `present.rs`, `dev_tools.rs`).
+This document specifies the shipped user interface of Eonmark: the `bevy_ui` HUD and its panels, the three menus, the picking rules that keep HUD clicks and world clicks apart, the control scheme, the camera, HiDPI handling, how health bars and selection rings are drawn, and the developer-only egui panels. Shipped builds use `bevy_ui` only; `bevy_egui` and `bevy-inspector-egui` exist behind the `dev` feature and never reach a release. Everything here lives in `crates/game` (`hud.rs`, `selection.rs`, `orders.rs`, `camera.rs`, `present.rs`, `macos_menu.rs`, `dev_tools.rs`; `menu/` arrives with the main menu in M5b). The M2 state is marked inline: the HUD is a skeleton (two bars and one button), selection and orders are complete, menus and states do not exist yet.
 
 Area: `area:ui` and `area:game`. Milestones: M2 (selection, orders, camera, HUD skeleton), M3b (command card, resource bar, build ghost), M4b (research panel, age indicator, health bars), M6 (speed, pause, New Game selector, game-over stats), M7 (minimap, menus, fonts, panels). See [../ROADMAP.md](../ROADMAP.md).
 
@@ -24,7 +24,9 @@ Area: `area:ui` and `area:game`. Milestones: M2 (selection, orders, camera, HUD 
 
 ## HUD layout
 
-The HUD is a fixed set of `bevy_ui` nodes. Layout-only root nodes carry `Pickable::IGNORE` so they do not swallow clicks; panels that show content block world picking, which is the `bevy_ui` default, so a click on a panel never becomes a ground order.
+The HUD is a fixed set of `bevy_ui` nodes. Layout-only root nodes carry `Pickable::IGNORE` so they do not swallow clicks; panels that show content block world picking, which is the `bevy_ui` default (`UiPickingSettings::require_markers` is `false`, so every `Node` without `Pickable::IGNORE` blocks lower entities), so a click on a panel never becomes a ground order.
+
+M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`HudRoot`), a top bar of `TOP_BAR_HEIGHT_PX` = 28 logical px (`TopBar`), a bottom bar of `BOTTOM_BAR_HEIGHT_PX` = 96 px (`BottomBar`), and one `Button` of 72 x 28 px labelled Stop (`StopButton`) that issues `Command::Stop` for the selection through `PendingCommands::push_local` on `Interaction::Pressed`. Both bars keep the picking default and so block the ground. Colours come from `palette::HUD_*`, sizes are authored in `Val::Px`. The table below is the full v0.1 HUD; every panel in it replaces or fills these two bars in later milestones.
 
 | Region | Panel | Contents |
 | --- | --- | --- |
@@ -47,7 +49,9 @@ The infinite-queue toggle on training buildings repeats the last trained kind wh
 | Pause menu | Esc during a match | Resume, UI scale, volume, Borderless fullscreen toggle (`WindowMode::BorderlessFullscreen` with `Window::borderless_game`; exclusive fullscreen is never used), Quit to menu. The sim does not tick while this menu is open. |
 | Game over | `Sim::outcome()` returns `Some` | Victory or Defeat, decisive or tiebreak, duration, units lost by kind, Towns annexed, ages reached, minutes spent at the Yield Cap, the replay's final hash and file name, Play Again (same settings, new seed), Main menu. |
 
-States: `Menu`, `Skirmish`, `Paused`, `GameOver` in `app.rs`. Pause through the menu and pause through Space are the same sim state; the menu adds the overlay.
+States: `Menu`, `Skirmish`, `Paused`, `GameOver` in `app.rs`, arriving with the menus (M5b New Game, M6 pause and game over); at M2 the app starts straight into a skirmish (or the `--scenario`) and has no states. Pause through the menu and pause through Space are the same sim state; the menu adds the overlay.
+
+The macOS application menu (M2, `macos_menu.rs`) is not a `bevy_ui` menu: it is a native muda menu whose only custom item is `Quit Eonmark` (id `quit`, Cmd+Q) routed to `AppExit::Success`; see [macos-packaging.md](macos-packaging.md).
 
 ## Picking rules
 
@@ -61,12 +65,13 @@ Mesh picking is expensive if every mesh is a candidate on every pointer move. Th
 | Ground clicks | one ray-plane intersection with the y = 0 plane in `orders.rs`; never a mesh raycast against the terrain |
 | Drag box | project each sim unit position to screen space and test against the rectangle; no per-mesh raycasts; done in `selection.rs` |
 | Click on HUD | consumed by the HUD; no world order, no deselection |
+| `PointerOverUi` | `hud::PointerOverUi(bool)`, derived in `PreUpdate` after `PickingSystems::Hover` from `bevy_picking::hover::HoverMap`: `true` when any entity hovered by `PointerId::Mouse` has a `Node`. `orders.rs` and `selection.rs` read it in `Update` and skip world input while it is set, so a press that starts on a panel never becomes a drag box or an order |
 
-The M2 acceptance checks the last row with the `hud_click` scenario.
+The M2 acceptance checks the last two rows with `--scenario hud_click` (`hud::HudClickCheck`): the game spawns 20 units, selects them, then writes synthetic `bevy_picking::pointer::PointerInput` messages (move, press, release) over the bottom bar and then over the Stop button, the same messages the real mouse produces. It asserts that no `Move` was queued and that the selection is unchanged, prints `hud_click: ok` and exits 0, or prints `hud_click: FAIL <why>` and exits 1 (`hud::verdict_line`). `scripts/m2_checks.sh` runs it.
 
 ## Controls
 
-Keys the design fixes are given as such. Keys marked "proposed" are not fixed by the design; M2 writes the keybinding table and the `dev` hotkey cheat-sheet is generated from it.
+Keys the design fixes are given as such. Keys marked "proposed" are not fixed by the design; M2 fixed S (Stop), A (attack-move) and Esc (clear selection, cancel attack-move) in `orders.rs` and `selection.rs`; the `dev` hotkey cheat-sheet generated from this table is a `good first issue`. Where an action reads more than one key, the row names the module.
 
 | Action | Input | Milestone |
 | --- | --- | --- |
@@ -77,20 +82,21 @@ Keys the design fixes are given as such. Keys marked "proposed" are not fixed by
 | Assign control group | ctrl + 1 to 9 | M2 |
 | Recall control group | 1 to 9 | M2 |
 | Context order (move, attack, gather, build site confirm, rally when a building is selected) | right click on ground or target | M2, M3b |
-| Attack-move | A, then left click a point | M4b |
-| Stop | S (proposed) | M2 |
+| Attack-move | A, then left click a point (`orders::OrderMode::AttackMove`; Esc or a right click cancels). M2 ships it as a placeholder: the sim applies `Command::AttackMove` exactly like `Move` until combat lands in M4a | M2 (placeholder), M4a (real) |
+| Stop | S (`orders.rs`; also the Stop button on the bottom bar) | M2 |
 | Set rally point | right click with a training building selected | M3b |
 | Infinite queue toggle | button on the command card; key proposed Q | M3b |
 | Select next idle Yeoman | key proposed period (.) | M3b |
 | Pause | Space | M6 |
 | Game speed x1 / x2 / x4 | proposed minus and equals to step down and up | M6 |
-| Pause menu | Esc | M2 |
-| Camera pan | W A S D, arrow keys, edge scroll, two-finger trackpad scroll (`MouseScrollUnit::Pixel`) | M2 |
+| Clear selection, cancel attack-move | Esc (`selection::clear_selection_on_escape`, `orders::order_mode_keys`) | M2 |
+| Pause menu | Esc (the same key once the menu exists; it then also clears the selection) | M6 |
+| Camera pan | W A S D, arrow keys, edge scroll, two-finger trackpad scroll (`MouseScrollUnit::Pixel`) (`camera.rs`; S and A are shared with Stop and attack-move, see Open questions) | M2 |
 | Camera zoom | mouse wheel (`MouseScrollUnit::Line`), trackpad pinch (`PinchGesture`, Bevy `gestures` feature) | M2 |
 | Camera jump | left click on the minimap | M7 |
 | Order via minimap | right click on the minimap | M7 |
 
-The macOS Cmd+Q menu item quits cleanly through Bevy; see [macos-packaging.md](macos-packaging.md). Edge-scroll margin and camera speed moving into `rules.ron` is a `good first issue`.
+The macOS Cmd+Q menu item (`Quit Eonmark`, id `quit`) quits cleanly through Bevy's `AppExit`; see [macos-packaging.md](macos-packaging.md). Control groups: ctrl+1 to 9 assign, 1 to 9 recall (`selection::control_groups`, `Selection::groups`). Double-click selects every unit of the clicked kind whose projected position lies inside `Camera::logical_viewport_rect`. Edge-scroll margin and camera speed moving into `rules.ron` is a `good first issue`.
 
 ## Camera
 
@@ -106,13 +112,15 @@ Text uses the Inter variable font through a variable `TextFont`; the OFL license
 
 ## Health bars, rings and markers
 
-Health bars and selection rings are separate flat entities keyed by `UnitId`, never children of moving unit entities. This keeps unit transforms flat, lets bars be billboarded and scaled by distance independently, and avoids re-parenting when a unit dies. Selection rings and move markers are retained gizmos; `ClusteredDecal` is unavailable on Metal and is not used. The attrition indicator and supply radius ring (M5a) and the annexation timer (M5a) are drawn the same way. Bars follow the owner's fog visibility (see [fog.md](fog.md)).
+Health bars and selection rings are separate flat entities keyed by `UnitId`, never children of moving unit entities. This keeps unit transforms flat, lets bars be billboarded and scaled by distance independently, and avoids re-parenting when a unit dies. Selection rings and move markers are retained gizmos; `ClusteredDecal` is unavailable on Metal and is not used.
+
+M2 (`selection.rs`, done): two `GizmoAsset` circles are built once in `create_ring_assets` (`RingAssets { selection, marker }`, radius `RING_RADIUS_PER_UNIT_RADIUS` = 1.4 times the unit's collision radius, laid flat with `present::flat_on_ground()`, colours `palette::SELECTION_RING` and `palette::MOVE_MARKER`). `sync_selection_rings` keeps one `(SelectionRing(UnitId), Gizmo, Transform)` entity per selected unit and moves it to the unit's interpolated position each frame; `spawn_move_marker` places a `MoveMarker { expires_at }` ring at the order point and `expire_move_markers` despawns it. Units themselves are one shared mesh and one material per `(kind, team)` (`present::UnitVisuals`), tinted with `palette::TEAM[slot]`. The attrition indicator and supply radius ring (M5a) and the annexation timer (M5a) are drawn the same way. Bars follow the owner's fog visibility (see [fog.md](fog.md)).
 
 Health bars appear in M4b together with distinct primitive silhouettes per unit kind; from M7 the primitives are replaced by glTF through `data/visuals.ron` without touching the HUD.
 
 ## Developer-only panels
 
-Behind the `dev` cargo feature only: `bevy/bevy_dev_tools`, `bevy_egui` 0.40.1 and `bevy-inspector-egui` 0.37.0. They provide the FPS overlay, the frame-time graph, the `Sim::hash()` and sub-hash readout, the draw-call counter with its 500 budget, a world inspector, and tuning panels. `--stress N` spawns N units for profiling. `cargo clippy -p game --features dev` runs in CI so the feature does not rot, and `bundle.sh` fails if `bevy_dylib` is linked, so no dev build ships. No gameplay UI may depend on egui.
+Behind the `dev` cargo feature only: `bevy/bevy_dev_tools`, `bevy_egui` 0.40.1 and `bevy-inspector-egui` 0.37.0. They provide the FPS overlay, the frame-time graph, the `Sim::hash()` and sub-hash readout, the draw-call counter with its 500 budget, a world inspector, and tuning panels. At M2 the Sim panel also shows `sim_driver::DriverStats` (ticks this and last frame, stalled and dropped ticks, commands recorded), the selection size, pending commands and the mesh and material counts. `--scenario units200` is the 200-unit stress case (`--stress N` was never built). `cargo clippy -p game --features dev` runs in CI so the feature does not rot, and `bundle.sh` fails if `bevy_dylib` is linked, so no dev build ships. No gameplay UI may depend on egui.
 
 ## Interactions with other systems
 
@@ -162,7 +170,7 @@ cargo run --release -p game -- --scenario economy_walkthrough
 
 ## Open questions
 
-- Final keys for Stop, infinite queue, idle Yeoman and the speed steps. Proposed above; M2 fixes them in the keybinding table and the `dev` cheat-sheet is generated from that table.
+- Key overlap between camera pan and unit orders: M2 fixed S = Stop and A = attack-move while `camera.rs` also pans on W/A/S/D, so with units selected S both pans the camera down and stops them, and A pans left and arms attack-move. Options: pan on arrow keys and edge scroll only, move Stop and attack-move to other keys, or make the order keys win when a selection exists. Owner decision before M3b, when the command card adds more keys. Keys for infinite queue, idle Yeoman and the speed steps remain proposed.
 - Whether the minimap draws the camera's view rectangle. Not in the design; cheap to add in M7 if the owner wants it.
 - Whether game speed x1/x2/x4 ships in release builds or stays `dev`-only. Listed as an owner decision in [../ROADMAP.md](../ROADMAP.md); this document assumes release.
 - Tooltip delay and whether tooltips also appear on enabled buttons (cost breakdown). M3b decides; `good first issue` for hover states exists.

@@ -4,33 +4,75 @@ This document holds two things: the controls checklist that closes M2, and the m
 
 ## Controls checklist (M2)
 
-Run `cargo run -p game --features dev` from `main`. Mark each row Pass or Fail with the date and the commit short sha.
+Run `cargo run -p game --features dev -- --scenario units200` from `main` (200 Yeomen at the west start, nothing scripted: you drive). Mark each row Pass or Fail with the date, the commit short sha and your initials in the Signed column; a row without initials is not signed off. The Proxy column names the automated check that already covers the row (see [Automated proxies](#automated-proxies-m2)); `owner` means only a human can check it.
 
-| Control | Expected | Pass/Fail | Date | Commit | Notes |
-|---|---|---|---|---|---|
-| Two-finger trackpad scroll | Pans the camera; arrives as `MouseScrollUnit::Pixel` | | | | |
-| Pinch on trackpad | Zooms between 15 m and 60 m with smoothing | | | | |
-| Mouse wheel | Zooms; arrives as `MouseScrollUnit::Line` | | | | |
-| W, A, S, D | Pans the camera | | | | |
-| Arrow keys | Pans the camera | | | | |
-| Edge scroll | Cursor at a screen edge pans in that direction | | | | |
-| Camera travel at 30 fps and 120 fps | Holding D for 2 s moves the camera the same distance under `--max-fps 30` and `--max-fps 120` | | | | |
-| Left click on a unit | Selects it; selection ring appears | | | | |
-| Shift-click on a unit | Adds to or removes from the selection | | | | |
-| Drag box | Selects every own unit whose position projects inside the box | | | | |
-| Double-click a unit | Selects every unit of the same kind visible on screen | | | | |
-| Ctrl+1 | Assigns the selection to group 1 | | | | |
-| 1 | Recalls group 1 | | | | |
-| Right-click on ground | Issues Move; move marker appears; units arrive | | | | |
-| Shift+right-click | Queues a Move after the current one | | | | |
-| S | Stop | | | | |
-| Esc | Clears the selection (pause menu from M6) | | | | |
-| Close via the red window button | Process exits with code 0 (`echo $?`) | | | | |
-| Cmd-Q | Same as above through the menu item, and the replay is complete | | | | |
-| `kill -9` the process mid-match, then `sim-cli verify` on its replay | `OK`; at most one second of commands lost | | | | |
-| Window resize | HUD stays anchored; world picking still correct | | | | |
+| Control | Expected | Proxy | Pass/Fail | Date | Commit | Signed | Notes |
+|---|---|---|---|---|---|---|---|
+| Two-finger trackpad scroll | Pans the camera; arrives as `MouseScrollUnit::Pixel` | owner | | | | | |
+| Pinch on trackpad | Zooms between 15 m and 60 m with smoothing | owner | | | | | |
+| Mouse wheel | Zooms; arrives as `MouseScrollUnit::Line` | owner | | | | | |
+| W, A, S, D | Pans the camera. Note: with units selected, S also issues Stop and A also arms attack-move (`camera.rs` and `orders.rs` both read the key); the key overlap is an open question in [design/ui.md](design/ui.md) | owner | | | | | |
+| Arrow keys | Pans the camera | owner | | | | | |
+| Edge scroll | Cursor at a screen edge pans in that direction | owner | | | | | |
+| Camera travel at 30 fps and 120 fps | Holding D for 2 s moves the camera the same distance under `--max-fps 30` and `--max-fps 120` | `scripted_moves` 30 vs 120 hash equality (sim side); camera distance is owner | | | | | |
+| Left click on a unit | Selects it; a flat ring appears under it | owner | | | | | |
+| Shift-click on a unit | Adds to or removes from the selection | owner | | | | | |
+| Drag box | Selects every own unit whose position projects inside the box | owner | | | | | |
+| Double-click a unit | Selects every unit of the same kind visible on screen | owner | | | | | |
+| Ctrl+1 | Assigns the selection to group 1 | unit tests in `selection.rs` | | | | | |
+| 1 | Recalls group 1 | unit tests in `selection.rs` | | | | | |
+| Right-click on ground | Issues Move; a short-lived marker ring appears at the click point; units arrive | `units200_auto` (scripted Move, frame stats) | | | | | |
+| Shift+right-click | Queues a Move after the current one | owner | | | | | |
+| S | Stop for the selection | `scripted_moves` (Stop during tick 400) | | | | | |
+| A, then left click on ground | Attack-move placeholder: the units move exactly as with Move (the sim treats `AttackMove` like `Move` until M4a); Esc or a right click before the click cancels the mode | `scripted_moves` (AttackMove during tick 450) | | | | | |
+| Esc | Clears the selection and leaves attack-move mode (the pause menu arrives in M6) | owner | | | | | |
+| Right-click with the pointer over the bottom bar | No Move is issued, no marker appears | `hud_click` | | | | | |
+| Click the Stop button | The selection is unchanged; the units stop | `hud_click` | | | | | |
+| Close via the red window button | Process exits with code 0 (`echo $?`); the replay has its trailer | `--close-window-after-seconds` | | | | | |
+| Cmd-Q | Same as above through the `Quit Eonmark` menu item; see [Cmd-Q](#cmd-q-m2) | `--quit-via-menu-after-seconds` | | | | | |
+| `kill -9` the process mid-match, then `sim-cli verify` on its replay | `warning:` about the missing trailer, then `OK`; at most one second of commands lost | `scripts/m2_checks.sh` step 4 | | | | | |
+| Window resize | HUD stays anchored; world picking still correct | owner | | | | | |
 
-The replay directory is `~/Library/Application Support/com.tonianev.Eonmark/replays/` unless `--replay-dir` was passed. The exact path is printed at startup.
+Every windowed session records a replay. The directory is `~/Library/Application Support/com.tonianev.Eonmark/replays/` unless `--replay-dir <dir>` was passed, and the file is `<yyyymmdd-hhmmss>-<seed>.eonreplay` (UTC wall clock, then the match seed). The exact path is the `replay: <path>` line on stdout at startup, so a run started from a terminal tells you which file to verify.
+
+## Cmd-Q (M2)
+
+What the menu item does. `crates/game/src/macos_menu.rs` replaces winit's default application menu with a muda menu whose Quit item is a custom `MenuItem` (id `quit`, label `Quit Eonmark`, accelerator Cmd+Q). Activating it only emits a `MenuEvent`; the `drain_menu_events` system reads it on the AppKit main thread and writes `AppExit::Success`. On that same frame `finish_recorder_on_exit` (in `Last`) records a final hash checkpoint, sends `Finish` to the replay writer thread and joins it, so the file ends with the `EONRDONE` trailer and `sim-cli verify` prints `OK` without a `warning:`. The red close button takes the same `AppExit` route (`bevy_window::exit_on_all_closed`, also in `Last`).
+
+Why not `PredefinedMenuItem::quit`. muda's predefined Quit, like winit's default Quit, calls `NSApp terminate:` directly: Bevy's runner returns without running any schedule, no `AppExit` is written, the recorder never gets `Finish`, and the replay is left without its trailer. It would still verify, but as a truncated recording, and the acceptance line asks for a clean exit. Details in [design/macos-packaging.md](design/macos-packaging.md).
+
+The owner check (ROADMAP M2 acceptance, "play 2 minutes, press Cmd-Q"):
+
+```bash
+cargo run -p game --features dev -- --scenario units200       # note the `replay: <path>` line
+# play for two minutes: select, move, stop, attack-move, then press Cmd-Q
+echo $?                                                        # must print 0
+replay=$(ls -t ~/Library/Application\ Support/com.tonianev.Eonmark/replays/*.eonreplay | head -n 1)
+cargo run -p sim-cli --release -- verify "$replay"             # one line: OK final_hash=0x... ticks=N
+```
+
+Pass when `echo $?` prints `0`, `verify` prints exactly one `OK ...` line, there is no truncation warning on stderr (`warning: <file> is a truncated recording ...` means the trailer is missing, which is the `terminate:` bug; the unrelated `warning: <file> has AI slots; they are driven by ai::Passive` line appears for every skirmish replay until M5b and is fine), and `ticks` is about 2400 for two minutes at 20 Hz. Also confirm with the menu open that the application menu reads About, Services, Hide, Hide Others, Show All and `Quit Eonmark` with the Cmd+Q glyph, and that no second Quit item exists. The predefined items carry the process name, so under `cargo run` they read `About eonmark` and `Hide eonmark`; in the bundled app (`CFBundleName` Eonmark, M8) they read `About Eonmark`. Only the custom item is spelled `Quit Eonmark` in both. The same list can be read without clicking:
+
+```bash
+osascript -e 'tell application "System Events" to tell (first process whose name is "eonmark") to get name of every menu item of menu 1 of menu bar item 2 of menu bar 1'
+# About eonmark, missing value, Services, missing value, Hide eonmark, Hide Others, Show All, missing value, Quit Eonmark
+```
+
+## Automated proxies (M2)
+
+The implementer cannot press keys or click, so each proxy drives the same code path from a flag or a scenario. Run them from the repo root; paste the output into the PR.
+
+| Proxy | Command | Covers | Pass when |
+|---|---|---|---|
+| Synthetic Cmd-Q | `cargo run -p game --features dev -- --quit-via-menu-after-seconds 3 --exit-after-seconds 30 --replay-dir /tmp/eonmark-replays` then `cargo run -p sim-cli --release -- verify /tmp/eonmark-replays/<newest>.eonreplay` | the Cmd-Q row except the key press itself: after 3 s the game builds a `MenuEvent` with the `quit` id and hands it to the same handler the real menu item reaches (muda's event channel is `pub(crate)`, so the event cannot be injected one step earlier); `AppExit`, recorder finish, trailer and exit code are the real ones. `--exit-after-seconds 30` is only a safety net and must not fire. | stdout has `quit-via-menu: firing "quit" after 3.0x s`, the process exits 0 well before 30 s (4 s wall on the dev Mac), `tail -c 8 <file>` is `EONRDONE`, `verify` prints `OK` with no truncation warning (the `has AI slots` warning is expected for a skirmish) |
+| Red close button | `cargo run -p game --features dev -- --close-window-after-seconds 3 --exit-after-seconds 30 --replay-dir /tmp/eonmark-replays`, then `verify` the newest file | everything after the click: the flag writes `WindowCloseRequested` for the primary window, which is what winit sends for the button; `bevy_window` despawns the window and `exit_on_all_closed` writes `AppExit::Success` in `Last`, then the recorder finishes. This proxy found a real bug on 2026-10-06: the recorder system ran before `exit_on_all_closed` in `Last` and the winit runner exits without another frame, so the close button left the replay without its trailer (exit code still 0). Fixed by ordering `finish_recorder_on_exit` after `bevy::window::ExitSystems` | stdout has `close-window: requesting close after 3.0x s` and `No windows are open, exiting`, exit 0 within a few seconds, `tail -c 8` is `EONRDONE`, `verify` OK with no truncation warning |
+| `kill -9` | `scripts/m2_checks.sh` step 4, or by hand: start windowed with `--replay-dir`, `kill -9` the pid after ~5 s, `verify` the file | truncated-recording tolerance of the reader and the 20-tick flush cadence | `warning:` on stderr naming the dropped tail, then `OK`; the lost span is under 20 ticks |
+| Frame-rate independence | `--scenario scripted_moves --max-fps 30 --exit-after-seconds 35 --replay-dir A` and the same with `--max-fps 120 --replay-dir B`; compare the `final_hash` of both `verify` lines (or `hash-dump --every 20` up to tick 600) | the sim never sees the frame rate: identical hashes at 30 and 120 fps (`scripts/m2_checks.sh` step 2) | both `OK` lines carry the same `final_hash` |
+| HUD click isolation | `cargo run -p game --features dev -- --scenario hud_click --exit-after-seconds 10` | the two HUD rows: synthetic `PointerInput` press and release over the bottom bar, then over the Stop button; no Move queued, selection unchanged | stdout ends with `hud_click: ok`, exit 0 (`hud_click: FAIL <why>` and exit 1 otherwise) |
+| 200 units, frame time | `cargo run -p game --features dev -- --scenario units200_auto --exit-after-seconds 70 --screenshot <file>.png` | the automated half of the first acceptance line: 200 Yeomen ordered east during tick 20, `frame_stats:` lines (mean, p95, max frame ms, dropped ticks) on exit, a screenshot for the PR | p95 under 16.7 ms, dropped ticks 0, the screenshot shows the group under way |
+| Headless replay | `cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay` | the driver's replay source and the CI hash-parity line | last stdout line `tick=1200 hash=0x...`, exit 0, under 10 s |
+
+Rows marked `owner` in the checklist (trackpad, pinch, wheel, pan keys, edge scroll, drag box, double-click, shift-click, resize, and the by-eye camera distance) have no proxy: the screenshot from `units200_auto` and the `scripted_moves` hash equality stand in for them in the PR until the owner signs the table.
 
 ## Match log (M6)
 

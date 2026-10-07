@@ -20,7 +20,9 @@
 //! that selects the spawned units, then writes synthetic
 //! `bevy_picking::pointer::PointerInput` messages (move, press, release)
 //! AND the matching `ButtonInput<MouseButton>` presses with the window
-//! cursor moved to the same point. A positive control comes first: a right
+//! cursor moved to the same point for the frame (and put back in
+//! `PostUpdate`, so `bevy_winit` never warps the real OS pointer; see
+//! [`RealCursor`]). A positive control comes first: a right
 //! click on open ground at the window centre must queue exactly one Move
 //! (so the ground-order path is known to work). Then it clicks over the
 //! empty bottom panel (left and right click) and over the Stop button, and
@@ -141,6 +143,9 @@ pub struct HudClickCheck {
     pub counted_through_seq: Option<u32>,
     /// Where the synthetic pointer is (logical px), for `Move` deltas.
     pub pointer_at: Vec2,
+    /// `pointer_at` was set by a synthetic move: the window cursor follows
+    /// it while the check runs.
+    pub pointer_placed: bool,
     /// Failure reason, if any.
     pub failure: Option<String>,
 }
@@ -155,6 +160,7 @@ impl Default for HudClickCheck {
             stops_seen: 0,
             counted_through_seq: None,
             pointer_at: Vec2::ZERO,
+            pointer_placed: false,
             failure: None,
         }
     }
@@ -230,7 +236,9 @@ impl Plugin for HudPlugin {
                     FixedUpdate,
                     hud_click_tally_pending.before(SimSystems::Step),
                 )
-                .add_systems(Update, run_hud_click_check.before(WorldInputSet));
+                .init_resource::<RealCursor>()
+                .add_systems(Update, run_hud_click_check.before(WorldInputSet))
+                .add_systems(PostUpdate, restore_real_cursor);
         }
     }
 }
@@ -382,6 +390,34 @@ fn node_centre_logical(node: &ComputedNode, transform: &UiGlobalTransform) -> Ve
     transform.translation * node.inverse_scale_factor
 }
 
+/// The primary window's real cursor position (physical px, as
+/// `Window::physical_cursor_position` reports it, which is what `bevy_winit`
+/// compares), saved by the `hud_click` check before it puts the window
+/// cursor at the synthetic pointer for one frame. The world-input systems
+/// (`update_drag_box`, `issue_pointer_orders`) read
+/// `Window::cursor_position`, so the check has to move it; but
+/// `bevy_winit`'s `changed_windows` (in `Last`) warps the OS pointer whenever
+/// the window's cursor differs from its cache, which made every `hud_click`
+/// run jump the owner's mouse pointer to the game window.
+/// [`restore_real_cursor`] writes the saved value back in `PostUpdate`, after
+/// the world-input systems and before `Last`, so the cache never sees a
+/// difference and nothing is warped.
+#[derive(Resource, Debug, Default)]
+pub struct RealCursor(Option<Option<Vec2>>);
+
+/// `PostUpdate`: undo the `hud_click` check's per-frame cursor override
+/// (see [`RealCursor`]).
+pub fn restore_real_cursor(
+    mut real: ResMut<RealCursor>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    if let Some(position) = real.0.take()
+        && let Ok(mut window) = windows.single_mut()
+    {
+        window.set_physical_cursor_position(position.map(|p| p.as_dvec2()));
+    }
+}
+
 /// A synthetic mouse: the picking `PointerInput` stream plus the raw
 /// `ButtonInput<MouseButton>` and window cursor the `bevy_ui` focus system
 /// and the world-input systems read.
@@ -407,6 +443,7 @@ impl SyntheticMouse<'_, '_> {
     fn move_to(&mut self, check: &mut HudClickCheck, position: Vec2) {
         let delta = position - check.pointer_at;
         check.pointer_at = position;
+        check.pointer_placed = true;
         self.window.set_cursor_position(Some(position));
         self.write(position, PointerAction::Move { delta });
     }
@@ -448,6 +485,7 @@ pub fn run_hud_click_check(
     button: Query<(&ComputedNode, &UiGlobalTransform), With<StopButton>>,
     screenshot: Option<Res<crate::app::ScreenshotRequest>>,
     mut exit: MessageWriter<AppExit>,
+    mut real_cursor: ResMut<RealCursor>,
 ) {
     use HudClickStage as S;
     if check.stage == S::Done {
@@ -494,6 +532,13 @@ pub fn run_hud_click_check(
     let Ok((window_entity, mut window)) = windows.single_mut() else {
         return;
     };
+    // This frame only: the window cursor at the synthetic pointer for the
+    // world-input systems; `restore_real_cursor` puts the real one back.
+    real_cursor.0 = Some(window.physical_cursor_position());
+    if check.pointer_placed {
+        let at = check.pointer_at;
+        window.set_cursor_position(Some(at));
+    }
     let Some(target) = RenderTarget::Window(WindowRef::Primary).normalize(Some(window_entity))
     else {
         return;

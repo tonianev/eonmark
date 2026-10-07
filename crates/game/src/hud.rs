@@ -20,11 +20,13 @@
 //! that selects the spawned units, then writes synthetic
 //! `bevy_picking::pointer::PointerInput` messages (move, press, release)
 //! AND the matching `ButtonInput<MouseButton>` presses with the window
-//! cursor moved to the same point, first over the empty bottom panel (left
-//! and right click) and then over the Stop button, and asserts that no
-//! Move was queued, the selection is unchanged and the button issued a
-//! Stop. It prints `hud_click: ok` and exits 0, or `hud_click: FAIL <why>`
-//! and exits 1 (`verdict_line`).
+//! cursor moved to the same point. A positive control comes first: a right
+//! click on open ground at the window centre must queue exactly one Move
+//! (so the ground-order path is known to work). Then it clicks over the
+//! empty bottom panel (left and right click) and over the Stop button, and
+//! asserts that no Move was queued, the selection is unchanged and the
+//! button issued a Stop. It prints `hud_click: ok` and exits 0, or
+//! `hud_click: FAIL <why>` and exits 1 (`verdict_line`).
 
 use std::collections::BTreeSet;
 
@@ -98,6 +100,12 @@ pub enum HudClickStage {
     /// Select every unit (write `Selection` directly) and record the
     /// selection and the pending-command count.
     SelectAll,
+    /// Positive control: synthetic move + right click on open ground at the
+    /// window centre (not under the HUD); a few frames later exactly one
+    /// Move must have been queued, proving the ground-order path works and
+    /// the later "no Move" assertions are meaningful. The tally is reset
+    /// before the HUD stages.
+    ClickGround,
     /// Synthetic move + press over the bottom bar's empty area.
     PressPanel,
     /// Release over the bottom bar (then a right click there); a few frames
@@ -502,6 +510,9 @@ pub fn run_hud_click_check(
         bar_centre.y,
     );
     let button_point = node_centre_logical(button_node, button_tf);
+    // Open ground for the positive control: the window centre, between the
+    // top and bottom bars (the camera is focused on the spawned units).
+    let ground_point = Vec2::new(window.width(), window.height()) * 0.5;
     let mut mouse = SyntheticMouse {
         target,
         pointer_inputs: &mut pointer_inputs,
@@ -528,9 +539,36 @@ pub fn run_hud_click_check(
                     "hud_click: selected {} units; panel point {panel_point}, button point {button_point}",
                     check.selection_before.len()
                 );
-                check.advance(S::PressPanel);
+                check.advance(S::ClickGround);
             }
         }
+        S::ClickGround => match frame {
+            0 => mouse.move_to(&mut check, ground_point),
+            STEP => {
+                if over_ui.0 {
+                    check.fail("pointer over open ground is reported as over UI".to_string());
+                } else {
+                    mouse.press(&check, PointerButton::Secondary);
+                }
+            }
+            f if f == 2 * STEP => mouse.release(&check, PointerButton::Secondary),
+            f if f == 4 * STEP => {
+                check.tally(&pending);
+                if check.moves_seen != 1 {
+                    let why = format!(
+                        "a right click on open ground queued {} Move(s), expected 1",
+                        check.moves_seen
+                    );
+                    check.fail(why);
+                } else if selection.units != check.selection_before {
+                    check.fail("a right click on open ground changed the selection".to_string());
+                } else {
+                    check.moves_seen = 0;
+                    check.advance(S::PressPanel);
+                }
+            }
+            _ => {}
+        },
         S::PressPanel => match frame {
             0 => mouse.move_to(&mut check, panel_point),
             STEP => {

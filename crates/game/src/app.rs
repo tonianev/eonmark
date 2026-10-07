@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{PresentMode, WindowResolution};
 use rules::Rules;
 use sim::scenarios;
@@ -82,13 +83,9 @@ pub struct FrameLimiter {
 }
 
 /// `--screenshot <path>`: capture the primary window about one second
-/// before the exit deadline (or at the deadline when it is under a second).
-///
-/// M2-B: the capture system is a stub; implement with
-/// `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))`
-/// once `Time<Real>::elapsed() >= deadline - 1 s`, exactly once.
+/// before the exit deadline (or at the deadline when it is under a second),
+/// so the asynchronous capture lands before the app exits.
 #[derive(Resource, Debug, Clone)]
-#[allow(dead_code)] // M2-B: remove once take_screenshot reads these.
 pub struct ScreenshotRequest {
     /// Output PNG path.
     pub path: std::path::PathBuf,
@@ -146,6 +143,10 @@ pub fn run(cli: &Cli) -> AppExit {
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
+    #[cfg(feature = "dev")]
+    if cli.scenario.as_deref() == Some("units200_auto") {
+        app.add_plugins(crate::selection::SyntheticBoxSelectPlugin);
+    }
 
     if let Some(max_fps) = cli.max_fps {
         app.insert_resource(FrameLimiter { max_fps })
@@ -195,14 +196,23 @@ fn limit_frame_rate(_limiter: Res<FrameLimiter>, _time: Res<Time<Real>>) {
     // M2-A: see the doc comment.
 }
 
-/// Capture the primary window once `at_secs` has passed.
-///
-/// M2-B: body to implement (`bevy::render::view::screenshot::{Screenshot,
-/// save_to_disk}`; dev builds only in practice, the code compiles everywhere).
+/// Capture the primary window once `at_secs` has passed, exactly once
+/// (`Screenshot::primary_window()` + `save_to_disk`; the PNG lands a frame
+/// or two later).
 fn take_screenshot(
-    _time: Res<Time<Real>>,
-    _request: ResMut<ScreenshotRequest>,
-    _commands: Commands,
+    time: Res<Time<Real>>,
+    mut request: ResMut<ScreenshotRequest>,
+    mut commands: Commands,
 ) {
-    // M2-B: see the doc comment.
+    if request.taken || time.elapsed().as_secs_f64() < request.at_secs {
+        return;
+    }
+    request.taken = true;
+    info!(
+        "screenshot: capturing the primary window to {}",
+        request.path.display()
+    );
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(request.path.clone()));
 }

@@ -26,7 +26,7 @@ use crate::selection::SelectionPlugin;
 use crate::sim_driver::{
     InputSource, LocalInput, ScenarioInput, SimHandle, SimPlugin, new_replay_path, replay_dir,
 };
-use crate::{camera, ground, palette};
+use crate::{background, camera, ground, palette};
 
 /// Default logical window size.
 pub const WINDOW_SIZE: (u32, u32) = (1280, 800);
@@ -156,19 +156,28 @@ pub fn run(cli: &Cli) -> AppExit {
         PresentMode::AutoVsync
     };
 
+    let background = cli.background_mode();
+    let mut window = Window {
+        // The title stays "Eonmark" (ROADMAP M0 acceptance); the seed,
+        // tick and hash readout lives in the `dev` Sim panel.
+        title: "Eonmark".into(),
+        // Logical size: winit reads this as a LogicalSize at creation.
+        resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
+        present_mode,
+        ..default()
+    };
+    if background {
+        background::configure_window(&mut window);
+    }
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            // The title stays "Eonmark" (ROADMAP M0 acceptance); the seed,
-            // tick and hash readout lives in the `dev` Sim panel.
-            title: "Eonmark".into(),
-            // Logical size: winit reads this as a LogicalSize at creation.
-            resolution: WindowResolution::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
-            present_mode,
-            ..default()
-        }),
+        primary_window: Some(window),
         ..default()
     }));
+    if background {
+        app.add_plugins(background::BackgroundPlugin);
+    }
     app.insert_resource(ClearColor(palette::SKY));
     app.add_plugins(
         SimPlugin::new(handle, input)

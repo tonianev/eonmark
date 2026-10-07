@@ -89,9 +89,9 @@ run *ARGS:
 headless RUN="200":
     cargo run -p game --locked --profile ci -- --headless-run {{RUN}}
 
-# M2 acceptance proxies end to end (headless fixture time, 30 vs 120 fps hashes, clean exit, kill -9, hud_click, units200_auto); see scripts/m2_checks.sh.
+# M2 acceptance proxies end to end (headless fixture time, 30 vs 120 fps hashes, clean exit, kill -9, hud_click, units200_auto); see scripts/m2_checks.sh. Windowed runs use background mode.
 m2-checks SCRATCH="":
-    scripts/m2_checks.sh {{SCRATCH}}
+    EONMARK_BACKGROUND=1 scripts/m2_checks.sh {{SCRATCH}}
 
 # Determinism self-test: scripted ticks twice on two threads, hashes must match.
 selftest:

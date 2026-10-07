@@ -4,7 +4,8 @@
 //! M2 flags and who wires their behaviour (see the M2 contract):
 //! `--headless-run <ticks | path.eonreplay>` (replay mode: agent A),
 //! `--scenario <name>` (A), `--max-fps <n>` (A), `--replay-dir <dir>` (A),
-//! `--hash-every-tick` (A), `--screenshot <path>` (B, dev builds only).
+//! `--hash-every-tick` (A), `--screenshot <path>` (B, dev builds only),
+//! `--background` (`crate::background`; also `EONMARK_BACKGROUND=1`).
 //! Parsing is complete and tested here.
 
 use std::path::{Path, PathBuf};
@@ -36,6 +37,10 @@ Options:
                                close, the path the red close button takes (bevy_window
                                despawns it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
+  --background                 Automated runs: open the window unfocused, below other
+                               windows, in the top-left corner of the primary monitor,
+                               and (macOS) hand focus back to the app that had it. Also
+                               on when EONMARK_BACKGROUND=1. Ignored by --headless-run.
   --seed <U64>                 Match seed (default 1).
   --data-dir <PATH>            Override the data directory (default: see below).
   -h, --help                   Show this text.
@@ -100,6 +105,10 @@ pub struct Cli {
     /// `--close-window-after-seconds <s>`: the automated red-close-button
     /// proxy (`app::close_window_after`).
     pub close_window_after_seconds: Option<f64>,
+    /// `--background`: background mode for automated windowed runs
+    /// (`crate::background`). [`Cli::background_mode`] also honours
+    /// `EONMARK_BACKGROUND`.
+    pub background: bool,
 }
 
 impl Default for Cli {
@@ -116,6 +125,7 @@ impl Default for Cli {
             screenshot: None,
             quit_via_menu_after_seconds: None,
             close_window_after_seconds: None,
+            background: false,
         }
     }
 }
@@ -185,6 +195,7 @@ impl Cli {
                     }
                     cli.close_window_after_seconds = Some(secs);
                 }
+                "--background" => cli.background = true,
                 other => return Err(format!("unknown argument `{other}`")),
             }
         }
@@ -219,6 +230,12 @@ impl Cli {
         }
     }
 
+    /// Background mode: `--background`, or [`BACKGROUND_ENV`] set to `1`
+    /// (or `true` / `yes`) in the environment.
+    pub fn background_mode(&self) -> bool {
+        self.background || env_enables(std::env::var_os(BACKGROUND_ENV).as_deref())
+    }
+
     /// Locate the `data/` directory (see [`USAGE`] for the order).
     pub fn resolve_data_dir(&self) -> PathBuf {
         if let Some(dir) = &self.data_dir {
@@ -242,6 +259,20 @@ impl Cli {
         }
         PathBuf::from("data")
     }
+}
+
+/// Environment variable that turns on background mode like `--background`;
+/// `scripts/m2_checks.sh` and the `just` recipes that run the window export
+/// it so automated runs never come to the front.
+pub const BACKGROUND_ENV: &str = "EONMARK_BACKGROUND";
+
+/// `true` for `1`, `true` or `yes` (any case, surrounding spaces ignored);
+/// unset, empty, `0` and anything else leave background mode off.
+pub fn env_enables(value: Option<&std::ffi::OsStr>) -> bool {
+    value
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
 }
 
 fn parse_value<T>(flag: &str, value: Option<String>) -> Result<T, String>
@@ -309,6 +340,7 @@ mod tests {
                 screenshot: None,
                 quit_via_menu_after_seconds: None,
                 close_window_after_seconds: None,
+                background: false,
             })
         );
         let Parsed::Run(cli) = parsed else {
@@ -375,6 +407,32 @@ mod tests {
         assert!(parse(&["--close-window-after-seconds"]).is_err());
         assert!(parse(&["--close-window-after-seconds", "-1"]).is_err());
         assert!(parse(&["--headless-run", "10", "--close-window-after-seconds", "1"]).is_err());
+    }
+
+    #[test]
+    fn background_flag_and_environment() {
+        assert_eq!(
+            parse(&["--background", "--exit-after-seconds", "6"]),
+            Ok(Parsed::Run(Cli {
+                background: true,
+                exit_after_seconds: Some(6.0),
+                ..Cli::default()
+            }))
+        );
+        // Scripts export EONMARK_BACKGROUND=1 around headless runs too.
+        assert!(parse(&["--headless-run", "10", "--background"]).is_ok());
+        let on = |v: &str| env_enables(Some(std::ffi::OsStr::new(v)));
+        assert!(on("1") && on("true") && on(" YES "));
+        assert!(!on("0") && !on("") && !on("false") && !on("2"));
+        assert!(!env_enables(None));
+        let flag = Cli {
+            background: true,
+            ..Cli::default()
+        };
+        assert!(
+            flag.background_mode(),
+            "the flag wins whatever the environment says"
+        );
     }
 
     #[test]

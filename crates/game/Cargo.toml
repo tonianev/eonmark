@@ -39,6 +39,17 @@ directories.workspace = true
 # `gtk3` default so gtk never enters Cargo.lock (see deny.toml).
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { workspace = true, default-features = false }
+# Background mode (`background.rs`): Accessory activation policy and handing
+# focus back to the previously frontmost app. The versions muda already pulls
+# in (objc2 0.6.5, objc2-app-kit 0.3.2), so no new crate enters Cargo.lock.
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+  "std",
+  "NSApplication",
+  "NSResponder",
+  "NSRunningApplication",
+  "NSWorkspace",
+] }
 
 [lints]
 workspace = true

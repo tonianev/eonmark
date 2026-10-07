@@ -17,7 +17,14 @@
 #      a truncation `warning:` and still `OK`.
 #   5. `--scenario hud_click`: exit 0 and `hud_click: ok` on stdout.
 #   6. `--scenario units200_auto` (65 s): exit 0, `frame_stats:` lines on
-#      stdout, replay verifies OK.
+#      stdout, replay verifies OK, frame-time p95 under 16.7 ms, and the
+#      window was never fully covered (macOS presents nothing for a covered
+#      window, so its frame times would not measure rendering).
+#
+# Every windowed run uses background mode (EONMARK_BACKGROUND=1, exported
+# below): the window opens unfocused, below other windows, in the top-left
+# corner of the primary monitor, and the game hands focus back to the app
+# that had it, so the checks never pop up in front of the owner's work.
 #
 # Every step echoes its command and tees output under the scratch dir. The
 # script prints PASS/FAIL per check and exits 1 if any check failed.
@@ -51,6 +58,10 @@ simcli="$target_dir/debug/sim-cli"
 # its child. The checks exec the binary directly instead (so `kill -9` hits the
 # game, not cargo), so set it here. Ignored on Linux.
 export DYLD_FALLBACK_LIBRARY_PATH="$(rustc --print target-libdir)${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+
+# Background mode for every windowed run (docs/IMPLEMENTER_NOTES.md: automated
+# and agent-run windowed checks always use it; manual playtests do not).
+export EONMARK_BACKGROUND=1
 
 # Wall clock in seconds with centiseconds (macOS `date` has no %N; perl ships).
 now() { perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
@@ -302,6 +313,15 @@ if wants 6; then
     grep '^frame_stats:' "$scratch/06-run.txt" | sed 's/^/    /'
   else
     say "no frame_stats: lines on stdout"; ok=0
+  fi
+  # docs/PLAYTEST.md's gate for this proxy: p95 under 16.7 ms (60 fps).
+  p95="$(sed -n 's/^frame_stats: frame_ms .* p95=\([0-9.]*\) .*/\1/p' "$scratch/06-run.txt" | head -n 1)"
+  if [ -z "$p95" ] || ! awk -v p="$p95" 'BEGIN { exit !(p + 0 < 16.7) }'; then
+    say "frame-time p95 ${p95:-?} ms is not under 16.7 ms"; ok=0
+  fi
+  occluded="$(sed -n 's/^frame_stats: window .* occluded=\([0-9]*\)\/.*/\1/p' "$scratch/06-run.txt" | head -n 1)"
+  if [ "${occluded:-x}" != "0" ]; then
+    say "the window was fully covered for ${occluded:-?} frames: macOS presents nothing then, so the frame times are not valid (uncover the top-left corner of the primary monitor and rerun)"; ok=0
   fi
   replay="$(replay_from "$scratch/06-run.txt" "$dir")"
   if [ -z "$replay" ]; then say "no replay written"; ok=0; else

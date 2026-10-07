@@ -6,6 +6,8 @@
 //! Module map (M2):
 //! - [`cli`]: hand-rolled argument parsing and data directory resolution.
 //! - [`app`]: the windowed Bevy app and plugin wiring.
+//! - [`background`]: `--background` / `EONMARK_BACKGROUND=1` for automated
+//!   windowed runs (unfocused, below other windows; macOS hands focus back).
 //! - [`sim_driver`]: `SimHandle`, the `FixedUpdate` driver, `InputSource`
 //!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
 //! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals.
@@ -22,6 +24,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod background;
 pub mod camera;
 pub mod cli;
 #[cfg(feature = "dev")]

@@ -771,6 +771,20 @@ pub enum SimSystems {
     Step,
 }
 
+/// `true` when the current `FixedUpdate` iteration stepped the sim. A
+/// stalled iteration (the source returned `None`), a cap-dropped one and
+/// the iteration after a replay ended leave it `false`, so presentation
+/// systems gated with [`sim_stepped`] do not advance their interpolation
+/// past a tick that never happened.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SimStepped(pub bool);
+
+/// Run condition for `FixedUpdate` systems after [`SimSystems::Step`]: the
+/// sim stepped in this iteration.
+pub fn sim_stepped(stepped: Res<SimStepped>) -> bool {
+    stepped.0
+}
+
 #[derive(Resource, Default)]
 struct FrameBudget {
     used: u32,
@@ -858,6 +872,7 @@ impl Plugin for SimPlugin {
             .init_resource::<DriverStats>()
             .init_resource::<PendingCommands>()
             .init_resource::<FrameBudget>()
+            .init_resource::<SimStepped>()
             .add_message::<ReplayFinished>()
             .add_systems(Startup, configure_virtual_time)
             .add_systems(PreUpdate, reset_frame_budget)
@@ -954,7 +969,9 @@ fn step_sim(
     mut budget: ResMut<FrameBudget>,
     mut fixed: ResMut<Time<Fixed>>,
     mut finished: MessageWriter<ReplayFinished>,
+    mut stepped: ResMut<SimStepped>,
 ) {
+    stepped.0 = false;
     if budget.used >= MAX_TICKS_PER_FRAME {
         // This step plus every further one the overstep would ask for are
         // dropped as time dilation; discarding the overstep ends the loop.
@@ -974,6 +991,7 @@ fn step_sim(
         &mut stats,
     ) {
         TickOutcome::Stepped { .. } => {
+            stepped.0 = true;
             // Events are not hashed state and nothing reads them yet (the
             // HUD message line arrives in M3b); drain them so the buffer
             // never grows for the length of a session, and count them.
@@ -1569,6 +1587,7 @@ mod tests {
         assert_eq!(stats.stalled_ticks, 2);
         assert_eq!(stats.ticks_this_frame, 0);
         assert_eq!(stats.dropped_ticks, 0);
+        assert!(!app.world().resource::<SimStepped>().0);
     }
 
     #[test]

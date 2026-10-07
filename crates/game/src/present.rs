@@ -28,7 +28,7 @@ use sim::{Fx, FxVec2, UnitId};
 use crate::camera::RtsCamera;
 use crate::ground::HALF_EXTENT;
 use crate::palette;
-use crate::sim_driver::{LOCAL_PLAYER, SimHandle, SimSystems};
+use crate::sim_driver::{LOCAL_PLAYER, SimHandle, SimSystems, sim_stepped};
 
 /// Height of a unit's pivot above the ground, in metres: capsules stand on
 /// the ground, so the pivot is half the total height.
@@ -246,7 +246,8 @@ impl Plugin for PresentPlugin {
                 FixedUpdate,
                 (sync_lifecycle, focus_camera_on_first_units)
                     .chain()
-                    .after(SimSystems::Step),
+                    .after(SimSystems::Step)
+                    .run_if(sim_stepped),
             )
             .add_systems(
                 PostUpdate,
@@ -261,7 +262,9 @@ impl Plugin for PresentPlugin {
 /// `UnitRef`, `Interp::at`, `Pickable::default()`, `Name`); despawn every
 /// entity whose id is no longer in the view and drop it from the map. Runs
 /// in `FixedUpdate` after [`SimSystems::Step`] so it sees every tick even
-/// when several run in one frame.
+/// when several run in one frame, and only in iterations that stepped
+/// ([`sim_stepped`]): a stalled or cap-dropped fixed step leaves `Interp`
+/// alone so the render lerp finishes instead of snapping.
 pub fn sync_lifecycle(
     sim: NonSend<SimHandle>,
     mut entities: ResMut<UnitEntities>,
@@ -423,6 +426,70 @@ mod tests {
             assert!(min_y.abs() < 1e-4, "{p:?} bottom at {min_y}");
             assert!(aabb.max().y > 0.3, "{p:?}");
         }
+    }
+
+    #[test]
+    fn a_stalled_fixed_step_leaves_interp_alone() {
+        use crate::sim_driver::{InputSource, PendingCommands, ScenarioInput, SimPlugin};
+        use sim::PlayerCommand;
+        use std::time::Duration;
+
+        /// `scripted_moves` until `until`, then stalls forever.
+        struct StallAfter {
+            inner: ScenarioInput,
+            until: u32,
+        }
+        impl InputSource for StallAfter {
+            fn commands_for(
+                &mut self,
+                tick: u32,
+                local: &mut PendingCommands,
+            ) -> Option<Vec<PlayerCommand>> {
+                (tick < self.until)
+                    .then(|| self.inner.commands_for(tick, local))
+                    .flatten()
+            }
+            fn name(&self) -> &'static str {
+                "stall-after"
+            }
+        }
+
+        let rules =
+            Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .unwrap();
+        let (setup, stream) = sim::scenarios::scripted_moves(&rules);
+        let handle = SimHandle::from_setup(setup, rules);
+        let input = StallAfter {
+            inner: ScenarioInput::new(stream),
+            until: 25,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::ZERO,
+            ))
+            .add_plugins((SimPlugin::new(handle, Box::new(input)), PresentPlugin));
+        app.update();
+        let step = |app: &mut App| {
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_millis(50),
+            ));
+            app.update();
+        };
+        for _ in 0..25 {
+            step(&mut app);
+        }
+        assert_eq!(app.world().non_send::<SimHandle>().tick(), 25);
+        let entity = app.world().resource::<UnitEntities>().0[&UnitId(1)];
+        let before = *app.world().get::<Interp>(entity).unwrap();
+        assert_ne!(before.prev, before.curr, "unit 1 is under way at tick 25");
+        step(&mut app);
+        step(&mut app);
+        assert_eq!(app.world().non_send::<SimHandle>().tick(), 25, "stalled");
+        let after = *app.world().get::<Interp>(entity).unwrap();
+        assert_eq!(before, after, "a stalled step must not advance Interp");
     }
 
     #[test]

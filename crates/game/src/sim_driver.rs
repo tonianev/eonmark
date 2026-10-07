@@ -240,9 +240,11 @@ impl PendingCommands {
 /// Where a replay source stops and what it expects there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayEnd {
-    /// The sim tick at which the recording ends (the tick of its last hash
-    /// record, or one past its last tick batch when it has none). The
-    /// driver steps while `sim.tick() < final_tick` and never beyond.
+    /// The sim tick at which the recording ends: the tick of its last hash
+    /// record (tick batches at or after it are dropped, since nothing
+    /// recorded can check them), or one past its last tick batch when the
+    /// file has no hash records. The driver steps while
+    /// `sim.tick() < final_tick` and never beyond.
     pub final_tick: u32,
     /// The last recorded whole-state hash, if the file has hash records.
     pub final_hash: Option<u64>,
@@ -338,10 +340,17 @@ impl ReplayInput {
             }
         }
         let end = match last_hash {
-            Some((tick, hash)) => ReplayEnd {
-                final_tick: tick.max(last_batch_tick.map_or(0, |t| t + 1)),
-                final_hash: Some(hash),
-            },
+            // The hash can only be checked at its own tick: batches at or
+            // past it (a recording cut after the writer flushed a tick batch
+            // that follows the last checkpoint) are dropped, which is what
+            // `sim-cli verify` reports for the same file.
+            Some((tick, hash)) => {
+                batches.retain(|b| b.tick < tick);
+                ReplayEnd {
+                    final_tick: tick,
+                    final_hash: Some(hash),
+                }
+            }
             None => ReplayEnd {
                 final_tick: last_batch_tick.map_or(0, |t| t + 1),
                 final_hash: None,
@@ -1125,6 +1134,99 @@ mod tests {
         assert_eq!(finished.final_tick, scenarios::MOVE_500_SHORT_TICKS);
         assert!(finished.matches(), "{finished:?}");
         assert_eq!(stats.stalled_ticks, 0);
+    }
+
+    #[test]
+    fn replay_input_ends_at_the_last_hash_and_drops_later_batches() {
+        let rules = rules();
+        // A recording cut after the writer flushed a tick batch that follows
+        // the last hash checkpoint: the hash can only be checked at its own
+        // tick, so the later batch is dropped (as `sim-cli verify` does).
+        let file = ReplayFile {
+            setup: MatchSetup::scenario(&rules, 5),
+            records: vec![
+                Record::Tick(TickBatch {
+                    tick: 3,
+                    cmds: vec![PlayerCommand::new(PlayerId(0), 0, Command::Surrender)],
+                }),
+                Record::Hash(HashRecord {
+                    tick: 20,
+                    hash: 0xabc,
+                    sub: SubHashes::default(),
+                }),
+                Record::Tick(TickBatch {
+                    tick: 20,
+                    cmds: vec![PlayerCommand::new(PlayerId(0), 1, Command::Surrender)],
+                }),
+            ],
+            truncated: true,
+            undecoded_bytes: 4,
+        };
+        let (_, mut src) = ReplayInput::from_file(Path::new("cut.eonreplay"), file);
+        assert_eq!(
+            src.end_of_input(),
+            Some(ReplayEnd {
+                final_tick: 20,
+                final_hash: Some(0xabc),
+            })
+        );
+        assert_eq!(src.remaining_batches(), 1, "the tick-20 batch is dropped");
+        let mut p = PendingCommands::default();
+        assert!(src.commands_for(20, &mut p).is_none());
+    }
+
+    #[test]
+    fn drive_tick_matches_a_cut_replay_with_a_batch_after_its_last_hash() {
+        let rules = rules();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sim/tests/fixtures/move_500_short.eonreplay");
+        let mut file = ReplayReader::open(&path).unwrap();
+        // Keep everything up to the first hash checkpoint after the move,
+        // then append a command batch at that checkpoint's tick, the shape a
+        // `kill -9` leaves when a command was issued in the last flushed
+        // 20-tick window.
+        let cut = file
+            .records
+            .iter()
+            .position(|r| matches!(r, Record::Hash(h) if h.tick > 5))
+            .unwrap();
+        file.records.truncate(cut + 1);
+        let Record::Hash(last) = &file.records[cut] else {
+            unreachable!()
+        };
+        let (hash_tick, hash) = (last.tick, last.hash);
+        file.records.push(Record::Tick(TickBatch {
+            tick: hash_tick,
+            cmds: vec![PlayerCommand::new(
+                PlayerId(0),
+                1000,
+                Command::Stop {
+                    units: vec![sim::UnitId(1)],
+                },
+            )],
+        }));
+        file.truncated = true;
+        let (setup, mut src) = ReplayInput::from_file(&path, file);
+        let mut sim = SimHandle::from_setup(setup, rules);
+        let mut pending = PendingCommands::default();
+        let mut stats = DriverStats::default();
+        let finished = loop {
+            match drive_tick(
+                &mut sim,
+                &mut src,
+                &mut pending,
+                None,
+                HashCadence::default(),
+                &mut stats,
+            ) {
+                TickOutcome::Stepped { .. } => {}
+                TickOutcome::Stalled => panic!("a replay never stalls"),
+                TickOutcome::Finished(f) => break f,
+            }
+        };
+        assert_eq!(finished.final_tick, hash_tick);
+        assert_eq!(finished.recorded_hash, Some(hash));
+        assert!(finished.matches(), "{finished:?}");
     }
 
     #[test]

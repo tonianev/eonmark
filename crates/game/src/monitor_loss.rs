@@ -33,6 +33,13 @@
 //! have to undo `changed_windows` on every `Window` change (cursor moves,
 //! focus, resizes), since its no-`OnMonitor` branch inserts the link again,
 //! and nothing could read which monitor the window is on.
+//!
+//! Upstream fixed this in bevyengine/bevy#25427 (issue #24867):
+//! `create_monitors` removes `HasWindows` before it despawns a monitor, so
+//! `HasWindows`' `on_discard` only unlinks the windows. The fix is in the
+//! 0.19.2 milestone (unreleased on 2026-10-08) and in 0.20.0-rc.1 and rc.2.
+//! Delete this module when the Bevy pin includes it. The tests below despawn
+//! the way 0.19.1 does, so they keep passing either way and cannot tell.
 
 use bevy::prelude::*;
 use bevy::window::{HasWindows, OnMonitor};

@@ -16,12 +16,14 @@
 //! triggers `Despawn` observers before the `on_despawn` hooks, so the
 //! observer empties `HasWindows` while the monitor still exists; the hook
 //! then finds no windows to despawn. It also queues the removal of each
-//! window's `OnMonitor`: a link to a dead entity would stop
-//! `changed_windows` from ever linking the window to a monitor again, and
-//! removing the link runs `OnMonitor`'s `on_discard` hook against a target
-//! that no longer exists, which is a no-op. When the display wakes, winit
-//! lists the monitor again, `create_monitors` spawns a new `Monitor`, and
-//! the next `Window` change links the window to it.
+//! window's `OnMonitor`: `changed_windows` only replaces a link whose
+//! target it still lists and only drops one while winit reports no current
+//! monitor, so a link to a dead entity would keep the window off the
+//! monitor once it is back. Removing the link runs `OnMonitor`'s
+//! `on_discard` hook against a target that no longer exists, which is a
+//! no-op. When the display wakes, winit lists the monitor again,
+//! `create_monitors` spawns a new `Monitor`, and the next `Window` change
+//! links the window to it (`changed_windows`' no-`OnMonitor` branch).
 //!
 //! Every window is detached, not only the primary one: an OS window whose
 //! monitor went away is still open, so despawning its entity is never what
@@ -66,7 +68,7 @@ pub fn detach_windows_from_lost_monitor(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::SystemState;
-    use bevy::window::{Monitor, PrimaryWindow};
+    use bevy::window::{Monitor, PrimaryWindow, WindowCloseRequested};
 
     use super::*;
 
@@ -137,18 +139,67 @@ mod tests {
         );
         assert_eq!(app.should_exit(), None);
 
-        // A monitor appearing again can be linked as usual.
+        // Wake, then sleep again: the monitor comes back as a new entity,
+        // the window is linked to it (standing in for `changed_windows`'
+        // no-`OnMonitor` branch, whose precondition is asserted above), and
+        // the second loss is survived the same way.
         let world = app.world_mut();
         let monitor = world.spawn(test_monitor()).id();
         world.entity_mut(window).insert(OnMonitor(monitor));
         app.update();
-        assert_eq!(
-            app.world()
-                .get::<HasWindows>(monitor)
-                .unwrap()
-                .iter()
-                .next(),
-            Some(window)
+        remove_monitor(&mut app, monitor);
+        let window_ref = app
+            .world()
+            .get_entity(window)
+            .expect("window survives a second loss");
+        assert!(!window_ref.contains::<OnMonitor>());
+        assert_eq!(app.should_exit(), None);
+    }
+
+    #[test]
+    fn every_window_on_the_lost_monitor_survives_and_others_keep_their_link() {
+        let (mut app, primary, monitor) = app_with_window_on_monitor(true);
+        let world = app.world_mut();
+        let secondary = world.spawn((Window::default(), OnMonitor(monitor))).id();
+        let other = world.spawn(test_monitor()).id();
+        let elsewhere = world.spawn((Window::default(), OnMonitor(other))).id();
+        app.update();
+        assert_eq!(app.world().get::<HasWindows>(monitor).unwrap().len(), 2);
+
+        remove_monitor(&mut app, monitor);
+
+        let world = app.world();
+        for window in [primary, secondary] {
+            let window_ref = world
+                .get_entity(window)
+                .expect("every window on the lost monitor survives");
+            assert!(!window_ref.contains::<OnMonitor>());
+        }
+        assert_eq!(world.get::<OnMonitor>(elsewhere).map(|l| l.0), Some(other));
+        assert_eq!(app.should_exit(), None);
+    }
+
+    /// The plugin must not keep the app alive when the window really
+    /// closes: `close_when_requested` marks it `ClosingWindow` in one frame
+    /// and despawns it in the next, then `exit_on_all_closed` exits.
+    #[test]
+    fn closing_the_window_still_exits() {
+        let (mut app, window, monitor) = app_with_window_on_monitor(true);
+        app.world_mut()
+            .write_message(WindowCloseRequested { window });
+        let mut exit = None;
+        for _ in 0..3 {
+            app.update();
+            exit = app.should_exit();
+            if exit.is_some() {
+                break;
+            }
+        }
+        assert_eq!(exit, Some(AppExit::Success));
+        assert!(app.world().get_entity(window).is_err());
+        assert!(
+            app.world().get_entity(monitor).is_ok(),
+            "closing a window leaves its monitor"
         );
     }
 

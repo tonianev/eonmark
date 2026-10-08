@@ -63,6 +63,15 @@ export DYLD_FALLBACK_LIBRARY_PATH="$(rustc --print target-libdir)${DYLD_FALLBACK
 # and agent-run windowed checks always use it; manual playtests do not).
 export EONMARK_BACKGROUND=1
 
+# macOS: keep the display (and the system) awake until this script exits. The
+# game survives a display sleep (crates/game/src/monitor_loss.rs), but a
+# sleeping display shows nothing, so frame times from that span would not
+# measure rendering and check 6 would fail on its own terms. `-w $$` releases
+# the assertion when this shell exits, however it exits.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -d -i -w $$ </dev/null >/dev/null 2>&1 &
+fi
+
 # Wall clock in seconds with centiseconds (macOS `date` has no %N; perl ships).
 now() { perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
 only="${ONLY:-1 2 3 4 5 6}"

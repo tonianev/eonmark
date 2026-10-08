@@ -57,7 +57,7 @@ total=0
 count=0
 while IFS= read -r -d '' file; do
   rel="${file#"$assets_dir"/}"
-  size=$(stat -f %z "$file" 2>/dev/null || stat -c %s "$file")
+  size=$(wc -c <"$file" | tr -d ' ')
   total=$((total + size))
   count=$((count + 1))
 

@@ -20,6 +20,7 @@ use sim::scenarios;
 use crate::cli::Cli;
 use crate::frame_stats::FrameStatsPlugin;
 use crate::hud::HudPlugin;
+use crate::monitor_loss::MonitorLossPlugin;
 use crate::orders::OrdersPlugin;
 use crate::present::PresentPlugin;
 use crate::selection::SelectionPlugin;
@@ -175,6 +176,8 @@ pub fn run(cli: &Cli) -> AppExit {
         primary_window: Some(window),
         ..default()
     }));
+    // Display sleep or a screen lock must not end the session.
+    app.add_plugins(MonitorLossPlugin);
     if background {
         app.add_plugins(background::BackgroundPlugin);
     }

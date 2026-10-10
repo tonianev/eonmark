@@ -16,7 +16,12 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
-Recorded 2026-10-06 at `rules_version` 4, `SIM_VERSION` 4 (M2: `visuals.ron`
+Recorded 2026-10-10 at `rules_version` 5, `SIM_VERSION` 5 (a search suspended
+on an older cost grid is requeued instead of resumed, and `AStarSearch.generation`
+joined the serialised state; the cost grid never changes in these fixtures, so
+every final hash is unchanged from 4/4 and only the headers and the periodic
+hash records taken while a search was suspended differ). Before that,
+2026-10-06 at `rules_version` 4, `SIM_VERSION` 4 (M2: `visuals.ron`
 joined `rules_hash`, and `Command::AttackMove` is applied like `Move` instead
 of being rejected; no fixture contains an `AttackMove`, so every final hash is
 unchanged from 3/3 and only the headers differ). Before that, the same day,

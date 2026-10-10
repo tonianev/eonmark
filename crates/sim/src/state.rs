@@ -41,7 +41,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 4: `Command::AttackMove` is applied exactly like `Command::Move` (M2
 /// placeholder until combat in M4a) instead of being rejected with
 /// `NotImplemented` and drawing from the RNG.
-pub const SIM_VERSION: u32 = 4;
+///
+/// 5: a search suspended on an older cost grid is not resumed: `Pathing`
+/// requeues its request at the head and searches the current grid
+/// (`AStarSearch::generation`, new hashed state).
+pub const SIM_VERSION: u32 = 5;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

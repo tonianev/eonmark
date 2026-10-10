@@ -530,7 +530,7 @@ mod tests {
         let dir = copied_data_dir("rules-version-zero");
         let path = dir.join("rules/rules.ron");
         let text = std::fs::read_to_string(&path).unwrap();
-        let text = text.replacen("rules_version: 4,", "rules_version: 0,", 1);
+        let text = text.replacen("rules_version: 5,", "rules_version: 0,", 1);
         assert!(
             text.contains("rules_version: 0,"),
             "repo rules_version moved"

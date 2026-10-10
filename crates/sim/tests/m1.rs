@@ -524,6 +524,9 @@ proptest! {
     /// request stream through a cache-enabled and a cache-disabled `Pathing`
     /// completes the same requests with the same paths on every tick, leaves
     /// the same budget remainder, and serialises to the same hashed bytes.
+    /// The cost grid changes under both now and then (a short wall toggled
+    /// on or off, as buildings will from M3a), including while a search is
+    /// suspended.
     #[test]
     fn path_cache_is_transparent_at_the_pathing_level(
         seed in any::<u64>(),
@@ -531,7 +534,7 @@ proptest! {
         budget in 20u32..1500,
     ) {
         use rand_core::{Rng, SeedableRng};
-        let map = shared_plains();
+        let mut map = shared_plains().clone();
         let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
         let rnd_tile = |rng: &mut rand_pcg::Pcg32| {
             Tile::new(
@@ -573,10 +576,19 @@ proptest! {
             if !on.cache.is_empty() {
                 hits_possible += 1;
             }
+            if rng.next_u32() % 6 == 0 {
+                // Toggle a 1 x 5 wall; both runs see the same grid.
+                let t = rnd_tile(&mut rng);
+                let block = map.passable(t);
+                for dy in 0..5u16 {
+                    let w = Tile::new(t.x, t.y.saturating_add(dy).min(127));
+                    map.set_blocked(w, block);
+                }
+            }
             let mut ra = budget;
             let mut rb = budget;
-            let a = on.service_budgeted(map, &mut ra, tick);
-            let b = off.service_budgeted(map, &mut rb, tick);
+            let a = on.service_budgeted(&map, &mut ra, tick);
+            let b = off.service_budgeted(&map, &mut rb, tick);
             prop_assert_eq!(&a, &b, "completed requests differ at tick {}", tick);
             prop_assert_eq!(ra, rb, "budget remainder differs at tick {}", tick);
             prop_assert_eq!(

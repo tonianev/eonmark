@@ -144,7 +144,7 @@ The first M3a slice (the Town loop, `SIM_VERSION` 6) implements the standard sta
 9. a Town keeps the player within the town limit (`TownLimitReached`);
 10. a kind with `max_per_town` has a complete Town to belong to and room under its limit there, sites included (`PerTownLimitReached`);
 11. a gatherer with `Adjacent` slots has at least one tile of its terrain beside the footprint (`NoAdjacentResource`);
-12. at least one tile around the footprint is passable for the builder (`SiteBlocked`);
+12. the builder can walk to a tile around the footprint, with the footprint already blocked (`SiteBlocked` when none is passable, `Unreachable` when none is reachable; a resume, check 4, is held to the same rule);
 13. the player can pay the ramped cost (`CannotAfford`, naming the first short resource).
 
 ## Interactions

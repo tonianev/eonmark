@@ -10,6 +10,7 @@ use crate::ids::{BuildingId, PlayerId, Tile, UnitKindId};
 use crate::state::{Construction, State, TownState, Unit};
 use crate::territory::{Source, SourceOwner};
 use rules::{MapDef, Rules};
+use std::collections::BTreeSet;
 
 /// A player's Statecraft level. Research arrives in M4a; until then every
 /// player is at level 0.
@@ -50,10 +51,11 @@ pub(crate) fn attribute(
         .map(|b| b.id)
 }
 
-/// The standard start (`rules.ron` `standard_start`), for every player in
-/// id order: the Seat, a complete tier-1 Town centred on the player's map
-/// start, projecting its border; then the start units on the nearest
-/// passable tiles around it, in `UnitKindId` order; then the stockpile.
+/// The standard start (`rules.ron` `standard_start`): first every player's
+/// Seat, in id order, a complete tier-1 Town centred on the player's map
+/// start, projecting its border; then, per player in id order, the start
+/// units on the nearest free passable tiles around the start, in
+/// `UnitKindId` order, and the stockpile.
 /// On a map whose starts are `(24, 64)` and `(103, 64)` that gives the
 /// Seats `BuildingId(1)` and `BuildingId(2)`, P0's Yeomen `UnitId(1..=5)`
 /// and P1's `UnitId(6..=10)`.
@@ -65,7 +67,8 @@ pub(crate) fn apply_standard_start(state: &mut State, rules: &Rules, def: &MapDe
         u16::try_from(kind.height_tiles).expect("validated <= 8"),
     );
     let players: Vec<PlayerId> = state.players.iter().map(|p| p.id).collect();
-    for p in players {
+    // Every Seat first, so no unit can spawn where a later Seat stands.
+    for &p in &players {
         let start = def.starts[usize::from(p.0)];
         let nw = Tile::new(start.x - (w - 1) / 2, start.y - (h - 1) / 2);
         let seat = construction::place(
@@ -93,6 +96,12 @@ pub(crate) fn apply_standard_start(state: &mut State, rules: &Rules, def: &MapDe
                 radius: u16::try_from(radius).expect("validated radius fits u16"),
             },
         );
+    }
+    // Then each player's units, kind by kind, on free passable tiles of the
+    // spiral around the start (one unit per tile, across kinds and players).
+    let mut taken: BTreeSet<Tile> = BTreeSet::new();
+    for &p in &players {
+        let start = def.starts[usize::from(p.0)];
         for (k, unit_kind) in rules.units.iter().enumerate() {
             let Some(&count) = rules.standard_start.units.get(&unit_kind.id) else {
                 continue;
@@ -101,10 +110,11 @@ pub(crate) fn apply_standard_start(state: &mut State, rules: &Rules, def: &MapDe
             let tiles: Vec<Tile> = state
                 .map
                 .spiral(Tile::new(start.x, start.y))
-                .filter(|t| state.map.passable(*t))
+                .filter(|t| state.map.passable(*t) && !taken.contains(t))
                 .take(usize::try_from(count).expect("validated <= 255"))
                 .collect();
             for tile in tiles {
+                taken.insert(tile);
                 let id = state.ids.unit();
                 let u = Unit::spawn(id, p, kind_id, tile, unit_kind, &state.map, hz);
                 state.units.insert(id, u);

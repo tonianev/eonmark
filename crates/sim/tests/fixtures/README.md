@@ -18,7 +18,11 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
-Recorded 2026-10-14 at `rules_version` 7, `SIM_VERSION` 6 with `just rerecord`
+Recorded 2026-10-14 at `rules_version` 8, `SIM_VERSION` 7 with `just rerecord`
+(a `Build` builder walks only to ring tiles it can reach, and standard-start
+units spawn after every Seat; no fixture meets either case, so every final
+hash is unchanged from 7/6 and only the headers differ). Before that, the
+same day, at `rules_version` 7, `SIM_VERSION` 6 with `just rerecord`
 (M3a Town loop: `State` gained hashed fields, namely the stockpiles and
 income accumulators, the territory field and the M3a building and unit
 fields, and the header gained `MatchSetup.start`; the four M1 scenarios

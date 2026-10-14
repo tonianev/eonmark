@@ -65,7 +65,13 @@ use std::collections::{BTreeMap, BTreeSet};
 /// skirmish default), `Build`, construction, site `Cancel`, the town limit,
 /// borders on Town completion, base-yield income, `DebugPlaceBuilding` and
 /// `DebugGrant`; `Build` and `Cancel` no longer draw from the RNG.
-pub const SIM_VERSION: u32 = 6;
+///
+/// 7: a `Build` builder walks to the nearest ring tile it can reach with
+/// the footprint blocked (`Unreachable` when there is none) instead of the
+/// nearest passable one, which could be sealed off; resuming a site checks
+/// the same, so it can no longer panic on an enclosed site. Standard-start
+/// units spawn after every Seat is placed, on tiles not already taken.
+pub const SIM_VERSION: u32 = 7;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,7 +375,9 @@ pub enum RejectReason {
     DebugCommandsDisabled,
     /// `UnitKindId` not in `units.ron`.
     UnknownUnitKind,
-    /// The goal has no reachable tile (defensive; pathing step 1 prevents it).
+    /// The goal has no reachable tile: for `Build`, no tile around the
+    /// footprint can be walked to by the builder (for a move, defensive;
+    /// pathing step 1 prevents it).
     Unreachable,
     /// The command's handler arrives in a later milestone.
     NotImplemented,

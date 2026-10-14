@@ -42,7 +42,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 7 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 8 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -271,7 +271,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (7 to 8) and put the one-line reason
+2. Bump `rules_version` in `rules.ron` (8 to 9) and put the one-line reason
    in the commit message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
 
@@ -282,8 +282,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=8 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
-(the repository is at 7; the hash is new because a file changed).
+`OK rules_version=9 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
+(the repository is at 8; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture

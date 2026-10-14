@@ -76,6 +76,23 @@ fn rejections(events: &[SimEvent]) -> Vec<RejectReason> {
         .collect()
 }
 
+fn spawn_kind(p: u8, seq: u32, kind: u16, x: i32, y: i32, count: u16) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::DebugSpawn {
+            owner: PlayerId(p),
+            kind: UnitKindId(kind),
+            at: FxVec2::from_ints(x, y),
+            count,
+        },
+    )
+}
+
+fn stock(sim: &Sim, p: u8, r: usize) -> i64 {
+    sim.view().economy(PlayerId(p)).stock[r]
+}
+
 /// Step with no commands until `done` holds, at most `max` ticks; returns
 /// whether it held.
 fn run_until(sim: &mut Sim, max: u32, mut done: impl FnMut(&Sim) -> bool) -> bool {
@@ -907,18 +924,33 @@ fn economy_build_rejections() {
         ),
     ];
     for (name, setup, cmd, want) in cases {
+        // The control sim gets a command at the same (player, seq) that is
+        // rejected for an unrelated reason; a rejection that changed any
+        // state (a job, an order, the map, a stockpile) or drew randomness
+        // would show up as a differing sub-hash.
         let mut sim = standard(7);
+        let mut control = standard(7);
         setup(&mut sim);
+        setup(&mut control);
         let rng = sim.sub_hashes().rng;
-        let stock = sim.view().economy(PlayerId(0)).stock.clone();
-        let buildings = sim.view().buildings().count();
+        let stop = PlayerCommand::new(
+            cmd.player,
+            cmd.seq,
+            Command::Stop {
+                units: vec![UnitId(999)],
+            },
+        );
         let events = apply(&mut sim, vec![cmd]);
+        let control_events = apply(&mut control, vec![stop]);
         assert_eq!(rejections(&events), [want], "{name}");
+        assert_eq!(rejections(&control_events), [RejectReason::NoValidUnits]);
+        assert_eq!(
+            sim.sub_hashes(),
+            control.sub_hashes(),
+            "{name}: no state change"
+        );
+        assert_eq!(sim.hash(), control.hash(), "{name}");
         assert_eq!(sim.sub_hashes().rng, rng, "{name}: no RNG draw");
-        assert_eq!(sim.view().buildings().count(), buildings, "{name}");
-        // Two ticks of income may have arrived; nothing was deducted.
-        let now = &sim.view().economy(PlayerId(0)).stock;
-        assert!(now.iter().zip(&stock).all(|(n, s)| n >= s), "{name}");
     }
 }
 
@@ -1222,4 +1254,165 @@ fn economy_second_town_completes_before_tick_3600() {
 #[test]
 fn golden_economy_second_town() {
     golden("economy_second_town");
+}
+
+/// A builder walks to a tile beside the site that it can reach, not merely
+/// the nearest passable one: with the nearest ring tiles sealed in a pocket,
+/// it goes round and the site completes. A unit sealed in that pocket can
+/// still resume the site from inside, but cannot build anywhere else
+/// (`Unreachable`). Resuming a site whose ring is fully blocked is
+/// `SiteBlocked`, never a panic, and `check_build` agrees.
+#[test]
+fn economy_builder_stands_where_it_can_reach() {
+    let rules = load_rules();
+    let (croft, tower) = (kind(&rules, "croft"), kind(&rules, "watchtower"));
+    let place_site = |seq: u32, k: BuildingKindId, x: u16, y: u16| {
+        PlayerCommand::new(
+            PlayerId(0),
+            seq,
+            Command::DebugPlaceBuilding {
+                owner: PlayerId(0),
+                kind: k,
+                tile: Tile::new(x, y),
+                complete: false,
+            },
+        )
+    };
+    let mut sim = standard(40);
+    // A wall seals (30, 59) and (31, 59) between row 58 and a Croft site at
+    // (30, 60), whose other ring tiles west and east are blocked too.
+    let wall = [
+        (29, 58),
+        (30, 58),
+        (31, 58),
+        (32, 58),
+        (29, 59),
+        (32, 59),
+        (29, 60),
+        (29, 61),
+        (32, 60),
+        (32, 61),
+    ];
+    let mut cmds = vec![place_site(0, croft, 30, 60)];
+    for (i, (x, y)) in wall.iter().enumerate() {
+        cmds.push(place_site(1 + u32::try_from(i).unwrap(), tower, *x, *y));
+    }
+    let events = apply(&mut sim, cmds);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let site = BuildingId(3);
+    // UnitId(11) outside to the north, UnitId(12) inside the pocket.
+    let events = apply(
+        &mut sim,
+        vec![
+            spawn_kind(0, 20, 0, 31, 56, 1),
+            spawn_kind(0, 21, 0, 30, 59, 1),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        sim.view()
+            .map()
+            .tile_of(sim.view().unit(UnitId(12)).unwrap().pos),
+        Tile::new(30, 59)
+    );
+    // The pocket unit cannot reach any other site's ring.
+    assert_eq!(
+        sim.view()
+            .check_build(PlayerId(0), UnitId(12), croft, Tile::new(36, 64)),
+        Err(RejectReason::Unreachable)
+    );
+    let events = apply(&mut sim, vec![build(0, 22, 12, croft, 36, 64)]);
+    assert_eq!(rejections(&events), [RejectReason::Unreachable]);
+    // The northern unit resumes the site and walks round to the south side.
+    let events = apply(&mut sim, vec![build(0, 23, 11, croft, 30, 60)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let goal = sim
+        .view()
+        .unit(UnitId(11))
+        .unwrap()
+        .order
+        .clone()
+        .unwrap()
+        .goal;
+    let stand = sim.view().map().tile_of(goal);
+    assert_eq!(
+        stand.y, 62,
+        "a reachable south ring tile, not the pocket: {stand:?}"
+    );
+    let ticks = rules.build_time_ticks(rules.building_kind(croft.0).unwrap());
+    assert!(run_until(&mut sim, ticks + 800, |s| {
+        s.view().building(site).unwrap().construction == Construction::Complete
+    }));
+
+    // Fully enclosed: block the south ring row too; a resume is SiteBlocked.
+    let mut sim = standard(41);
+    let mut cmds = vec![place_site(0, croft, 30, 60)];
+    let ring = sim::construction::ring(
+        sim::construction::Rect {
+            x0: 30,
+            y0: 60,
+            x1: 31,
+            y1: 61,
+        },
+        128,
+        128,
+    );
+    for (i, t) in ring.iter().enumerate() {
+        cmds.push(place_site(1 + u32::try_from(i).unwrap(), tower, t.x, t.y));
+    }
+    let events = apply(&mut sim, cmds);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        sim.view()
+            .check_build(PlayerId(0), UnitId(1), croft, Tile::new(30, 60)),
+        Err(RejectReason::SiteBlocked)
+    );
+    let events = apply(&mut sim, vec![build(0, 40, 1, croft, 30, 60)]);
+    assert_eq!(rejections(&events), [RejectReason::SiteBlocked]);
+}
+
+/// Resuming a site with a second Yeoman hands the site over: the first
+/// builder goes idle and nothing is charged.
+#[test]
+fn economy_resume_hands_the_site_to_the_new_builder() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    let mut sim = standard(42);
+    apply(&mut sim, vec![build(0, 0, 1, croft, 28, 60)]);
+    let site = BuildingId(3);
+    assert_eq!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Build { site })
+    );
+    let lumber = resource(&rules, "lumber");
+    let before = stock(&sim, 0, lumber);
+    let events = apply(&mut sim, vec![build(0, 1, 2, croft, 28, 60)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(sim.view().unit(UnitId(1)).unwrap().job.is_none());
+    assert_eq!(
+        sim.view().unit(UnitId(2)).unwrap().job,
+        Some(Job::Build { site })
+    );
+    assert!(stock(&sim, 0, lumber) >= before, "no second charge");
+}
+
+/// Standard-start units never share a tile, across kinds and players.
+#[test]
+fn economy_standard_start_units_never_share_a_tile() {
+    let mut rules = load_rules();
+    rules.standard_start.units.insert("scribe".into(), 3);
+    let setup = {
+        let mut s = MatchSetup::scenario(&rules, 43);
+        s.start = StartKind::Standard;
+        s
+    };
+    let sim = Sim::new(setup, rules, Box::new(NoAi));
+    let map = sim.view().map();
+    let tiles: Vec<Tile> = sim.view().units().map(|u| map.tile_of(u.pos)).collect();
+    let mut unique = tiles.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), tiles.len(), "{tiles:?}");
+    assert_eq!(tiles.len(), 16);
+    assert!(tiles.iter().all(|t| map.passable(*t)));
 }

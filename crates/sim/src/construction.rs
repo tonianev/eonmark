@@ -122,6 +122,53 @@ pub fn ring(rect: Rect, width: u16, height: u16) -> Vec<Tile> {
     out
 }
 
+/// The tiles of `ring` a unit standing on `from` can walk to while `rect`
+/// is blocked (whether or not it is blocked in `map` yet), in ring order.
+/// Walking is 4-connected here: a diagonal step needs both orthogonal tiles
+/// clear (`Map::neighbors8`), so it never connects anything a 4-step walk
+/// does not. A blocked `from` (defensive; units never stand on blocked
+/// tiles) is replaced by the nearest passable tile, as pathing does.
+pub(crate) fn reachable_ring(map: &Map, from: Tile, rect: Rect, ring: &[Tile]) -> Vec<Tile> {
+    let open = |t: Tile| map.passable(t) && !rect.contains(t);
+    let Some(start) = (if open(from) {
+        Some(from)
+    } else {
+        map.nearest_passable(from, None).filter(|t| open(*t))
+    }) else {
+        return Vec::new();
+    };
+    let mut seen = vec![false; map.len()];
+    let mut queue = std::collections::VecDeque::from([start]);
+    seen[map.idx(start)] = true;
+    while let Some(t) = queue.pop_front() {
+        for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+            let Some(n) = map.offset(t, dx, dy) else {
+                continue;
+            };
+            let i = map.idx(n);
+            if !seen[i] && open(n) {
+                seen[i] = true;
+                queue.push_back(n);
+            }
+        }
+    }
+    ring.iter().copied().filter(|t| seen[map.idx(*t)]).collect()
+}
+
+/// Where a builder standing at `from` works on a site at `rect`: the
+/// reachable ring tile nearest to `pos` (ties by tile), `SiteBlocked` when
+/// no ring tile is passable, `Unreachable` when none can be walked to.
+pub(crate) fn builder_stand(map: &Map, rect: Rect, pos: FxVec2) -> Result<Tile, RejectReason> {
+    let ring_tiles = ring(rect, map.width(), map.height());
+    if !ring_tiles.iter().any(|t| map.passable(*t)) {
+        return Err(RejectReason::SiteBlocked);
+    }
+    reachable_ring(map, map.tile_of(pos), rect, &ring_tiles)
+        .into_iter()
+        .min_by_key(|t| (pos.dist_sq_i64(map.center_of(*t)), *t))
+        .ok_or(RejectReason::Unreachable)
+}
+
 /// A unit is at work on a building whose footprint is `rect` when it has no
 /// order and its post (the tile it arrived at) is adjacent to the footprint.
 /// The post, not the live position, so separation jostle never pauses work.
@@ -168,7 +215,8 @@ pub(crate) enum BuildPlan {
 /// 1. the unit exists and is `p`'s (`NoValidUnits`);
 /// 2. the kind exists (`UnknownBuildingKind`);
 /// 3. the unit's kind can build (`NotABuilder`);
-/// 4. an own site of this kind at `nw` is resumed ([`BuildPlan::Resume`]);
+/// 4. an own site of this kind at `nw` is resumed ([`BuildPlan::Resume`]),
+///    when the unit can reach a tile beside it (as in check 12);
 /// 5. the footprint is on the map (`SiteOutOfBounds`);
 /// 6. every footprint tile is `p`'s territory (`OutsideBorders`);
 /// 7. every footprint tile is passable (`SiteBlocked`);
@@ -179,7 +227,9 @@ pub(crate) enum BuildPlan {
 ///     its limit there, sites included (`PerTownLimitReached`);
 /// 11. an `Adjacent` gatherer has at least one resource tile beside it
 ///     (`NoAdjacentResource`);
-/// 12. at least one ring tile is passable for the builder (`SiteBlocked`);
+/// 12. the builder can walk to a tile of the ring around the footprint,
+///     with the footprint already blocked: `SiteBlocked` when no ring tile
+///     is passable, `Unreachable` when none is reachable;
 /// 13. `p` can pay the ramped cost (`CannotAfford`, first short resource).
 pub(crate) fn validate_build(
     state: &State,
@@ -211,6 +261,8 @@ pub(crate) fn validate_build(
             && b.tile == nw
             && matches!(b.construction, Construction::Site { .. })
     }) {
+        let rect = building_rect(rules, map, site);
+        builder_stand(map, rect, u.pos)?;
         return Ok(BuildPlan::Resume { site: site.id });
     }
     let rect =
@@ -251,12 +303,7 @@ pub(crate) fn validate_build(
         }
     }
     let slots = slots_for(kind, rect, def)?;
-    if !ring(rect, map.width(), map.height())
-        .iter()
-        .any(|t| map.passable(*t))
-    {
-        return Err(RejectReason::SiteBlocked);
-    }
+    builder_stand(map, rect, u.pos)?;
     let cost = economy::building_cost_for(state, rules, p, kind_id);
     if let Some(resource) = economy::first_short(&state.economy.player(p).stock, &cost) {
         return Err(RejectReason::CannotAfford { resource });
@@ -362,7 +409,9 @@ pub(crate) fn place(
 }
 
 /// Make `unit` the builder of `site`: any previous builder of the site goes
-/// idle, and the unit walks to the ring tile nearest to it (ties by tile).
+/// idle, and the unit walks to the reachable ring tile nearest to it (ties
+/// by tile). `validate_build` checked that one exists; if none does, the
+/// unit is left as it was.
 pub(crate) fn assign_builder(
     state: &mut State,
     rules: &Rules,
@@ -370,20 +419,16 @@ pub(crate) fn assign_builder(
     site: BuildingId,
     tick: u32,
 ) {
+    let rect = building_rect(rules, &state.map, &state.buildings[&site]);
+    let Ok(stand) = builder_stand(&state.map, rect, state.units[&unit].pos) else {
+        return;
+    };
     for u in state.units.values_mut() {
         if u.job == Some(Job::Build { site }) {
             u.job = None;
         }
     }
-    let rect = building_rect(rules, &state.map, &state.buildings[&site]);
-    let map = &state.map;
-    let pos = state.units[&unit].pos;
-    let stand = ring(rect, map.width(), map.height())
-        .into_iter()
-        .filter(|t| map.passable(*t))
-        .min_by_key(|t| (pos.dist_sq_i64(map.center_of(*t)), *t))
-        .expect("validated: a passable ring tile exists");
-    let goal = map.center_of(stand);
+    let goal = state.map.center_of(stand);
     let u = state.units.get_mut(&unit).expect("validated unit");
     u.job = Some(Job::Build { site });
     u.seek_at = None;

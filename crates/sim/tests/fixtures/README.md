@@ -16,7 +16,12 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
-Recorded 2026-10-10 at `rules_version` 5, `SIM_VERSION` 5 (a search suspended
+Recorded 2026-10-14 at `rules_version` 6, `SIM_VERSION` 5 with `just rerecord`
+(M3a rules data: `buildings.ron`, the Scribe and Skirmisher, the ramp,
+queue, idle-seek and standard-start fields and per-kind vision joined
+`rules_hash`; the sim does not read them yet, so every final hash is
+unchanged from 5/5 and only the headers differ). Before that, 2026-10-10 at
+`rules_version` 5, `SIM_VERSION` 5 (a search suspended
 on an older cost grid is requeued instead of resumed, and `AStarSearch.generation`
 joined the serialised state; the cost grid never changes in these fixtures, so
 every final hash is unchanged from 4/4 and only the headers and the periodic
@@ -35,6 +40,17 @@ trailer, `Pathing::service` no longer parks a zero-expansion search; final
 hashes unchanged from 1/1). Command:
 `cargo run -p sim-cli --release -- record --scenario <name> --out crates/sim/tests/fixtures/<name>.eonreplay`,
 then the printed `final_hash` goes into `<name>.hash`.
+
+To regenerate after a `rules_version` bump, run `just rerecord` (every
+fixture) or `just rerecord <name> ...` (only those). It runs
+`scripts/rerecord_fixtures.sh`, which builds `sim-cli` in release and, per
+fixture, runs the `record` command above, then `sim-cli verify` on the new
+file, and writes the `final_hash` from verify's `OK` line into
+`<name>.hash`, so each hash comes from an independent re-simulation rather
+than from the recorder. It finishes by checking the working tree against the
+merge base with main: if a fixture differs, the `rules_version` in
+`data/rules/rules.ron` must be larger than the base's (CI's
+`scripts/check_fixture_policy.sh` checks the same on the commits).
 
 Regeneration policy (docs/DETERMINISM.md, "Golden fixtures"): fixtures change
 only in a commit that bumps `rules_version` in `data/rules/rules.ron` with a

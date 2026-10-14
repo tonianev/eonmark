@@ -37,6 +37,40 @@ fn town_radii(rules: &Rules) -> (u16, u16) {
     )
 }
 
+/// The Watchtower's border radius from `buildings.ron`.
+fn watchtower_radius(rules: &Rules) -> u16 {
+    let (_, tower) = rules
+        .building_kind_by_id("watchtower")
+        .expect("buildings.ron has a watchtower");
+    u16::try_from(
+        tower
+            .border_radius_tiles
+            .expect("the watchtower projects a border"),
+    )
+    .expect("radius fits u16")
+}
+
+/// Every tile's owner on a `w` x `h` field, checked against the oracle;
+/// returns (P0 tiles, P1 tiles, neutral tiles).
+fn counts_checked_against_oracle(f: &TerritoryField, sources: &[Source]) -> (u32, u32, u32) {
+    let (mut p0, mut p1, mut neutral) = (0, 0, 0);
+    for y in 0..f.height() {
+        for x in 0..f.width() {
+            let t = Tile::new(x, y);
+            let owner = f.owner_at(t);
+            assert_eq!(owner, oracle_owner(sources, 2, t), "{t:?}");
+            match owner {
+                Some(PlayerId(0)) => p0 += 1,
+                Some(_) => p1 += 1,
+                None => neutral += 1,
+            }
+        }
+    }
+    assert_eq!(p0, f.owned_tile_count(PlayerId(0)));
+    assert_eq!(p1, f.owned_tile_count(PlayerId(1)));
+    (p0, p1, neutral)
+}
+
 fn source(owner: SourceOwner, x: u16, y: u16, radius: u16) -> Source {
     Source {
         owner,
@@ -172,6 +206,75 @@ fn territory_odd_width_centre_column_is_neutral_wherever_reached() {
     }
 }
 
+/// The M3a territory acceptance fixture at field level: both Seats at the
+/// map starts with the tier-1 radius, plus a P0 Watchtower at (43, 64) with
+/// its radius from `buildings.ron`. Nothing reaches columns 63 and 64, so
+/// the mirrored midline is neutral (the sim-level fixture from the standard
+/// start lands with the Town loop).
+#[test]
+fn territory_fixture_two_towns_and_a_watchtower_golden_counts_field_level() {
+    let rules = load_rules();
+    let (r1, _) = town_radii(&rules);
+    let tower = watchtower_radius(&rules);
+    let map = rules.map(&rules.default_map).expect("default map");
+    let mut f = TerritoryField::new(map.width, map.height, 2);
+    let mut sources = Vec::new();
+    for (p, s) in map.starts.iter().enumerate() {
+        let src = source(player(u8::try_from(p).unwrap()), s.x, s.y, r1);
+        f.add_source(BuildingId(u32::try_from(p).unwrap() + 1), src);
+        sources.push(src);
+    }
+    let watch = source(player(0), 43, 64, tower);
+    f.add_source(BuildingId(3), watch);
+    sources.push(watch);
+
+    let (p0, p1, neutral) = counts_checked_against_oracle(&f, &sources);
+    for y in 0..map.height {
+        for x in [map.width / 2 - 1, map.width / 2] {
+            assert_eq!(f.owner_at(Tile::new(x, y)), None, "midline ({x}, {y})");
+        }
+    }
+    if (r1, tower, map.width, map.height) == (20, 2, 128, 128) {
+        assert_eq!((p0, p1, neutral), (1248, 1245, 13891));
+    }
+}
+
+/// The contested configuration (mirrored Towns at (48, 64) and (79, 64))
+/// plus a P0 Watchtower on the ford at (63, 64): P0 is stronger on its own
+/// column, and the three tiles east of it become exact ties, neutral.
+#[test]
+fn territory_contested_watchtower_on_the_ford_creates_neutral_ties() {
+    let rules = load_rules();
+    let (r1, _) = town_radii(&rules);
+    let tower = watchtower_radius(&rules);
+    let map = rules.map(&rules.default_map).expect("default map");
+    let (w, h) = (map.width, map.height);
+    let sources = [
+        source(player(0), 48, 64, r1),
+        source(player(1), w - 1 - 48, 64, r1),
+        source(player(0), 63, 64, tower),
+    ];
+    let mut f = TerritoryField::new(w, h, 2);
+    for (i, s) in sources.iter().enumerate() {
+        f.add_source(BuildingId(u32::try_from(i).unwrap() + 1), *s);
+    }
+    let counts = counts_checked_against_oracle(&f, &sources);
+    if (r1, tower, w, h) == (20, 2, 128, 128) {
+        assert_eq!(counts, (1167, 1164, 14053));
+        assert_eq!(f.owner_at(Tile::new(63, 64)), Some(PlayerId(0)));
+        for y in 63..=65 {
+            let t = Tile::new(64, y);
+            assert!(f.strength_at(player(0), t) > 0, "{t:?} reached");
+            assert_eq!(
+                f.strength_at(player(0), t),
+                f.strength_at(player(1), t),
+                "{t:?} tie"
+            );
+            assert_eq!(f.owner_at(t), None, "{t:?} neutral");
+        }
+    }
+}
+
 /// One random edit of the source set.
 #[derive(Debug, Clone)]
 enum Edit {
@@ -287,7 +390,8 @@ proptest! {
     /// moves, radius changes, owners moving to and from the neutral layer,
     /// mirrored pairs): incremental recompute equals a full recompute, by
     /// value and by hash. Radii are the Town tiers from `rules.ron`, each
-    /// plus 0 to 3 for Statecraft (M4a), and small ones for Watchtowers.
+    /// plus 0 to 3 for Statecraft (M4a), the Watchtower's from
+    /// `buildings.ron` and small ones.
     #[test]
     fn territory_incremental_recompute_equals_full_recompute(
         edits in prop::collection::vec(edit(128, 128), 200),
@@ -296,7 +400,7 @@ proptest! {
         let map = rules.map(&rules.default_map).expect("default map");
         let (r1, r2) = town_radii(&rules);
         let mut radii: Vec<u16> = (0..=3).flat_map(|s| [r1 + s, r2 + s]).collect();
-        radii.extend([1, 2, 3]);
+        radii.extend([1, 2, 3, watchtower_radius(&rules)]);
         check_incremental_equals_full(map.width, map.height, &radii, &edits)?;
     }
 
@@ -308,6 +412,7 @@ proptest! {
     ) {
         let rules = load_rules();
         let (r1, r2) = town_radii(&rules);
-        check_incremental_equals_full(47, 33, &[1, 2, 5, r1, r2], &edits)?;
+        let tower = watchtower_radius(&rules);
+        check_incremental_equals_full(47, 33, &[1, 2, 5, tower, r1, r2], &edits)?;
     }
 }

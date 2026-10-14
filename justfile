@@ -120,6 +120,10 @@ verify *ARGS:
       cargo run -q -p sim-cli --locked --release -- verify "$f"
     done
 
+# Re-record every golden fixture (or the names given) after a rules_version bump; .hash comes from verify.
+rerecord *NAMES:
+    scripts/rerecord_fixtures.sh {{NAMES}}
+
 # Golden fixtures change only with a rules_version bump; compares HEAD against BASE (default: merge base with main).
 fixture-policy BASE="":
     #!/usr/bin/env bash

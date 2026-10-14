@@ -260,6 +260,7 @@ Regeneration policy:
 - Fixtures regenerate only in a commit that bumps `rules_version` in `data/rules/rules.ron` and states the reason in one line of the commit message. CI enforces it: `scripts/check_fixture_policy.sh <base>` fails a pull request whose diff touches `crates/sim/tests/fixtures/*.eonreplay` or `*.hash` unless `rules_version` increased in the same diff (`just fixture-policy` runs it locally against the merge base with main).
 - A changed hash without that bump is a bug, not a fixture update. Find it with the bisect procedure above.
 - `RULES CHANGED since recording` means someone edited RON without bumping. Either revert the edit or bump and regenerate in the same commit.
+- `just rerecord [NAMES]` (`scripts/rerecord_fixtures.sh`) is the regeneration command: it re-records every fixture, or the ones named, in release, writes each `.hash` from an independent `sim-cli verify` OK line rather than from the recorder, and then fails if a fixture differs from the merge base with main while the working-tree `rules_version` is not larger than the base's (`scripts/check_fixture_policy.sh` checks the same on commits in CI). It is also the re-record step of the data-only contributor path in [../CONTRIBUTING.md](../CONTRIBUTING.md).
 - A behaviour change in Rust that is intended (a new movement rule, a fixed bug) bumps `SIM_VERSION` as well, and the commit regenerates every fixture.
 
 ## What exists at M0

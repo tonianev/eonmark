@@ -6,7 +6,7 @@ This document specifies Eonmark's economy: the four resources, where they come f
 | --- | --- |
 | Milestone | M3a (sim), M3b (HUD readout) |
 | Labels | `area:sim`, `area:rules`, `kind:balance` for tuning |
-| Rules files | `data/rules/rules.ron` (Yield Cap table, pop cap, ramping params, late-game knobs), `data/rules/resources.ron`, `data/rules/buildings.ron` (gather rates, slots), `data/rules/units.ron` (Yeoman, Scribe) |
+| Rules files | `data/rules/rules.ron` (Yield Cap table, pop cap, building and military ramp params, `train_queue_max`, `idle_seek_delay_ds`, `idle_seek_retry_ds`, `standard_start`, late-game knobs), `data/rules/resources.ron`, `data/rules/buildings.ron` (costs, base yields, gather rates, slots, Croft limit `max_per_town`), `data/rules/units.ron` (Yeoman, Scribe, Skirmisher: cost, ramp, pop, training time, trainer) |
 | Sim module | `crates/sim/src/economy.rs` |
 | Sub-hash | `economy` |
 
@@ -28,7 +28,7 @@ Rates are authored per 30 seconds in `data/rules/buildings.ron`. At 20 Hz, 30 s 
 | Building | Resource | Slots | Rate per worker per 30 s | Base rate per 30 s with no worker |
 | --- | --- | --- | --- | --- |
 | Town | Grain, Lumber | none | n/a | 10 Grain, 10 Lumber |
-| Croft | Grain | 1 Yeoman; at most 5 Crofts per Town | 10 | 0 |
+| Croft | Grain | 1 Yeoman; at most 5 Crofts per Town (`max_per_town`) | 10 | 0 |
 | Lumber Yard | Lumber | one per adjacent forest tile, max 6 | 10 | 0 |
 | Ore Pit | Ore | one per adjacent mountain tile, max 6 | 10 | 0 |
 | Scriptorium | Lore | 3 Scribes | 5 | 10 |
@@ -83,19 +83,21 @@ Everything gets pricier the more you own. Three rules, all integer, all in `crat
 
 ### Yeomen: +1 Grain each
 
+The Yeoman's entry in `units.ron` has `cost: {"grain": 20}` and `ramp: PerUnit({"grain": 1})`: each `PerUnit` amount is added once per unit of the kind the player has alive or queued (`Rules::unit_cost`).
+
 ```text
-cost = yeoman_base_grain + yeoman_ramp_grain * n
+cost = cost["grain"] + ramp["grain"] * n
      = 20 + 1 * n
 n    = Yeomen alive plus Yeomen currently queued
 ```
 
-Queuing a Yeoman raises the next Yeoman's cost by 1 Grain before it finishes. Whether the 5 starting Yeomen count toward `n` is an open question (below).
+Queuing a Yeoman raises the next Yeoman's cost by 1 Grain before it finishes. The 5 starting Yeomen count toward `n`, so the first trained Yeoman costs 25 Grain (open question 1, answered for M3a).
 
 ### Buildings: +20% of base per copy owned or queued
 
 ```text
-cost = floor(base * (1000 + 200 * n) / 1000)
-n    = copies of that building kind owned or under construction
+cost = floor(base * (1000 + building_ramp_step_permille * n) / 1000)   // step 200
+n    = copies of that building kind owned or under construction, the Seat included
 ```
 
 | n | Multiplier |
@@ -106,7 +108,7 @@ n    = copies of that building kind owned or under construction
 | 3 | 1.60 |
 | 4 | 1.80 |
 
-The second Town costs exactly 1.2 times the first. The acceptance test checks this against the `rules.ron` formula, not a hard-coded number.
+The second Town costs exactly 1.2 times the first: 120 Lumber against the Town's base 100 in `buildings.ron`. That plus one 30 Lumber Croft is exactly the 150 starting Lumber, which the M3a economy fixture relies on. The acceptance test checks this against the `rules.ron` formula, not a hard-coded number.
 
 ### Military units: triangular per training-building class, capped at 2.25x
 
@@ -115,11 +117,11 @@ The ramp counts units currently queued, not units alive, so it throttles product
 ```text
 k       = 1 + units already queued at buildings of this class
 T(m)    = m * (m + 1) / 2                       // triangular number
-mult    = min(2250, 1000 + military_ramp_step_permille * T(k - 1))
+mult    = min(military_ramp_cap_permille, 1000 + military_ramp_step_permille * T(k - 1))
 cost    = floor(base * mult / 1000)             // per resource
 ```
 
-With the starting step of 100 permille:
+A unit kind opts in with `ramp: Military` in `units.ron`, as the Skirmisher does. With the starting step of 100 permille (`military_ramp_step_permille: 100`) and the cap of 2250 permille (`military_ramp_cap_permille: 2250`):
 
 | k (position in class queue) | T(k-1) | Multiplier |
 | --- | --- | --- |
@@ -149,16 +151,16 @@ Scribes cost 1 pop. Per-kind pop costs for the other units are in `units.ron`. A
 
 ## Idle Yeoman work seeking
 
-A Yeoman that has been idle for 5 s (100 ticks) looks for work on its own.
+A Yeoman that has been idle for `idle_seek_delay_ds` (50 ds = 5 s = 100 ticks) looks for work on its own.
 
 ```text
 candidates = gather buildings owned by the player with a free slot
 order by (dist_sq_i64(yeoman, building), BuildingId)
 if any: issue an internal Gather order to the first
-else:   stay idle and retry after another 100 ticks
+else:   stay idle and retry after idle_seek_retry_ds (50 ds = 100 ticks)
 ```
 
-The ordering is a total order with an id tiebreak, as every sort in the sim must be (see `docs/DETERMINISM.md`). The 100-tick retry interval is an M3a choice, not a design number. The delay is a good first issue: tune `idle_seek_delay_ds` (starting value 50, that is 5 s) in `rules.ron` and document the play-bots result.
+The ordering is a total order with an id tiebreak, as every sort in the sim must be (see `docs/DETERMINISM.md`). The retry interval is an M3a choice, not a design number: it is its own field, `idle_seek_retry_ds` in `rules.ron`, starting equal to the delay. The delay is a good first issue: tune `idle_seek_delay_ds` (starting value 50, that is 5 s) in `rules.ron` and document the play-bots result.
 
 ## Standard start
 
@@ -173,6 +175,8 @@ The ordering is a total order with an id tiebreak, as every sort in the sim must
 | Age | Hearth |
 | Yield Cap | 70 |
 | Pop cap | 25 |
+
+The Seat, the Yeomen and the stockpiles are data: `standard_start` in `rules.ron` holds `units: {"yeoman": 5}` and `stockpile: {"grain": 150, "lumber": 150, "ore": 0, "lore": 0}`, and the Seat is one Town of the `town: true` kind in `buildings.ron`, centred on the map start (the map validator checks that the 3x3 footprint fits there on grass). By owner decision the sim selects it through `MatchSetup.start: StartKind { Empty, Standard }`, added later in M3a: skirmish matches use `Standard`, scenarios `Empty`.
 
 ## Commands and rejections
 
@@ -195,6 +199,8 @@ The economy consumes `Build { unit, kind, tile }`, `Train { building, kind }`, `
 - [ ] Scripted headless economy fixture: from the standard start (1 Town, 5 Yeomen, 150 Grain / 150 Lumber / 0 Ore / 0 Lore) a fixed build order founds a second Town before tick 3600 and the final hash matches the fixture.
 - [ ] Data-only contributor path: change croft gather rate from 10 to 12 in data/rules/buildings.ron, run `sim-cli data-check` and `cargo test -p sim` (the flatline test reads the number from data) without touching Rust; documented in CONTRIBUTING.
 
+  Note (owner decision): any RON edit changes `rules_hash`, so the documented path also bumps `rules_version` and runs `just rerecord` between `data-check` and `cargo test -p sim`; otherwise the golden fixtures report `RULES CHANGED since recording`. See CONTRIBUTING, "The data-first path".
+
 The complete M3a list, including the territory lines, is in [territory.md](territory.md) and `docs/ROADMAP.md`.
 
 ```bash
@@ -204,9 +210,9 @@ cargo run -p sim-cli -- data-check data/
 
 ## Open tuning questions
 
-1. Do the 5 starting Yeomen count toward the Yeoman ramp? If yes, the first trained Yeoman costs 25 Grain; if no, 20.
+1. Do the 5 starting Yeomen count toward the Yeoman ramp? If yes, the first trained Yeoman costs 25 Grain; if no, 20. Answered for M3a: they count, so the first trained Yeoman costs 25 Grain.
 2. The military ramp step (100 permille) is derived, not designed. Confirm it, and confirm that the class counter spans every unit kind the class trains.
-3. Should the idle-Yeoman retry interval equal the initial delay (100 ticks), or be longer to reduce path requests?
+3. Should the idle-Yeoman retry interval equal the initial delay (100 ticks), or be longer to reduce path requests? Answered in data: `idle_seek_retry_ds` is its own field in `rules.ron`, starting at 50 ds (100 ticks), equal to `idle_seek_delay_ds`, and tunable without Rust.
 4. Adjacency for Lumber Yard and Ore Pit slots: 8-neighbourhood of the footprint is the M3a reading.
 5. Should Grain, Lumber and Ore have a stockpile cap at all? v0.1 says no.
 6. Is the Yield Cap decay after minute 30 ever on by default? M6 decides from the 20 seeded bot games.

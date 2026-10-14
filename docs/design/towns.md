@@ -1,12 +1,12 @@
 # Towns
 
-This document specifies Towns: how they are founded, how many a player may hold, how their border radius grows, why they cannot be destroyed, the annexation state machine that transfers them, and the victory conditions that depend on them. Every number here is a starting value in `data/rules/rules.ron` and may move during M6 tuning. Founding, limits and radius growth land in M3a (`crates/sim/src/town.rs`); annexation and victory land in M5a. For the design lineage see [prior-art.md](prior-art.md).
+This document specifies Towns: how they are founded, how many a player may hold, how their border radius grows, why they cannot be destroyed, the annexation state machine that transfers them, and the victory conditions that depend on them. Every number here is a starting value in `data/rules/rules.ron` or `data/rules/buildings.ron` and may move during M6 tuning. Founding, limits and radius growth land in M3a (`crates/sim/src/town.rs`); annexation and victory land in M5a. For the design lineage see [prior-art.md](prior-art.md).
 
 | Field | Value |
 | --- | --- |
 | Milestone | M3a (founding, limit, radius), M5a (annexation, victory) |
 | Labels | `area:sim`, `area:rules` |
-| Rules files | `data/rules/rules.ron` (town radius, town limit, annexation 60 s, defender radius 6, match cap 45 min), `data/rules/buildings.ron` (Town HP, cost, shooter stats) |
+| Rules files | `data/rules/rules.ron` (town radius, town limit `town_limit_base`, annexation 60 s, defender radius 6, match cap 45 min), `data/rules/buildings.ron` (Town footprint, HP, cost, build time, base yield; the Croft limit `max_per_town`; shooter stats from M4a) |
 | Sim modules | `crates/sim/src/town.rs`, annexation in `crates/sim/src/attrition.rs` neighbourhood or its own module, `outcome()` in `state.rs` |
 | Sub-hash | `buildings`, `territory` |
 
@@ -14,26 +14,28 @@ This document specifies Towns: how they are founded, how many a player may hold,
 
 | Parameter | Start value | Where |
 | --- | --- | --- |
-| Town limit | 1 + Statecraft level | `rules.ron`, `techs.ron` row `town_limit Add 1` |
+| Town limit | 2 + Statecraft level (the Seat and Town sites count) | `rules.ron` `town_limit_base: 2`, `techs.ron` row `town_limit Add 1` |
 | Border radius, tier 1 | 20 tiles | `rules.ron` |
 | Border radius, tier 2 | 24 tiles, once 5 distinct building kinds are attributed to the Town | `rules.ron` |
 | Town base yield | 10 Grain and 10 Lumber per 30 s | `buildings.ron` |
-| Crofts per Town | 5 | `rules.ron` |
-| Town HP and cost | set in `buildings.ron` at M3a | `buildings.ron` |
+| Crofts per Town | 5 | `buildings.ron` (`croft` `max_per_town: Some(5)`) |
+| Town footprint, HP, cost, build time | 3x3 tiles, 2000 HP, 100 Lumber (120 for the second, with the building ramp), 600 ds = 60 s | `buildings.ron` |
 | Annexation timer | 60 s = 1200 ticks | `rules.ron` |
 | Defender exclusion radius | 6 tiles | `rules.ron` |
 | Match cap | 45 min = 54000 ticks | `rules.ron` |
 
 | Statecraft level | Town limit |
 | --- | --- |
-| 0 | 1 |
-| 1 | 2 |
-| 2 | 3 |
-| 3 | 4 |
+| 0 | 2 |
+| 1 | 3 |
+| 2 | 4 |
+| 3 | 5 |
+
+The base limit is 2 by owner decision, so a second Town can be founded in M3a, before Statecraft exists (it arrives in M4a); the M3a economy fixture founds one. The design's earlier reading was 1 + Statecraft level.
 
 ## Founding
 
-A Town is a building kind. A Yeoman founds one through `Build { unit, kind: Town, tile }`, so it obeys every construction rule: the tile must be inside the founder's borders (`is_buildable`), passable and unoccupied, the player must be under the town limit, and the ramped cost (base times 1.2 for the second copy, see [economy.md](economy.md)) must be affordable. The second Town is therefore placed at the edge of current borders and extends them by its own radius when complete.
+A Town is a building kind. A Yeoman founds one through `Build { unit, kind: Town, tile }`, so it obeys every construction rule: the tile must be inside the founder's borders (`is_buildable`), passable and unoccupied, the player must be under the town limit, and the ramped cost (base times 1.2 for the second copy, 120 Lumber, see [economy.md](economy.md)) must be affordable. The second Town is therefore placed at the edge of current borders and extends them by its own radius when complete.
 
 | Rejection | Reason |
 | --- | --- |

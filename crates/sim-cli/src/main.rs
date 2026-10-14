@@ -274,10 +274,12 @@ fn data_check(dir: &Path) -> ExitCode {
     match Rules::load(dir) {
         Ok(r) => {
             println!(
-                "OK rules_version={} rules_hash=0x{:016x} resources={} maps={}",
+                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} maps={}",
                 r.rules_version,
                 r.rules_hash(),
                 r.resources.resources.len(),
+                r.units.len(),
+                r.buildings.len(),
                 r.maps.keys().cloned().collect::<Vec<_>>().join(",")
             );
             ExitCode::SUCCESS

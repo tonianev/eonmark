@@ -21,6 +21,7 @@
 //! | [`movement`] | `SpatialGrid`, movement step, group targets |
 //! | [`replay`] | `.eonreplay` writer, reader, `verify` |
 //! | [`scenarios`] | scripted M1 command streams shared by tests, benches, `record` and fixtures |
+//! | [`territory`] | `TerritoryField`: integer disc kernels per owner layer, tie-to-neutral ownership |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
@@ -37,6 +38,7 @@ pub mod pathing;
 pub mod replay;
 pub mod scenarios;
 pub mod state;
+pub mod territory;
 
 pub use ai_hook::{AiController, SimView};
 pub use command::{Command, PlayerCommand, sort_commands};
@@ -53,3 +55,4 @@ pub use state::{
     Building, MatchSetup, MoveOrder, Player, PlayerSlot, Post, RejectReason, SIM_VERSION, Sim,
     SimEvent, SnapshotError, SubHashes, Unit,
 };
+pub use territory::{InvalidTerritoryField, Source, SourceOwner, TerritoryField};

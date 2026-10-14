@@ -75,7 +75,7 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `ai_hook.rs` | `AiController` trait, `SimView` | M0 |
 | `economy.rs` | Integer micro-unit income, Yield Cap, gather slots, ramping costs, pop cap, idle-worker seeking | M3a |
 | `town.rs` | Founding, radius growth, Town limit, annexation state machine | M3a, M5a |
-| `territory.rs` | `TerritoryField`, disc kernels, pure tie-to-neutral, incremental recompute, `is_buildable` | M3a |
+| `territory.rs` | `TerritoryField`, disc kernels, pure tie-to-neutral, incremental recompute, `is_buildable` | M3a (field done; wired into `State` with construction) |
 | `construction.rs` | Build sites, progress, cancel | M3a |
 | `tech.rs` | Four lines, three ages, permille `Modifier` resolver | M4a |
 | `combat.rs` | Stats, auto-acquire, counter multipliers, Watchtower and Town shooters | M4a |
@@ -83,7 +83,7 @@ The deterministic simulation library. Pure Rust, `#![forbid(unsafe_code)]`, sing
 | `visibility.rs` | Per-player `u8` grid (0 unexplored, 1 explored, 2 visible), hashed | M7 |
 | `influence.rs` | 4x4-tile influence maps, derived and unhashed | M6 |
 | `tests/` | `m0.rs`, `m1.rs` (determinism, snapshot/restore, proptests, path oracle, goldens), `m2.rs` (the four M2 scenarios, AttackMove-as-Move); fixtures `move_500_short`, `move_500`, `group_spiral`, `snapshot_restore` under `tests/fixtures/` with `.hash` siblings; economy, territory, tech, combat, attrition tests later | M1 (done), M2 (done) onward |
-| `benches/` | criterion benches `step_500_units`, `astar_budget` (M1, done), `territory_recompute` (M3a) | M1, M3a |
+| `benches/` | criterion benches `step_500_units`, `astar_budget` (M1, done), `territory_recompute` (M3a, done) | M1, M3a |
 
 State layout is not an ECS. Units and buildings live in `BTreeMap<UnitId, Unit>` and `BTreeMap<BuildingId, Building>` with the `IdGen` allocator (`IdGen::unit()`, `IdGen::building()`), itself hashed state. Iteration is always id order or sorted order with an id tiebreak. Derived structures (influence maps, spatial grid, connected components, path cache) are rebuilt, never hashed.
 
@@ -147,7 +147,7 @@ Headless tooling that runs on an Ubuntu CI runner with no GPU.
 | `hash-dump --ticks N --seed S` | Prints the whole-state hash after every tick of the scripted match | M0 |
 | `hash-dump <replay> --every N` | Re-simulates a replay and prints `tick hash units buildings economy territory tech pathing rng map meta` every N ticks, for bisecting | M1 (done) |
 | `verify <replay>` | Re-simulates a replay and prints exactly one of `OK final_hash=0x... ticks=N`, `DIVERGED at tick N (subsystem: X)`, `SIM VERSION MISMATCH (...)`, `RULES CHANGED since recording (...)`; exit 0 only for OK | M1 (done) |
-| `bench --units N --ticks T` / `bench --astar --budget B` | Mean and p95 step time plus arrival percentage for N movers crossing the map, or the cost of one saturated A* tick (wall clock is allowed in sim-cli, not in sim) | M1 (done); `--combat`, `--bots`, `--territory` later |
+| `bench --units N --ticks T` / `bench --astar --budget B` / `bench --territory --sources S --edits E` | Mean and p95 step time plus arrival percentage for N movers crossing the map, the cost of one saturated A* tick, or mean and p95 incremental territory recompute over E random source edits with a full-recompute equality check (exit 1 on mismatch); wall clock is allowed in sim-cli, not in sim | M1 (done), M3a (`--territory`, done); `--combat`, `--bots` later |
 | `fuzz --ticks N --seed S --cases C` | Seeded random command streams run twice and compared | M1 (done) |
 | `record --scenario <name> --ticks N --out <file> [--hash-every-tick]` | Records a scripted scenario (any name in `sim::scenarios::NAMES`: `move_500`, `move_500_short`, `group_spiral`, `snapshot_restore`, and from M2 `units200`, `units200_auto`, `scripted_moves`, `hud_click`) to an `.eonreplay`; the goldens are made with it | M1 (done), M2 (names) |
 | `play-bots` | Seeded bot-vs-bot games in parallel with a CSV summary | M5b |

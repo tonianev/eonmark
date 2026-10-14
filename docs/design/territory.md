@@ -42,20 +42,21 @@ Each source stamps a disc kernel into its owner's strength layer:
 K_R(dx, dy) = max(0, R - d)          where d = isqrt(dx*dx + dy*dy)
 ```
 
-`isqrt` is the floored integer square root, so the kernel is integer and symmetric under the map mirror. Kernels are cached per distinct `R` (a `(2R+1)^2` table, at most 27 distinct values) and clipped at the map edge.
+`isqrt` is the floored integer square root, so the kernel is integer and symmetric under the map mirror. The kernel is positive exactly where `dx² + dy² < R²`, so a stamp touches `|dx|, |dy| <= R - 1`, clipped at the map edge. Unclipped discs cover 9 tiles at R = 2, 1245 at R = 20, 1789 at R = 24 and 2285 at R = 27 (`territory_kernel_is_the_floored_disc`). M3a computes the kernel per stamp instead of caching a `(2R+1)^2` table per `R`: a stamp at R = 27 is at most 2809 integer square roots, which keeps the field free of derived state (nothing to rebuild on restore) and stays far inside the bench budget. A cache can come back later as derived state rebuilt in `rebuild_derived` if a profile ever asks for it.
 
 ### Layers and ownership
 
 ```text
-strength[p][tile]  : u16, sum of every kernel owned by p that covers tile
+strength[l][tile]  : u16, sum of every kernel stamped into layer l that covers tile
+                     (layer 0 = neutral pseudo-player, layer p + 1 = PlayerId(p))
 owner[tile]        : u8, 0 = neutral, otherwise player index + 1
 
-best   = max over p of strength[p][tile]
-count  = number of p with strength[p][tile] == best
-owner  = if best == 0 or count >= 2 { neutral } else { argmax p }
+best   = max over every layer l (neutral included) of strength[l][tile]
+count  = number of layers with strength[l][tile] == best
+owner  = if best == 0 or count >= 2 { neutral } else { argmax l }   // argmax 0 is neutral
 ```
 
-Owner is a pure function of the layers, and the layers are a pure function of the source set. Nothing depends on the previous tick.
+Because layer 0 is the neutral layer, the owner code is the index of the winning layer: a tile where the neutral kernel wins outright, or ties, is neutral. Owner is a pure function of the layers, and the layers are a pure function of the source set. Nothing depends on the previous tick.
 
 ### Incremental recompute
 
@@ -104,7 +105,7 @@ With the adopted rule nobody can build on the contested line, which is a reasona
 
 ## Determinism and hashing
 
-`TerritoryField` is hashed sim state and has its own sub-hash (`territory`). Iteration over sources is in `BuildingId` order. There is no floating point anywhere in the field; `isqrt` is integer. Snapshot and restore serialize the layers and owner grid verbatim.
+`TerritoryField` is hashed sim state and has its own sub-hash (`territory`). Iteration over sources is in `BuildingId` order. There is no floating point anywhere in the field; `isqrt` is integer. Snapshot and restore serialize the layers and owner grid verbatim, each as one little-endian byte string: the M1 proptests hash the whole state every tick, and per-cell varints over about 65k cells would cost seconds of the 10 s `cargo test -p sim` budget. Deserializing checks the field against a recompute of its sources, so a corrupt snapshot fails to decode instead of panicking on a later edit.
 
 ## Rendering handoff
 
@@ -139,6 +140,10 @@ M3b ships a vertex-colored overlay mesh first (tint plus border line). The `Fiel
 cargo test -p sim territory
 cargo run -p sim-cli --release -- bench --territory --sources 16 --edits 100
 ```
+
+The field, its unit tests, the 200-edit proptests (on the default map and on an odd-width field, with mirrored source pairs), the bench and the criterion bench `territory_recompute` landed first, before construction wires the field into `State`. Measured 2026-10-10 on a 4-vCPU Linux cloud VM: mean 0.036 ms, p95 0.057 ms per edit for 16 sources and 100 edits (budget 2 ms; [../BUILD_TIMES.md](../BUILD_TIMES.md)).
+
+On the even-width mirrored `plains_1v1` no tile is exactly equidistant from two mirrored centres (they straddle x = 63.5), so midline ties come only from the floored square root: two Towns at (48, 64) and (79, 64) with R = 20 own 1167 tiles each, and exactly 8 tiles tie, all neutral (`territory_mirrored_towns_tie_only_by_isqrt_floor_and_ties_go_neutral`). On an odd-width field the centre column is an exact tie wherever a kernel reaches it (`territory_odd_width_centre_column_is_neutral_wherever_reached`).
 
 ## Open tuning questions
 

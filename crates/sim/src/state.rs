@@ -19,7 +19,9 @@
 //!    - 6a construction: sites whose builder is at work gain progress; a
 //!      finished site completes (a Town or Watchtower adds its border, its
 //!      Town may grow a tier) and its builder may take a slot there;
-//!    - 6b training (a later M3a slice);
+//!    - 6b training: every complete building's queue head gains a tick; a
+//!      finished unit appears beside the building and walks to its rally
+//!      point or takes a slot there;
 //!    - 6c jobs: a job whose target is gone, or whose worker stopped
 //!      somewhere it cannot work, is dropped; then idle workers past their
 //!      timer take the nearest free slot;
@@ -39,6 +41,7 @@ use crate::movement::{self, SpatialGrid};
 use crate::pathing::{PathRequest, Pathing};
 use crate::territory::TerritoryField;
 use crate::town;
+use crate::training;
 use rand_core::{Rng, SeedableRng};
 use rules::{Rules, UnitKind};
 use serde::{Deserialize, Serialize};
@@ -79,7 +82,13 @@ use std::collections::{BTreeMap, BTreeSet};
 /// worked slots earn income, idle workers set `Unit::seek_at` and take free
 /// slots on their own, a finished builder takes a slot at its building, and
 /// a Town grows to tier 2 at enough distinct attributed kinds.
-pub const SIM_VERSION: u32 = 8;
+///
+/// 9: training. `Train` queues units (cost and pop charged at queue time,
+/// the Yeoman's per-unit ramp and the shared military ramp), the queue head
+/// progresses in step 6b, `Cancel` refunds a queue entry, `SetRally` sets
+/// where trained units walk. `Train` and `SetRally` no longer draw from the
+/// RNG.
+pub const SIM_VERSION: u32 = 9;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,6 +435,12 @@ pub enum RejectReason {
     UnderConstruction,
     /// The building has no gather slots.
     NotAGatherNode,
+    /// The unit would take the player over the pop cap (alive plus queued).
+    PopCapReached,
+    /// This building's kind does not train that unit kind.
+    CannotTrainHere,
+    /// The building's training queue is full (`train_queue_max`).
+    QueueFull,
     /// Every gather slot of the building is taken. (A worker that cannot
     /// reach any tile beside the building is not a valid unit for it:
     /// `NoValidUnits`.)
@@ -445,8 +460,7 @@ pub enum SimEvent {
         /// Why.
         reason: RejectReason,
     },
-    /// A unit was created by `DebugSpawn` (training arrives in a later M3a
-    /// slice).
+    /// A unit was created by training or by `DebugSpawn`.
     UnitSpawned {
         /// The unit.
         unit: UnitId,
@@ -479,6 +493,13 @@ pub enum SimEvent {
     /// The territory field changed: a border source was added, moved or
     /// removed.
     TerritoryChanged,
+    /// A training queue entry was cancelled and refunded.
+    TrainingCancelled {
+        /// The building.
+        building: BuildingId,
+        /// The queue slot it held.
+        slot: u8,
+    },
     /// A Town's border tier changed.
     TownTierChanged {
         /// The Town.
@@ -811,9 +832,10 @@ impl Sim {
             }
         }
 
-        // 6. Economy and Towns: construction, (training), jobs and idle
+        // 6. Economy and Towns: construction, training, jobs and idle
         //    seeking, income.
         construction::step(&mut self.state, &self.rules, tick, &mut self.events);
+        training::step(&mut self.state, &self.rules, tick, &mut self.events);
         economy::jobs_step(&mut self.state, &self.rules, tick);
         economy::income_step(&mut self.state, &self.rules);
 
@@ -1005,14 +1027,30 @@ impl Sim {
                     }
                 }
             }
-            Command::Attack { .. }
-            | Command::Train { .. }
-            | Command::Research { .. }
-            | Command::AdvanceAge { .. }
-            | Command::SetRally { .. } => {
-                // Handlers arrive in M3a/M4a. Until then the command is
-                // counted and advances the rng once, as in M0, so the hash
-                // keeps depending on the full command stream.
+            Command::Train { building, kind } => {
+                match training::validate_train(
+                    &self.state,
+                    &self.rules,
+                    pc.player,
+                    *building,
+                    *kind,
+                ) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(cost) => {
+                        training::enqueue(&mut self.state, pc.player, *building, *kind, cost)
+                    }
+                }
+            }
+            Command::SetRally { building, target } => {
+                match training::validate_rally(&self.state, pc.player, *building) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(()) => training::set_rally(&mut self.state, *building, *target),
+                }
+            }
+            Command::Attack { .. } | Command::Research { .. } | Command::AdvanceAge { .. } => {
+                // Handlers arrive in M4a. Until then the command is counted
+                // and advances the rng once, as in M0, so the hash keeps
+                // depending on the full command stream.
                 self.state.rng.next_u32();
                 self.reject(&pc, RejectReason::NotImplemented);
             }
@@ -1058,9 +1096,9 @@ impl Sim {
         }
     }
 
-    /// `Cancel`: slot 0 of an own site cancels it with a full refund. Every
-    /// training queue is empty until training arrives, so any other slot,
-    /// on a site or a complete building, is `InvalidSlot`.
+    /// `Cancel`: slot 0 of an own site cancels it with a full refund; slot
+    /// `i` of an own complete building's training queue cancels that entry
+    /// and refunds what it paid. Anything else is `InvalidSlot`.
     fn apply_cancel(&mut self, pc: &PlayerCommand, building: BuildingId, slot: u8) {
         let Some(b) = self
             .state
@@ -1071,10 +1109,20 @@ impl Sim {
             self.reject(pc, RejectReason::UnknownBuilding);
             return;
         };
-        if slot == 0 && matches!(b.construction, Construction::Site { .. }) {
-            construction::cancel_site(&mut self.state, &self.rules, building, &mut self.events);
-        } else {
-            self.reject(pc, RejectReason::InvalidSlot);
+        match b.construction {
+            Construction::Site { .. } if slot == 0 => {
+                construction::cancel_site(&mut self.state, &self.rules, building, &mut self.events);
+            }
+            Construction::Complete if usize::from(slot) < b.queue.len() => {
+                training::cancel_slot(
+                    &mut self.state,
+                    &self.rules,
+                    building,
+                    slot,
+                    &mut self.events,
+                );
+            }
+            _ => self.reject(pc, RejectReason::InvalidSlot),
         }
     }
 

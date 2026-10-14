@@ -2350,3 +2350,431 @@ fn economy_adjacent_slots_are_capped_at_max() {
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert_eq!(sim.view().building(BuildingId(1)).unwrap().slots, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Training, the unit cost ramps and the pop cap
+// ---------------------------------------------------------------------------
+
+fn train(p: u8, seq: u32, building: u32, kind: u16) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::Train {
+            building: BuildingId(building),
+            kind: UnitKindId(kind),
+        },
+    )
+}
+
+fn cancel(p: u8, seq: u32, building: u32, slot: u8) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::Cancel {
+            building: BuildingId(building),
+            slot,
+        },
+    )
+}
+
+fn grant(p: u8, seq: u32, resource: usize, amount: u32) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::DebugGrant {
+            owner: PlayerId(p),
+            resource: u8::try_from(resource).unwrap(),
+            amount,
+        },
+    )
+}
+
+/// M3a acceptance 1e: queuing a Yeoman raises the next Yeoman's cost by the
+/// Yeoman's per-unit step (`units.ron`) before it finishes. The five
+/// standard-start Yeomen count (owner decision D11), the deduction is the
+/// quote, and the quote does not move again when the trainee appears.
+#[test]
+fn economy_queuing_a_yeoman_raises_the_next_cost_before_it_finishes() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let def = rules.unit_kind(yeoman).unwrap();
+    let grain = resource(&rules, "grain");
+    let base = i64::from(def.cost["grain"]);
+    let rules::UnitRamp::PerUnit(step) = &def.ramp else {
+        panic!("the Yeoman ramps per unit");
+    };
+    let step = i64::from(step["grain"]);
+    let start = i64::from(rules.standard_start.units["yeoman"]);
+    let mut sim = standard(60);
+    let mut control = standard(60);
+    let quote = |s: &Sim| s.view().unit_cost(PlayerId(0), UnitKindId(yeoman))[grain];
+    let q0 = quote(&sim);
+    assert_eq!(q0, base + step * start, "the starting Yeomen count");
+    let events = apply(&mut sim, vec![train(0, 0, 1, yeoman)]);
+    apply(&mut control, vec![]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        stock(&control, 0, grain) - stock(&sim, 0, grain),
+        q0,
+        "the deduction is the quote"
+    );
+    let queued = &sim.view().building(BuildingId(1)).unwrap().queue;
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].paid[grain], q0);
+    assert_eq!(quote(&sim), q0 + step, "queued, not yet trained");
+    assert_eq!(
+        sim.view().pop(PlayerId(0)).0,
+        u32::try_from(start + 1).unwrap()
+    );
+    let ticks = rules.train_time_ticks(def);
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 11));
+    assert!(sim.view().building(BuildingId(1)).unwrap().queue.is_empty());
+    assert_eq!(quote(&sim), q0 + step, "the trainee alive counts the same");
+}
+
+/// M3a acceptance 1f: the military ramp. Two Muster Halls share one
+/// counter: five Skirmishers queued at the first and a sixth at the second
+/// pay `floor(base * mult / 1000)` with `mult = min(cap, 1000 + step *
+/// T(k - 1))`, and the sixth is capped at `military_ramp_cap_permille`
+/// (2.25x). Cancelling lowers `k` for the next order and refunds exactly
+/// what each entry paid.
+#[test]
+fn economy_sixth_queued_skirmisher_is_capped() {
+    let rules = load_rules();
+    let hall = kind(&rules, "muster_hall");
+    let sk = unit_kind(&rules, "skirmisher");
+    let grain = resource(&rules, "grain");
+    let base = u64::from(rules.unit_kind(sk).unwrap().cost["grain"]);
+    let step = u64::from(rules.military_ramp_step_permille);
+    let cap = u64::from(rules.military_ramp_cap_permille);
+    let mult = |k: u64| (1000 + step * (k - 1) * k / 2).min(cap);
+    let paid_at = |k: u64| i64::try_from(base * mult(k) / 1000).unwrap();
+    assert!(1000 + step * 5 * 6 / 2 >= cap, "the 6th reaches the cap");
+    assert!(mult(5) < cap, "the 5th does not");
+    let mut sim = empty(61);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, hall, 28, 58, true),
+            place(0, 1, hall, 34, 58, true),
+            grant(0, 2, grain, 100_000),
+        ],
+    );
+    let five: Vec<PlayerCommand> = (0..5).map(|i| train(0, 3 + i, 1, sk)).collect();
+    let events = apply(&mut sim, five);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let events = apply(&mut sim, vec![train(0, 8, 1, sk)]);
+    assert_eq!(rejections(&events), [RejectReason::QueueFull]);
+    let events = apply(&mut sim, vec![train(0, 9, 2, sk)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let view = sim.view();
+    let paid: Vec<i64> = view
+        .building(BuildingId(1))
+        .unwrap()
+        .queue
+        .iter()
+        .chain(&view.building(BuildingId(2)).unwrap().queue)
+        .map(|e| e.paid[grain])
+        .collect();
+    let want: Vec<i64> = (1..=6).map(paid_at).collect();
+    assert_eq!(paid, want);
+    assert_eq!(
+        paid[5],
+        i64::try_from(base * cap / 1000).unwrap(),
+        "capped at 2.25x"
+    );
+    if (base, step, cap) == (40, 100, 2250) {
+        assert_eq!(paid, [40, 44, 52, 64, 80, 90]);
+    }
+    // Cancel the two newest entries at the first hall: each refunds what it
+    // paid, and the next quote falls back to k = 5.
+    let before = stock(&sim, 0, grain);
+    let events = apply(&mut sim, vec![cancel(0, 10, 1, 4), cancel(0, 11, 1, 3)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(events.contains(&SimEvent::TrainingCancelled {
+        building: BuildingId(1),
+        slot: 4
+    }));
+    assert_eq!(stock(&sim, 0, grain) - before, paid_at(5) + paid_at(4));
+    assert_eq!(
+        sim.view().unit_cost(PlayerId(0), UnitKindId(sk))[grain],
+        paid_at(5),
+        "k fell from 7 to 5"
+    );
+}
+
+/// Pop is charged when a unit is queued: at the cap, `Train` is
+/// `PopCapReached`, and a queued unit counts as much as a live one.
+#[test]
+fn economy_train_is_rejected_at_the_pop_cap() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let cap = rules.pop_cap(0);
+    let start = rules.standard_start.units["yeoman"];
+    let mut sim = standard(62);
+    let grain = resource(&rules, "grain");
+    apply(
+        &mut sim,
+        vec![
+            spawn_kind(0, 0, 0, 34, 70, u16::try_from(cap - start - 1).unwrap()),
+            grant(0, 1, grain, 1000),
+        ],
+    );
+    assert_eq!(sim.view().pop(PlayerId(0)), (cap - 1, cap));
+    let events = apply(&mut sim, vec![train(0, 2, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        sim.view().pop(PlayerId(0)),
+        (cap, cap),
+        "a queued unit counts"
+    );
+    let events = apply(&mut sim, vec![train(0, 3, 1, yeoman)]);
+    assert_eq!(rejections(&events), [RejectReason::PopCapReached]);
+}
+
+/// Every `Train`, `SetRally` and queue `Cancel` rejection, each against a
+/// control sim whose command at the same (player, seq) is rejected for an
+/// unrelated reason: no state changes and no randomness drawn.
+#[test]
+fn economy_train_rejections() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let sk = unit_kind(&rules, "skirmisher");
+    let scribe = unit_kind(&rules, "scribe");
+    let base = |s: &mut Sim| {
+        apply(
+            s,
+            vec![
+                place(0, 100, kind(&rules, "muster_hall"), 28, 58, true),
+                place(0, 101, kind(&rules, "scriptorium"), 28, 67, false),
+            ],
+        );
+    };
+    let fill = |s: &mut Sim| {
+        let five = (0..5).map(|i| train(0, 110 + i, 1, yeoman)).collect();
+        let events = apply(s, five);
+        assert!(rejections(&events).is_empty(), "{events:?}");
+    };
+    type Setup<'a> = Box<dyn Fn(&mut Sim) + 'a>;
+    let none: Setup = Box::new(|_| {});
+    let cases: Vec<(&str, Setup, PlayerCommand, RejectReason)> = vec![
+        (
+            "another player's Seat",
+            none,
+            train(0, 0, 2, yeoman),
+            RejectReason::UnknownBuilding,
+        ),
+        (
+            "no such building",
+            Box::new(|_| {}),
+            train(0, 0, 99, yeoman),
+            RejectReason::UnknownBuilding,
+        ),
+        (
+            "a site",
+            Box::new(|_| {}),
+            train(0, 0, 4, scribe),
+            RejectReason::UnderConstruction,
+        ),
+        (
+            "no such kind",
+            Box::new(|_| {}),
+            train(0, 0, 1, 99),
+            RejectReason::UnknownUnitKind,
+        ),
+        (
+            "Skirmisher at the Seat",
+            Box::new(|_| {}),
+            train(0, 0, 1, sk),
+            RejectReason::CannotTrainHere,
+        ),
+        (
+            "Yeoman at a Muster Hall",
+            Box::new(|_| {}),
+            train(0, 0, 3, yeoman),
+            RejectReason::CannotTrainHere,
+        ),
+        (
+            "a full queue",
+            Box::new(fill),
+            train(0, 0, 1, yeoman),
+            RejectReason::QueueFull,
+        ),
+        (
+            "Grain spent on Yeomen",
+            Box::new(fill),
+            train(0, 0, 3, sk),
+            RejectReason::CannotAfford {
+                resource: u8::try_from(resource(&rules, "grain")).unwrap(),
+            },
+        ),
+        (
+            "rally on another player's Seat",
+            Box::new(|_| {}),
+            PlayerCommand::new(
+                PlayerId(0),
+                0,
+                Command::SetRally {
+                    building: BuildingId(2),
+                    target: FxVec2::from_ints(30, 70),
+                },
+            ),
+            RejectReason::UnknownBuilding,
+        ),
+        (
+            "a queue slot past the end",
+            Box::new(fill),
+            cancel(0, 0, 1, 5),
+            RejectReason::InvalidSlot,
+        ),
+        (
+            "a Muster Hall's empty queue",
+            Box::new(|_| {}),
+            cancel(0, 0, 3, 0),
+            RejectReason::InvalidSlot,
+        ),
+    ];
+    for (name, setup, cmd, want) in cases {
+        let mut sim = standard(63);
+        let mut control = standard(63);
+        base(&mut sim);
+        base(&mut control);
+        setup(&mut sim);
+        setup(&mut control);
+        let stop = PlayerCommand::new(
+            cmd.player,
+            cmd.seq,
+            Command::Stop {
+                units: vec![UnitId(999)],
+            },
+        );
+        let events = apply(&mut sim, vec![cmd]);
+        apply(&mut control, vec![stop]);
+        assert_eq!(rejections(&events), [want], "{name}");
+        assert_eq!(
+            sim.sub_hashes(),
+            control.sub_hashes(),
+            "{name}: no state change"
+        );
+    }
+}
+
+/// A trained unit appears exactly `train_time` ticks after it reaches the
+/// head of the queue, on the nearest free tile around the building, and
+/// walks to the rally point.
+#[test]
+fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let ticks = rules.train_time_ticks(rules.unit_kind(yeoman).unwrap());
+    let rally = FxVec2::from_ints(34, 72);
+    let mut sim = standard(64);
+    let events = apply(
+        &mut sim,
+        vec![
+            PlayerCommand::new(
+                PlayerId(0),
+                0,
+                Command::SetRally {
+                    building: BuildingId(1),
+                    target: rally,
+                },
+            ),
+            train(0, 1, 1, yeoman),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let queued_at = sim.tick() - 1;
+    let spawn_at = queued_at + ticks;
+    assert!(run_until(&mut sim, ticks + 2, |s| s.tick() == spawn_at - 1));
+    assert!(sim.view().unit(UnitId(11)).is_none(), "not one tick early");
+    sim.step(&[]);
+    let u = sim.view().unit(UnitId(11)).expect("trained on time");
+    let map = sim.view().map();
+    let seat = sim::construction::Rect {
+        x0: 23,
+        y0: 63,
+        x1: 25,
+        y1: 65,
+    };
+    assert_eq!(seat.chebyshev(map.tile_of(u.pos)), 1, "beside the Seat");
+    assert!(u.order.is_some(), "walking to the rally point");
+    assert!(run_until(&mut sim, 600, |s| s
+        .view()
+        .unit(UnitId(11))
+        .unwrap()
+        .order
+        .is_none()));
+    let at = sim.view().unit(UnitId(11)).unwrap().pos;
+    assert!(
+        at.dist_sq_i64(rally) <= (2 * 2) << 32,
+        "arrived near the rally point"
+    );
+}
+
+/// A Scribe trained at a Scriptorium takes a slot there at once.
+#[test]
+fn economy_scribe_trained_at_a_scriptorium_takes_a_slot() {
+    let rules = load_rules();
+    let scribe = unit_kind(&rules, "scribe");
+    let mut sim = empty(65);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, kind(&rules, "scriptorium"), 30, 59, true),
+            grant(0, 1, resource(&rules, "grain"), 500),
+        ],
+    );
+    let events = apply(&mut sim, vec![train(0, 2, 1, scribe)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let ticks = rules.train_time_ticks(rules.unit_kind(scribe).unwrap());
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 1));
+    assert_eq!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Gather {
+            node: BuildingId(1),
+            slot: 0
+        })
+    );
+    assert!(run_until(&mut sim, 300, |s| worked(s, [1]) == 1));
+}
+
+/// Snapshot with a queue half trained, restore into a fresh sim, keep
+/// issuing commands: every later tick hashes the same as the uninterrupted
+/// run.
+#[test]
+fn economy_restore_mid_training_matches_uninterrupted() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let mut a = standard(66);
+    a.step(&[
+        train(0, 0, 1, yeoman),
+        train(0, 1, 1, yeoman),
+        train(0, 2, 1, yeoman),
+    ]);
+    for _ in 1..150 {
+        a.step(&[]);
+    }
+    let head = &a.view().building(BuildingId(1)).unwrap().queue[0];
+    assert!(head.progress > 0, "mid training");
+    let mut b = standard(66);
+    b.restore(&a.snapshot()).unwrap();
+    for t in 150..1500u32 {
+        let cmds = match t {
+            300 => vec![PlayerCommand::new(
+                PlayerId(0),
+                3,
+                Command::SetRally {
+                    building: BuildingId(1),
+                    target: FxVec2::from_ints(34, 70),
+                },
+            )],
+            400 => vec![train(0, 4, 1, yeoman), cancel(0, 5, 1, 1)],
+            _ => Vec::new(),
+        };
+        a.step(&cmds);
+        b.step(&cmds);
+        assert_eq!(a.hash(), b.hash(), "tick {t}");
+    }
+    assert!(a.view().unit_count() > 10);
+}

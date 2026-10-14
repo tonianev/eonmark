@@ -209,8 +209,9 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 /// A seeded random command stream for `fuzz`: valid spawns, Moves and
 /// Stops for player 0, and invalid commands of every rejectable kind
 /// (unknown player, no valid units, unknown unit kind, not implemented,
-/// unknown building (Cancel and Gather), a Build by a unit that does not
-/// exist, and everything player 1 issues after it surrenders). Returns the
+/// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`), a `Build`
+/// by a unit that does not exist, and everything player 1 issues after it
+/// surrenders). Returns the
 /// per-tick commands and the `(player, seq)` keys the sim must reject.
 /// `movement` enables Move commands.
 pub fn random_commands(
@@ -341,6 +342,22 @@ pub fn random_commands(
                     slot: 0,
                 },
             ));
+            rejected.push((PlayerId(0), seq[0]));
+            seq[0] += 1;
+        } else if (53..57).contains(&bad) {
+            // UnknownBuilding: a Train or a SetRally on BuildingId(0).
+            let cmd = if bad < 55 {
+                Command::Train {
+                    building: BuildingId(0),
+                    kind: UnitKindId(0),
+                }
+            } else {
+                Command::SetRally {
+                    building: BuildingId(0),
+                    target: FxVec2::from_ints(1, 1),
+                }
+            };
+            cmds.push(PlayerCommand::new(PlayerId(0), seq[0], cmd));
             rejected.push((PlayerId(0), seq[0]));
             seq[0] += 1;
         } else if (49..53).contains(&bad) {

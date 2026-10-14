@@ -494,7 +494,7 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
                 u.job = None;
             }
             complete(state, rules, id, events);
-            crate::gather::builder_takes_slot(state, rules, builder, id, tick);
+            crate::gather::unit_takes_slot(state, rules, builder, id, tick);
         }
     }
 }

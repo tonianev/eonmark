@@ -25,7 +25,8 @@
 //! | [`economy`] | `Economy` stockpiles and accumulators, `RateInfo`, exact income, jobs step, cost helpers |
 //! | [`construction`] | footprints, `Build` validation, sites, construction, site cancel |
 //! | [`gather`] | `Gather`, slots and stand tiles, worked-slot income, idle workers seeking work |
-//! | [`town`] | standard start, town count and limit, attribution to the nearest Town |
+//! | [`town`] | standard start, town count and limit, attribution to the nearest Town, tier growth |
+//! | [`training`] | `Train`, queue `Cancel`, `SetRally`, pop, the unit cost ramps, the training step |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
@@ -47,6 +48,7 @@ pub mod scenarios;
 pub mod state;
 pub mod territory;
 pub mod town;
+pub mod training;
 
 pub use ai_hook::{AiController, SimView};
 pub use command::{Command, PlayerCommand, sort_commands};

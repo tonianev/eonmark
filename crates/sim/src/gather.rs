@@ -204,9 +204,10 @@ pub(crate) fn apply_gather(
     }
 }
 
-/// Put `unit`, which just finished building `node`, to work there when it is
-/// the node's worker kind and a slot is free; returns whether it was.
-pub(crate) fn builder_takes_slot(
+/// Put `unit`, which just finished building `node` or was just trained
+/// there, to work at `node` when it is the node's worker kind, can reach a
+/// tile beside it and a slot is free; returns whether it was.
+pub(crate) fn unit_takes_slot(
     state: &mut State,
     rules: &Rules,
     unit: UnitId,

@@ -316,8 +316,9 @@ fn build(owner: u8, seq: u32, unit: u32, kind: BuildingKindId, x: u16, y: u16) -
 ///
 /// - during tick 0: Yeoman 1 founds a Town at (40, 63), centred 17 tiles
 ///   east of the Seat inside its border (the second Town costs 120 Lumber
-///   with the building ramp), and Yeoman 2 places a Croft at (28, 60)
-///   (30 Lumber), spending exactly the 150 starting Lumber;
+///   with the building ramp), Yeoman 2 places a Croft at (28, 60)
+///   (30 Lumber), spending exactly the 150 starting Lumber, and the Seat
+///   queues a sixth Yeoman (25 Grain: the five starting Yeomen count);
 /// - during tick 2400: Yeoman 3 places a Croft at (44, 60), attributed to
 ///   the new Town, paid from both Towns' Lumber income.
 ///
@@ -338,21 +339,34 @@ pub fn economy_second_town(rules: &Rules) -> (MatchSetup, Stream) {
     let width = rules.map(&rules.default_map).expect("default map").width;
     // NW corner of the mirror of a footprint `w` wide at column `x`.
     let mirror = |x: u16, w: u16| width - x - w;
+    let yeoman = UnitKindId(0);
+    let train = |owner: u8, seq: u32, seat: u32| {
+        PlayerCommand::new(
+            PlayerId(owner),
+            seq,
+            Command::Train {
+                building: crate::ids::BuildingId(seat),
+                kind: yeoman,
+            },
+        )
+    };
     let stream = vec![
         (
             0,
             vec![
                 build(0, 0, 1, town, 40, 63),
                 build(0, 1, 2, croft, 28, 60),
+                train(0, 2, 1),
                 build(1, 0, 6, town, mirror(40, 3), 63),
                 build(1, 1, 7, croft, mirror(28, 2), 60),
+                train(1, 2, 2),
             ],
         ),
         (
             2400,
             vec![
-                build(0, 2, 3, croft, 44, 60),
-                build(1, 2, 8, croft, mirror(44, 2), 60),
+                build(0, 3, 3, croft, 44, 60),
+                build(1, 3, 8, croft, mirror(44, 2), 60),
             ],
         ),
     ];
@@ -513,10 +527,15 @@ mod tests {
         let view = sim.view();
         for (_, cmds) in &stream {
             for c in cmds {
-                let Command::Build { unit, .. } = c.cmd else {
-                    panic!("only Builds");
-                };
-                assert_eq!(view.unit(unit).unwrap().owner, c.player, "{unit:?}");
+                match c.cmd {
+                    Command::Build { unit, .. } => {
+                        assert_eq!(view.unit(unit).unwrap().owner, c.player, "{unit:?}");
+                    }
+                    Command::Train { building, .. } => {
+                        assert_eq!(view.building(building).unwrap().owner, c.player);
+                    }
+                    _ => panic!("only Builds and Trains"),
+                }
             }
         }
         assert_eq!(

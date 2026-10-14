@@ -343,14 +343,17 @@ fn restore_rebuilds_caches() {
 /// (from M3a) Croft sites placed and cancelled around a complete P0 Town,
 /// so the cost grid changes while searches are suspended, plus Gathers
 /// onto three complete Crofts placed at tick 0 (idle Yeomen also take free
-/// slots there on their own), so slots, stand-tile paths and worked income
-/// run inside the determinism and cache-transparency proptests.
+/// slots there on their own), Yeomen trained at the Town and rally points
+/// set on it, so slots, stand-tile paths, worked income, training and
+/// rally walks run inside the determinism and cache-transparency
+/// proptests.
 fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
     let rules = load_rules();
     let (town, _) = rules.building_kind_by_id("town").unwrap();
     let (croft, _) = rules.building_kind_by_id("croft").unwrap();
     let lumber = u8::try_from(rules.resource_index("lumber").unwrap()).unwrap();
+    let grain = u8::try_from(rules.resource_index("grain").unwrap()).unwrap();
     let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
     let mut out = Vec::new();
     let mut seq = 0u32;
@@ -379,7 +382,16 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                     amount: 100_000,
                 },
             ));
-            seq += 2;
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq + 2,
+                Command::DebugGrant {
+                    owner: PlayerId(0),
+                    resource: grain,
+                    amount: 100_000,
+                },
+            ));
+            seq += 3;
             // BuildingId(2..=4): complete Crofts inside the Town's border.
             for x in [28, 31, 34] {
                 tick_cmds.push(PlayerCommand::new(
@@ -465,19 +477,43 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 },
             ));
             seq += 1;
+        } else if roll < 65 {
+            // Train at the Town (BuildingId(1)); PopCapReached once the
+            // spawns pass the cap, which is a fine rejection too.
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Train {
+                    building: sim::BuildingId(1),
+                    kind: UnitKindId(0),
+                },
+            ));
+            seq += 1;
+        } else if roll < 67 {
+            let x = i32::try_from(rng.next_u32() % 128).unwrap();
+            let y = i32::try_from(rng.next_u32() % 128).unwrap();
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::SetRally {
+                    building: sim::BuildingId(1),
+                    target: FxVec2::from_ints(x, y),
+                },
+            ));
+            seq += 1;
         }
         out.push(tick_cmds);
     }
     out
 }
 
-/// The random stream really changes the cost grid and really gathers: over
-/// a few seeds it places sites (generation bumps) and cancels some, and
-/// units take gather slots (by Gather or idle seeking) and work them, so
-/// the two proptests below exercise those paths.
+/// The random stream really changes the cost grid, gathers and trains:
+/// over a few seeds it places sites (generation bumps) and cancels some,
+/// units take gather slots (by Gather or idle seeking) and work them, and
+/// the Town trains, so the two proptests below exercise those paths.
 #[test]
 fn random_commands_place_and_cancel_sites() {
-    let (mut placed, mut removed, mut gathering, mut worked) = (0, 0, 0, 0);
+    let (mut placed, mut removed, mut gathering, mut worked, mut trained) = (0, 0, 0, 0, 0);
     for seed in 0..8 {
         let stream = random_commands(seed, 300);
         let mut sim = scenario(seed);
@@ -490,24 +526,32 @@ fn random_commands_place_and_cancel_sites() {
                     _ => {}
                 }
             }
+            let view = sim.view();
+            gathering += view
+                .units()
+                .filter(|u| matches!(u.job, Some(sim::Job::Gather { .. })))
+                .count();
+            worked += (2..=4)
+                .map(|b| {
+                    view.worked_slots(sim::BuildingId(b))
+                        .map_or(0, |(w, _, _)| u32::from(w))
+                })
+                .sum::<u32>();
+            if view
+                .building(sim::BuildingId(1))
+                .is_some_and(|b| b.queue.iter().any(|e| e.progress > 0))
+            {
+                trained += 1;
+            }
         }
-        let view = sim.view();
-        gathering += view
-            .units()
-            .filter(|u| matches!(u.job, Some(sim::Job::Gather { .. })))
-            .count();
-        worked += (2..=4)
-            .map(|b| u32::from(view.worked_slots(sim::BuildingId(b)).unwrap().0))
-            .sum::<u32>();
     }
-    // Four placements per seed are the debug Town and Crofts.
+    // Four placements per seed are the debug Town and Crofts. The other
+    // counts are summed over every tick of every seed.
     assert!(placed > 8 * 4 + 4, "sites placed: {}", placed - 8 * 4);
     assert!(removed > 0, "sites cancelled: {removed}");
-    assert!(
-        gathering > 0,
-        "units hold gather jobs at the end: {gathering}"
-    );
-    assert!(worked > 0, "slots are worked at the end: {worked}");
+    assert!(gathering > 0, "unit-ticks with a gather job: {gathering}");
+    assert!(worked > 0, "worked slot-ticks: {worked}");
+    assert!(trained > 0, "ticks with training in progress: {trained}");
 }
 
 fn run_with(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> Vec<u64> {

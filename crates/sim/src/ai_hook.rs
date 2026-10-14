@@ -9,12 +9,13 @@ use crate::command::Command;
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, PlayerEconomy, RateInfo};
 use crate::gather;
-use crate::ids::{BuildingId, BuildingKindId, PlayerId, Tile, UnitId};
+use crate::ids::{BuildingId, BuildingKindId, PlayerId, Tile, UnitId, UnitKindId};
 use crate::map::Map;
 use crate::pathing::Pathing;
 use crate::state::{Building, MatchSetup, Player, RejectReason, State, Unit};
 use crate::territory::TerritoryField;
 use crate::town;
+use crate::training;
 use rules::Rules;
 
 /// Read-only view of the sim handed to AI controllers and the presenter.
@@ -88,6 +89,35 @@ impl<'a> SimView<'a> {
             })
             .map(|u| u.id)
             .collect()
+    }
+
+    /// `p`'s pop: `(used, cap)`, used counting units alive and queued.
+    pub fn pop(&self, p: PlayerId) -> (u32, u32) {
+        (
+            training::pop_used(self.state, self.rules, p),
+            training::pop_cap(self.rules, p),
+        )
+    }
+
+    /// What one more unit of `kind` costs `p` now (the ramped cost `Train`
+    /// would deduct), `resources.ron` order.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is not in the rules.
+    pub fn unit_cost(&self, p: PlayerId, kind: UnitKindId) -> Vec<i64> {
+        training::unit_cost_for(self.state, self.rules, p, kind)
+    }
+
+    /// Whether `Train { building, kind }` from `p` would be accepted now,
+    /// and what it would deduct.
+    pub fn check_train(
+        &self,
+        p: PlayerId,
+        building: BuildingId,
+        kind: UnitKindId,
+    ) -> Result<Vec<i64>, RejectReason> {
+        training::validate_train(self.state, self.rules, p, building, kind)
     }
 
     /// Town-kind buildings `p` owns, sites included, and the town limit.

@@ -42,7 +42,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 9 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 10 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -73,9 +73,11 @@ Of the M3a fields, the Town loop (the first M3a slice) reads
 `standard_start`, `building_ramp_step_permille`, `yield_cap_table` (at
 Trade level 0), `town_limit_base` and `town_radius_tiles`. Gathering
 (`rules_version` 9) adds `idle_seek_delay_ds`, `idle_seek_retry_ds`,
-`town_growth_distinct_buildings` and `town_radius_grown_tiles`. The
-military ramp, `train_queue_max` and `pop_cap_base` are read when training
-lands later in M3a.
+`town_growth_distinct_buildings` and `town_radius_grown_tiles`. Training
+(`rules_version` 10) adds `pop_cap_base` (through `Rules::pop_cap` at Arms
+level 0), `train_queue_max`, `military_ramp_step_permille` and
+`military_ramp_cap_permille`, and the `standard_start` units count toward
+the Yeoman's per-unit ramp, so the first trained Yeoman costs 25 Grain.
 
 The M0 `vision` block (`unit_tiles`, `building_tiles`, `town_tiles`) was
 removed at `rules_version` 6: vision is now `vision_tiles` on every kind in
@@ -141,8 +143,10 @@ How the movement fields are used is specified in
 spawn to tiles per tick (`x100 / (100 * tick_rate_hz)`), the radius to
 fixed-point tiles; the arrive, separation and return-to-post radii are read
 per tick. Of the training fields the sim reads `builder` from the M3a Town
-loop (a `Build` by a kind without it is rejected with `NotABuilder`); the
-others are validated now and read later in M3a, when training lands.
+loop (a `Build` by a kind without it is rejected with `NotABuilder`), and
+training (`rules_version` 10) reads `cost`, `ramp`, `pop`, `train_time_ds`
+and `trainer`. So far `class` is checked only by the validator (no
+`Military` ramp on a `Civilian`), and `vision_tiles` is read in M7.
 
 | Field | Meaning | Yeoman | Scribe | Skirmisher |
 |-------|---------|--------|--------|------------|
@@ -274,7 +278,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (9 to 10) and put the one-line reason
+2. Bump `rules_version` in `rules.ron` (10 to 11) and put the one-line reason
    in the commit message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
 
@@ -285,8 +289,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=10 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
-(the repository is at 9; the hash is new because a file changed).
+`OK rules_version=11 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
+(the repository is at 10; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture

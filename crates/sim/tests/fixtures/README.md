@@ -12,11 +12,20 @@ for `economy_second_town`) verifies the replay and compares the final hash;
 | `move_500` | 1200 | 500 Yeomen west to east, Stop for every third id at tick 400 (seed 42) | `sim-cli verify --release` in CI on both OSes (hash-parity job); `cargo test -- --ignored` locally |
 | `group_spiral` | 600 | 64 Yeomen to the west edge, then onto a mountain tile (seed 7) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 | `snapshot_restore` | 1200 | 200 Yeomen east, 50 more spawned for player 1 after a snapshot/restore swap at tick 300 (seed 7) | `cargo test -p sim`, `sim-cli verify --release` in CI |
-| `economy_second_town` | 3600 | from the standard start, mirrored build orders: during tick 0 Yeoman 1 founds a Town at (40, 63) and Yeoman 2 places a Croft at (28, 60), spending exactly the 150 starting Lumber; during tick 2400 Yeoman 3 places a Croft at (44, 60), attributed to the new Town; P1 mirrors them with Yeomen 6, 7 and 8 (seed 11) | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `economy_second_town` | 3600 | from the standard start, mirrored build orders: during tick 0 Yeoman 1 founds a Town at (40, 63) and Yeoman 2 places a Croft at (28, 60), spending exactly the 150 starting Lumber, and the Seat queues a sixth Yeoman (25 Grain); during tick 2400 Yeoman 3 places a Croft at (44, 60), attributed to the new Town; P1 mirrors them with Yeomen 6, 7 and 8 (seed 11) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 
 The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
+
+Recorded 2026-10-14 at `rules_version` 10, `SIM_VERSION` 9 with `just rerecord`
+(M3a training: `Train`, the queue `Cancel` and `SetRally` have real
+handlers and step 6b trains the queue heads). In `economy_second_town` each
+Seat now also queues a Yeoman during tick 0, so its final hash changed. The
+four M1 fixtures train nothing, and the queue and rally fields have been
+hashed since `SIM_VERSION` 6, so `group_spiral`, `move_500`,
+`move_500_short` and `snapshot_restore` keep every hash and only their
+headers differ.
 
 Recorded 2026-10-14 at `rules_version` 9, `SIM_VERSION` 8 with `just rerecord`
 (M3a gathering: idle Yeomen set and renew the hashed `Unit::seek_at` work

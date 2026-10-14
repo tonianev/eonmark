@@ -75,7 +75,7 @@ Cross-reference checks run after parsing. Implemented as of M3a: every cost, yie
 cargo run -p sim-cli -- data-check data/
 ```
 
-Exit code 0 prints one line such as `OK rules_version=9 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it, M2 `visuals.ron`, M3a `buildings.ron`). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
+Exit code 0 prints one line such as `OK rules_version=10 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it, M2 `visuals.ron`, M3a `buildings.ron`). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
 
 | Variant | Format | Example cause |
 |---|---|---|

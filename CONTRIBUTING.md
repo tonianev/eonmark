@@ -87,27 +87,27 @@ cargo test -p sim
 
 Commit the RON edit, the version bump and the re-recorded fixtures together, with a one-line reason in the commit message (see "Golden replay fixtures" below). `just rerecord` ends by failing if a fixture differs from the merge base with main while the working-tree `rules_version` is not larger than the base's; CI runs the same rule (`scripts/check_fixture_policy.sh`) on the commits of every pull request. If the sim does not read the edited value yet, every `.hash` stays the same and only the replay headers change; if it does, the hashes change too, and the bump is what makes that legal. A changed hash without a bump is a bug, not a fixture update. The field reference and a worked example are in [data/rules/README.md](data/rules/README.md). Balance PRs attach a `play-bots` table once that command exists (M5b).
 
-This exact walkthrough was run on 2026-10-14 (M3a, `rules_version` 11, all six M3a slices and the training review fix) in a clean copy of the repository. The only edits were the rate and the version; every test that depends on the rate reads it from `buildings.ron`:
+This exact walkthrough was run on 2026-10-14 (M3a, `rules_version` 12, all six M3a slices and both training review fixes) in a clean copy of the repository with its own build directory. The only edits were the rate and the version; every test that depends on the rate reads it from `buildings.ron`:
 
 ```text
 $ git diff --stat
  data/rules/buildings.ron | 2 +-
  data/rules/rules.ron     | 2 +-
 $ cargo run -q -p sim-cli -- data-check data
-OK rules_version=12 rules_hash=0x27830552ba2f20e5 resources=4 units=3 buildings=8 maps=plains_1v1
+OK rules_version=13 rules_hash=0x6bf1f9b0a808c617 resources=4 units=3 buildings=8 maps=plains_1v1
 $ just rerecord
 rerecord: economy_second_town 0x691e32a3f334ac5a
 rerecord: group_spiral 0xa4cdd70f88732cf4
 rerecord: move_500 0x432f8194acff3212
 rerecord: move_500_short 0xc0f4da561f63721a
 rerecord: snapshot_restore 0x26c0b03a2f5750a9
-rerecord: fixtures differ from d17d958ed614 with rules_version 4 -> 12
+rerecord: fixtures differ from d17d958ed614 with rules_version 4 -> 13
 $ cargo test -p sim
 test result: ok. 74 passed ... (lib)
 test result: ok. 6 passed ... (m0)
 test result: ok. 16 passed; 1 ignored ... (m1)
 test result: ok. 8 passed ... (m2)
-test result: ok. 49 passed ... (m3a, including the one-Yeoman-on-a-Croft and ten-Croft flatline tests)
+test result: ok. 51 passed ... (m3a, including the one-Yeoman-on-a-Croft and ten-Croft flatline tests)
 $ git status --short
  M crates/sim/tests/fixtures/*.eonreplay (5 files), economy_second_town.hash
  M data/rules/buildings.ron

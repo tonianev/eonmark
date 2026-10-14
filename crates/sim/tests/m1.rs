@@ -341,8 +341,10 @@ fn restore_rebuilds_caches() {
 
 /// A random command stream over the scenario: spawns, moves, stops, and
 /// (from M3a) Croft sites placed and cancelled around a complete P0 Town,
-/// so the cost grid changes while searches are suspended, and Gathers onto
-/// them (idle Yeomen also take free slots on their own).
+/// so the cost grid changes while searches are suspended, plus Gathers
+/// onto three complete Crofts placed at tick 0 (idle Yeomen also take free
+/// slots there on their own), so slots, stand-tile paths and worked income
+/// run inside the determinism and cache-transparency proptests.
 fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
     let rules = load_rules();
@@ -378,6 +380,20 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 },
             ));
             seq += 2;
+            // BuildingId(2..=4): complete Crofts inside the Town's border.
+            for x in [28, 31, 34] {
+                tick_cmds.push(PlayerCommand::new(
+                    PlayerId(0),
+                    seq,
+                    Command::DebugPlaceBuilding {
+                        owner: PlayerId(0),
+                        kind: sim::BuildingKindId(croft),
+                        tile: Tile::new(x, 58),
+                        complete: true,
+                    },
+                ));
+                seq += 1;
+            }
         }
         let roll = rng.next_u32() % 100;
         if roll < 10 && spawned < 200 {
@@ -455,12 +471,13 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     out
 }
 
-/// The random stream really changes the cost grid: over a few seeds it
-/// places sites (generation bumps) and cancels some, so the two proptests
-/// below exercise suspended searches across grid changes.
+/// The random stream really changes the cost grid and really gathers: over
+/// a few seeds it places sites (generation bumps) and cancels some, and
+/// units take gather slots (by Gather or idle seeking) and work them, so
+/// the two proptests below exercise those paths.
 #[test]
 fn random_commands_place_and_cancel_sites() {
-    let (mut placed, mut removed) = (0, 0);
+    let (mut placed, mut removed, mut gathering, mut worked) = (0, 0, 0, 0);
     for seed in 0..8 {
         let stream = random_commands(seed, 300);
         let mut sim = scenario(seed);
@@ -474,10 +491,23 @@ fn random_commands_place_and_cancel_sites() {
                 }
             }
         }
+        let view = sim.view();
+        gathering += view
+            .units()
+            .filter(|u| matches!(u.job, Some(sim::Job::Gather { .. })))
+            .count();
+        worked += (2..=4)
+            .map(|b| u32::from(view.worked_slots(sim::BuildingId(b)).unwrap().0))
+            .sum::<u32>();
     }
-    // One placement per seed is the debug Town.
-    assert!(placed > 8 + 4, "sites placed: {}", placed - 8);
+    // Four placements per seed are the debug Town and Crofts.
+    assert!(placed > 8 * 4 + 4, "sites placed: {}", placed - 8 * 4);
     assert!(removed > 0, "sites cancelled: {removed}");
+    assert!(
+        gathering > 0,
+        "units hold gather jobs at the end: {gathering}"
+    );
+    assert!(worked > 0, "slots are worked at the end: {worked}");
 }
 
 fn run_with(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> Vec<u64> {

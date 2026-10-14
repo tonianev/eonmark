@@ -57,21 +57,24 @@ pub(crate) fn taken_slots(state: &State, node: BuildingId) -> BTreeSet<u8> {
         .collect()
 }
 
-/// `node`'s worked slots: units with a gather job there that are at work.
-pub(crate) fn worked_slots(state: &State, rules: &Rules, node: BuildingId) -> u8 {
+/// `node`'s `(worked, taken)` slots in one pass over the units: taken by a
+/// unit's gather job (walking or working), worked when that unit is at
+/// work.
+pub(crate) fn slot_counts(state: &State, rules: &Rules, node: BuildingId) -> (u8, u8) {
     let Some(b) = state.buildings.get(&node) else {
-        return 0;
+        return (0, 0);
     };
     let rect = building_rect(rules, &state.map, b);
-    let n = state
-        .units
-        .values()
-        .filter(|u| {
-            matches!(u.job, Some(Job::Gather { node: n, .. }) if n == node)
-                && at_work(u, &state.map, rect)
-        })
-        .count();
-    u8::try_from(n).expect("at most 255 slots")
+    let (mut worked, mut taken) = (0u8, 0u8);
+    for u in state.units.values() {
+        if matches!(u.job, Some(Job::Gather { node: n, .. }) if n == node) {
+            taken = taken.checked_add(1).expect("at most 255 slots");
+            if at_work(u, &state.map, rect) {
+                worked += 1;
+            }
+        }
+    }
+    (worked, taken)
 }
 
 /// The connected component a unit at `pos` walks in (its tile's, or the
@@ -125,9 +128,10 @@ pub(crate) type GatherPlan = Vec<(UnitId, u8)>;
 /// Checks, first failure wins: the node is `p`'s (`UnknownBuilding`), is
 /// complete (`UnderConstruction`) and gathers (`NotAGatherNode`); some
 /// given unit is `p`'s, of the node's worker kind and able to walk to a
-/// tile beside it (`NoValidUnits`); a slot is free (`NoFreeSlot`).
-/// Candidates in id order that are not already on the node take the lowest
-/// free slots; the rest are left as they are.
+/// tile beside it (`NoValidUnits`); when every such unit already works the
+/// node, the order is accepted and changes nothing; otherwise a slot is
+/// free (`NoFreeSlot`). Candidates in id order that are not already on the
+/// node take the lowest free slots; the rest are left as they are.
 pub(crate) fn validate_gather(
     state: &State,
     rules: &Rules,
@@ -144,29 +148,40 @@ pub(crate) fn validate_gather(
         return Err(RejectReason::UnderConstruction);
     }
     let worker = worker_kind(rules, b.kind).ok_or(RejectReason::NotAGatherNode)?;
-    let candidates: BTreeSet<UnitId> = units
+    // Deduplicate before the per-unit reach check, so a long repeated list
+    // costs no more than the distinct units in it.
+    let mine: BTreeSet<UnitId> = units
         .iter()
         .copied()
         .filter(|id| {
-            state.units.get(id).is_some_and(|u| {
-                u.owner == p
-                    && u.kind == worker
-                    && stand_tile(state, rules, node, 0, u.pos).is_some()
-            })
+            state
+                .units
+                .get(id)
+                .is_some_and(|u| u.owner == p && u.kind == worker)
         })
+        .collect();
+    let candidates: Vec<UnitId> = mine
+        .into_iter()
+        .filter(|id| stand_tile(state, rules, node, 0, state.units[id].pos).is_some())
         .collect();
     if candidates.is_empty() {
         return Err(RejectReason::NoValidUnits);
+    }
+    let newcomers: Vec<UnitId> = candidates
+        .into_iter()
+        .filter(|id| !matches!(state.units[id].job, Some(Job::Gather { node: n, .. }) if n == node))
+        .collect();
+    // Workers already on the node keep their slots: re-issuing the order
+    // to them alone is accepted and changes nothing, full node or not.
+    if newcomers.is_empty() {
+        return Ok(Vec::new());
     }
     let mut taken = taken_slots(state, node);
     if lowest_free(b.slots, &taken).is_none() {
         return Err(RejectReason::NoFreeSlot);
     }
     let mut plan = Vec::new();
-    for id in candidates {
-        if matches!(state.units[&id].job, Some(Job::Gather { node: n, .. }) if n == node) {
-            continue;
-        }
+    for id in newcomers {
         let Some(slot) = lowest_free(b.slots, &taken) else {
             break;
         };
@@ -223,33 +238,49 @@ pub(crate) fn builder_takes_slot(
 /// timer. Units are visited in id order and see the slots taken earlier in
 /// the same tick.
 pub(crate) fn idle_seek_step(state: &mut State, rules: &Rules, tick: u32) {
+    // One read-only pass: each worker's decision depends only on its own
+    // fields, so it can be taken before any write. Assigning a slot below
+    // changes only the assigned unit (and the path queue), never another
+    // unit's decision.
     let workers = worker_kinds(rules);
+    let mut clear = Vec::new();
+    let mut start = Vec::new();
+    let mut due = Vec::new();
+    for u in state.units.values() {
+        if !workers.contains(&u.kind) {
+            continue;
+        }
+        if u.job.is_some() || u.order.is_some() {
+            if u.seek_at.is_some() {
+                clear.push(u.id);
+            }
+        } else {
+            match u.seek_at {
+                None => start.push(u.id),
+                Some(at) if tick >= at => due.push(u.id),
+                Some(_) => {}
+            }
+        }
+    }
+    for id in clear {
+        state.units.get_mut(&id).expect("exists").seek_at = None;
+    }
+    for id in start {
+        state.units.get_mut(&id).expect("exists").seek_at =
+            Some(tick + rules.idle_seek_delay_ticks());
+    }
+    if due.is_empty() {
+        return;
+    }
     let mut taken: BTreeMap<BuildingId, BTreeSet<u8>> = BTreeMap::new();
     for u in state.units.values() {
         if let Some(Job::Gather { node, slot }) = u.job {
             taken.entry(node).or_default().insert(slot);
         }
     }
-    let ids: Vec<UnitId> = state.units.keys().copied().collect();
-    for id in ids {
+    let none = BTreeSet::new();
+    for id in due {
         let u = &state.units[&id];
-        if !workers.contains(&u.kind) {
-            continue;
-        }
-        if u.job.is_some() || u.order.is_some() {
-            if u.seek_at.is_some() {
-                state.units.get_mut(&id).expect("exists").seek_at = None;
-            }
-            continue;
-        }
-        let Some(at) = u.seek_at else {
-            state.units.get_mut(&id).expect("exists").seek_at =
-                Some(tick + rules.idle_seek_delay_ticks());
-            continue;
-        };
-        if tick < at {
-            continue;
-        }
         let (owner, kind, pos) = (u.owner, u.kind, u.pos);
         let best = state
             .buildings
@@ -258,7 +289,7 @@ pub(crate) fn idle_seek_step(state: &mut State, rules: &Rules, tick: u32) {
                 b.owner == owner
                     && b.construction == Construction::Complete
                     && worker_kind(rules, b.kind) == Some(kind)
-                    && lowest_free(b.slots, taken.get(&b.id).unwrap_or(&BTreeSet::new())).is_some()
+                    && lowest_free(b.slots, taken.get(&b.id).unwrap_or(&none)).is_some()
                     && stand_tile(state, rules, b.id, 0, pos).is_some()
             })
             .min_by_key(|b| {

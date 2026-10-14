@@ -72,12 +72,8 @@ impl<'a> SimView<'a> {
     /// `None` when the building does not exist.
     pub fn worked_slots(&self, id: BuildingId) -> Option<(u8, u8, u8)> {
         let b = self.state.buildings.get(&id)?;
-        let taken = u8::try_from(gather::taken_slots(self.state, id).len()).expect("<= 255");
-        Some((
-            gather::worked_slots(self.state, self.rules, id),
-            taken,
-            b.slots,
-        ))
+        let (worked, taken) = gather::slot_counts(self.state, self.rules, id);
+        Some((worked, taken, b.slots))
     }
 
     /// `p`'s idle workers in id order: units of a kind that works some

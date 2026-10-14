@@ -4,19 +4,23 @@
 //! A complete building whose kind is a unit kind's `trainer` queues that
 //! kind, up to `train_queue_max` entries. The cost is deducted and the pop
 //! charged when an entry is queued; `Cancel` refunds exactly what the entry
-//! paid. Only the head progresses, one tick per tick, and a finished unit
-//! appears on the nearest passable tile around the footprint centre. It
-//! walks to the building's rally point when one is set, or else takes a
-//! free slot at its own building when its kind works it (a Scribe at a
-//! Scriptorium); otherwise it starts idle and seeks work like any worker.
+//! paid. Only the head progresses, one tick per step, and a finished unit
+//! appears beside the building, on the side it can leave from (see
+//! `spawn_tile`). It walks to the building's rally point when one is set,
+//! or else takes a free slot at its own building when its kind works it (a
+//! Scribe at a Scriptorium); otherwise it starts idle, and a worker kind
+//! then seeks work like any idle worker while any other kind stands.
 
-use crate::construction::{centre_tile, order_move};
+use crate::construction::{building_rect, centre_tile, order_move, ring};
 use crate::economy::{self, building_kind, first_short};
 use crate::fx::FxVec2;
-use crate::ids::{BuildingId, PlayerId, UnitKindId};
+use crate::ids::{BuildingId, PlayerId, Tile, UnitKindId};
 use crate::movement;
-use crate::state::{Construction, QueueEntry, QueueItem, RejectReason, SimEvent, State, Unit};
+use crate::state::{
+    Building, Construction, QueueEntry, QueueItem, RejectReason, SimEvent, State, Unit,
+};
 use rules::Rules;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Pop `p` uses: every own unit alive plus every entry queued at an own
 /// building, each at its kind's `pop`.
@@ -172,7 +176,9 @@ pub(crate) fn cancel_slot(
 }
 
 /// Step 6b: every complete building's queue head gains one tick, in id
-/// order; a head that reaches its kind's training time becomes a unit.
+/// order; a head that reaches its kind's training time becomes a unit. The
+/// entry behind it becomes the head and gains its first tick in the next
+/// step, so a busy building turns out one unit every `train_time` steps.
 pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec<SimEvent>) {
     let ids: Vec<BuildingId> = state
         .buildings
@@ -181,9 +187,8 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
         .map(|b| b.id)
         .collect();
     for id in ids {
-        let b = state.buildings.get_mut(&id).expect("listed");
         let done = {
-            let head = &mut b.queue[0];
+            let head = &mut state.buildings.get_mut(&id).expect("listed").queue[0];
             let QueueItem::Unit(kind) = head.item;
             let def = rules.unit_kind(kind.0).expect("validated unit kind");
             head.progress = (head.progress + 1).min(rules.train_time_ticks(def));
@@ -192,11 +197,14 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
         if !done {
             continue;
         }
-        let (owner, rally, nw, bkind) = (b.owner, b.rally, b.tile, b.kind);
-        let centre = centre_tile(building_kind(rules, bkind), nw);
+        let b = &state.buildings[&id];
+        let owner = b.owner;
+        let goal = b
+            .rally
+            .map(|target| movement::group_targets(&state.map, target, 1)[0]);
         // A finished head waits, complete, while no tile around can take
         // the unit (never on a real map; the spiral covers every tile).
-        let Some(tile) = state.map.spiral(centre).find(|t| state.map.passable(*t)) else {
+        let Some(tile) = spawn_tile(state, rules, b, goal.map(|g| state.map.tile_of(g))) else {
             continue;
         };
         let b = state.buildings.get_mut(&id).expect("listed");
@@ -206,16 +214,51 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
         let u = Unit::spawn(unit, owner, kind, tile, def, &state.map, rules.tick_rate_hz);
         state.units.insert(unit, u);
         events.push(SimEvent::UnitSpawned { unit });
-        match rally {
-            Some(target) => {
-                let goal = movement::group_targets(&state.map, target, 1)[0];
-                order_move(state, rules, unit, goal, tick);
-            }
+        match goal {
+            Some(goal) => order_move(state, rules, unit, goal, tick),
             None => {
                 crate::gather::unit_takes_slot(state, rules, unit, id, tick);
             }
         }
     }
+}
+
+/// Where a unit trained at `b` appears: the first passable tile of the
+/// spiral around the footprint's centre tile that lies in the spawn
+/// component. With a rally goal on a component that touches the building's
+/// ring, that is the goal's component; otherwise it is the largest
+/// component, by tile count and then the lower id, among the passable ring
+/// tiles, so a pocket that neighbouring buildings seal against this one
+/// never takes the unit. With no passable ring tile, any passable tile.
+/// The tile may hold a unit already; separation pushes them apart.
+fn spawn_tile(state: &State, rules: &Rules, b: &Building, goal: Option<Tile>) -> Option<Tile> {
+    let map = &state.map;
+    let rect = building_rect(rules, map, b);
+    let touching: BTreeSet<u16> = ring(rect, map.width(), map.height())
+        .into_iter()
+        .filter(|t| map.passable(*t))
+        .map(|t| map.component_of(t))
+        .collect();
+    let want = goal
+        .map(|g| map.component_of(g))
+        .filter(|c| touching.contains(c))
+        .or_else(|| {
+            if touching.len() <= 1 {
+                return touching.first().copied();
+            }
+            let mut size: BTreeMap<u16, u32> = touching.iter().map(|&c| (c, 0)).collect();
+            for c in map.components() {
+                if let Some(n) = size.get_mut(c) {
+                    *n += 1;
+                }
+            }
+            size.into_iter()
+                .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
+                .map(|(c, _)| c)
+        });
+    let centre = centre_tile(building_kind(rules, b.kind), b.tile);
+    map.spiral(centre)
+        .find(|t| map.passable(*t) && want.is_none_or(|w| map.component_of(*t) == w))
 }
 
 /// Validate `SetRally { building, target }`: the building (complete or a

@@ -1,6 +1,7 @@
 //! M3a acceptance tests: the territory field, the standard start, Towns,
-//! construction and base-yield income, and the economy fixture (gathering
-//! and training join with the next M3a slices). Test names start with
+//! construction and base-yield income, gathering, the Yield Cap and idle
+//! seeking, training with the unit cost ramps and the pop cap, and the
+//! economy fixture. Test names start with
 //! `territory_` or `economy_` so that `cargo test -p sim territory` and
 //! `cargo test -p sim economy` select them (the filter matches test paths,
 //! not integration-test file names).
@@ -2486,21 +2487,126 @@ fn economy_sixth_queued_skirmisher_is_capped() {
     if (base, step, cap) == (40, 100, 2250) {
         assert_eq!(paid, [40, 44, 52, 64, 80, 90]);
     }
-    // Cancel the two newest entries at the first hall: each refunds what it
-    // paid, and the next quote falls back to k = 5.
+    // Cancel two entries in the middle of the first hall's queue: slot 1
+    // (the 2nd Skirmisher), then slot 2 of what remains (the 4th). Each
+    // refunds exactly what that entry paid, the others keep their places,
+    // and the next quote falls back to k = 5.
     let before = stock(&sim, 0, grain);
-    let events = apply(&mut sim, vec![cancel(0, 10, 1, 4), cancel(0, 11, 1, 3)]);
+    let events = apply(&mut sim, vec![cancel(0, 10, 1, 1), cancel(0, 11, 1, 2)]);
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert!(events.contains(&SimEvent::TrainingCancelled {
         building: BuildingId(1),
-        slot: 4
+        slot: 1
     }));
-    assert_eq!(stock(&sim, 0, grain) - before, paid_at(5) + paid_at(4));
+    assert_eq!(stock(&sim, 0, grain) - before, paid_at(2) + paid_at(4));
+    let left: Vec<i64> = sim
+        .view()
+        .building(BuildingId(1))
+        .unwrap()
+        .queue
+        .iter()
+        .map(|e| e.paid[grain])
+        .collect();
+    assert_eq!(
+        left,
+        [paid_at(1), paid_at(3), paid_at(5)],
+        "the named entries left"
+    );
     assert_eq!(
         sim.view().unit_cost(PlayerId(0), UnitKindId(sk))[grain],
         paid_at(5),
         "k fell from 7 to 5"
     );
+}
+
+/// The ramps count the right things. The Yeoman's `n` counts own Yeomen
+/// only, alive or queued; the military `k` counts entries queued at own
+/// buildings of the trainer kind only, so Yeomen queued at the Seat leave
+/// it alone and a finished Skirmisher stops counting; pop and both ramps
+/// ignore the other player.
+#[test]
+fn economy_unit_ramps_count_only_their_kind_class_and_owner() {
+    let rules = load_rules();
+    let hall = kind(&rules, "muster_hall");
+    let yeoman = unit_kind(&rules, "yeoman");
+    let sk = unit_kind(&rules, "skirmisher");
+    let grain = resource(&rules, "grain");
+    let sk_base = i64::from(rules.unit_kind(sk).unwrap().cost["grain"]);
+    let rules::UnitRamp::PerUnit(ystep) = &rules.unit_kind(yeoman).unwrap().ramp else {
+        panic!("the Yeoman ramps per unit");
+    };
+    let ystep = i64::from(ystep["grain"]);
+    let mut sim = standard(67);
+    // P0's Muster Hall is BuildingId(3), P1's BuildingId(4).
+    let events = apply(
+        &mut sim,
+        vec![
+            place(0, 0, hall, 28, 58, true),
+            grant(0, 1, grain, 10_000),
+            place(1, 0, hall, 96, 58, true),
+            grant(1, 1, grain, 10_000),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let quote = |s: &Sim, k: u16| s.view().unit_cost(PlayerId(0), UnitKindId(k))[grain];
+    let (y0, pop0) = (quote(&sim, yeoman), sim.view().pop(PlayerId(0)));
+    assert_eq!(quote(&sim, sk), sk_base, "k = 1");
+
+    // P1 queues Yeomen and Skirmishers: nothing of P0's moves.
+    let p1 = vec![
+        train(1, 2, 2, yeoman),
+        train(1, 3, 2, yeoman),
+        train(1, 4, 4, sk),
+        train(1, 5, 4, sk),
+    ];
+    let events = apply(&mut sim, p1);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(quote(&sim, yeoman), y0, "P1's Yeomen are not P0's");
+    assert_eq!(quote(&sim, sk), sk_base, "P1's halls are not P0's");
+    assert_eq!(
+        sim.view().pop(PlayerId(0)),
+        pop0,
+        "P1's queues are not P0's pop"
+    );
+
+    // P0 queues two Yeomen at the Seat: the Yeoman ramp moves by two steps,
+    // the military ramp does not (the Seat is not a Muster Hall).
+    let events = apply(
+        &mut sim,
+        vec![train(0, 2, 1, yeoman), train(0, 3, 1, yeoman)],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(quote(&sim, yeoman), y0 + 2 * ystep);
+    assert_eq!(quote(&sim, sk), sk_base, "Seat queues are not military");
+
+    // A live Skirmisher moves neither ramp: n counts Yeomen, k counts queues.
+    let events = apply(&mut sim, vec![spawn_kind(0, 4, sk, 34, 70, 1)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(
+        quote(&sim, yeoman),
+        y0 + 2 * ystep,
+        "a Skirmisher is not a Yeoman"
+    );
+    assert_eq!(quote(&sim, sk), sk_base, "alive is not queued");
+
+    // A queued Skirmisher raises k; once it is trained, k is back to 1.
+    let events = apply(&mut sim, vec![train(0, 5, 3, sk)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(quote(&sim, sk) > sk_base, "queued raises k");
+    let ticks = rules.train_time_ticks(rules.unit_kind(sk).unwrap());
+    assert!(run_until(&mut sim, ticks + 5, |s| s
+        .view()
+        .building(BuildingId(3))
+        .unwrap()
+        .queue
+        .is_empty()));
+    let trained = sim
+        .view()
+        .units()
+        .filter(|u| u.owner == PlayerId(0) && u.kind == UnitKindId(sk))
+        .count();
+    assert_eq!(trained, 2, "the spawned and the trained Skirmisher");
+    assert_eq!(quote(&sim, sk), sk_base, "finishing lowers k");
 }
 
 /// Pop is charged when a unit is queued: at the cap, `Train` is
@@ -2532,9 +2638,10 @@ fn economy_train_is_rejected_at_the_pop_cap() {
     assert_eq!(rejections(&events), [RejectReason::PopCapReached]);
 }
 
-/// Every `Train`, `SetRally` and queue `Cancel` rejection, each against a
-/// control sim whose command at the same (player, seq) is rejected for an
-/// unrelated reason: no state changes and no randomness drawn.
+/// Every `Train`, `SetRally` and queue `Cancel` rejection reason, each
+/// against a control sim whose command at the same (player, seq) is
+/// rejected for an unrelated reason: no state changes and no randomness
+/// drawn.
 #[test]
 fn economy_train_rejections() {
     let rules = load_rules();
@@ -2554,6 +2661,13 @@ fn economy_train_rejections() {
         let five = (0..5).map(|i| train(0, 110 + i, 1, yeoman)).collect();
         let events = apply(s, five);
         assert!(rejections(&events).is_empty(), "{events:?}");
+    };
+    let crowd = |s: &mut Sim| {
+        let room = rules.pop_cap(0) - rules.standard_start.units["yeoman"];
+        let spawn = spawn_kind(0, 120, 0, 34, 70, u16::try_from(room).unwrap());
+        let events = apply(s, vec![spawn]);
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        assert_eq!(s.view().pop(PlayerId(0)).0, rules.pop_cap(0));
     };
     type Setup<'a> = Box<dyn Fn(&mut Sim) + 'a>;
     let none: Setup = Box::new(|_| {});
@@ -2599,6 +2713,12 @@ fn economy_train_rejections() {
             Box::new(fill),
             train(0, 0, 1, yeoman),
             RejectReason::QueueFull,
+        ),
+        (
+            "at the pop cap",
+            Box::new(crowd),
+            train(0, 0, 1, yeoman),
+            RejectReason::PopCapReached,
         ),
         (
             "Grain spent on Yeomen",
@@ -2659,9 +2779,13 @@ fn economy_train_rejections() {
     }
 }
 
-/// A trained unit appears exactly `train_time` ticks after it reaches the
-/// head of the queue, on the nearest free tile around the building, and
-/// walks to the rally point.
+/// Only the head of a queue trains. A Yeoman queued into an empty queue
+/// appears in the `train_time`-th step counting the one that queued it; the
+/// entry behind it gains nothing meanwhile and appears `train_time` steps
+/// later. A trained unit appears beside the building, on the first
+/// passable tile of the spiral around the footprint centre in the spawn
+/// component (here the open map; the tile may be occupied), and walks to
+/// the rally point.
 #[test]
 fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
     let rules = load_rules();
@@ -2681,6 +2805,7 @@ fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
                 },
             ),
             train(0, 1, 1, yeoman),
+            train(0, 2, 1, yeoman),
         ],
     );
     assert!(rejections(&events).is_empty(), "{events:?}");
@@ -2688,6 +2813,9 @@ fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
     let spawn_at = queued_at + ticks;
     assert!(run_until(&mut sim, ticks + 2, |s| s.tick() == spawn_at - 1));
     assert!(sim.view().unit(UnitId(11)).is_none(), "not one tick early");
+    let queue = &sim.view().building(BuildingId(1)).unwrap().queue;
+    assert_eq!(queue[0].progress, ticks - 1);
+    assert_eq!(queue[1].progress, 0, "only the head trains");
     sim.step(&[]);
     let u = sim.view().unit(UnitId(11)).expect("trained on time");
     let map = sim.view().map();
@@ -2710,9 +2838,95 @@ fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
         at.dist_sq_i64(rally) <= (2 * 2) << 32,
         "arrived near the rally point"
     );
+    // The second entry started in the step after the first finished.
+    let second_at = spawn_at + ticks;
+    assert!(run_until(&mut sim, ticks, |s| s.tick() == second_at - 1));
+    assert!(sim.view().unit(UnitId(12)).is_none(), "not one tick early");
+    sim.step(&[]);
+    assert!(
+        sim.view().unit(UnitId(12)).is_some(),
+        "one train_time later"
+    );
 }
 
-/// A Scribe trained at a Scriptorium takes a slot there at once.
+/// A trained unit never appears in a pocket that neighbouring buildings
+/// seal against its building: four Crofts around a Town's east side leave
+/// two tiles there cut off, and the spiral reaches them first. Without a
+/// rally, or with one outside, the unit appears on the open side and can
+/// leave; a rally inside the pocket puts it there.
+#[test]
+fn economy_trained_unit_never_spawns_in_a_sealed_pocket() {
+    let rules = load_rules();
+    let (town, croft) = (kind(&rules, "town"), kind(&rules, "croft"));
+    let yeoman = unit_kind(&rules, "yeoman");
+    let ticks = rules.train_time_ticks(rules.unit_kind(yeoman).unwrap());
+    let mut sim = empty(68);
+    let events = apply(
+        &mut sim,
+        vec![
+            place(0, 0, town, 23, 63, true),
+            place(0, 1, croft, 26, 62, true),
+            place(0, 2, croft, 27, 64, true),
+            place(0, 3, croft, 25, 66, true),
+            place(0, 4, croft, 27, 66, true),
+            grant(0, 5, resource(&rules, "grain"), 1000),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let map = sim.view().map();
+    let (pocket, open) = (Tile::new(26, 64), Tile::new(22, 64));
+    assert!(map.passable(pocket) && map.passable(Tile::new(26, 65)));
+    assert_ne!(
+        map.component_of(pocket),
+        map.component_of(open),
+        "the layout seals a pocket"
+    );
+    let comp = |s: &Sim, u: u32| {
+        let map = s.view().map();
+        map.component_of(map.tile_of(s.view().unit(UnitId(u)).unwrap().pos))
+    };
+    let rally = |seq: u32, x: i32, y: i32| {
+        PlayerCommand::new(
+            PlayerId(0),
+            seq,
+            Command::SetRally {
+                building: BuildingId(1),
+                target: FxVec2::from_ints(x, y),
+            },
+        )
+    };
+    let open_comp = map.component_of(open);
+    let pocket_comp = map.component_of(pocket);
+
+    // No rally: the open side.
+    let events = apply(&mut sim, vec![train(0, 6, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 1));
+    assert_eq!(comp(&sim, 1), open_comp);
+
+    // A rally outside: the open side, and the unit gets there.
+    let events = apply(&mut sim, vec![rally(7, 20, 70), train(0, 8, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 2));
+    assert_eq!(comp(&sim, 2), open_comp);
+    assert!(run_until(&mut sim, 600, |s| s
+        .view()
+        .unit(UnitId(2))
+        .unwrap()
+        .order
+        .is_none()));
+    let at = sim.view().unit(UnitId(2)).unwrap().pos;
+    assert!(at.dist_sq_i64(FxVec2::from_ints(20, 70)) <= (2 * 2) << 32);
+
+    // A rally inside the pocket: the pocket.
+    let events = apply(&mut sim, vec![rally(9, 26, 65), train(0, 10, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 3));
+    assert_eq!(comp(&sim, 3), pocket_comp);
+}
+
+/// A Scribe trained at a Scriptorium takes a slot there at once and works
+/// it once it reaches the slot's stand tile.
 #[test]
 fn economy_scribe_trained_at_a_scriptorium_takes_a_slot() {
     let rules = load_rules();

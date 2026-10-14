@@ -18,6 +18,12 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-14 at `rules_version` 11, `SIM_VERSION` 10 with `just rerecord`
+(review follow-up: a trained unit spawns in the rally goal's component, or
+else the largest component touching its building, never in a sealed
+pocket). No fixture trains next to a pocket, so every final hash and every
+`.hash` file is unchanged; only the headers differ.
+
 Recorded 2026-10-14 at `rules_version` 10, `SIM_VERSION` 9 with `just rerecord`
 (M3a training: `Train`, the queue `Cancel` and `SetRally` have real
 handlers and step 6b trains the queue heads). In `economy_second_town` each

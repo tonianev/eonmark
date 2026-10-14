@@ -117,7 +117,19 @@ impl<'a> SimView<'a> {
         building: BuildingId,
         kind: UnitKindId,
     ) -> Result<Vec<i64>, RejectReason> {
+        self.check_player(p)?;
         training::validate_train(self.state, self.rules, p, building, kind)
+    }
+
+    /// The checks `Sim::apply` makes on the issuing player before any
+    /// command's own: it exists (`UnknownPlayer`) and has not surrendered
+    /// (`Surrendered`).
+    fn check_player(&self, p: PlayerId) -> Result<(), RejectReason> {
+        match self.player(p) {
+            None => Err(RejectReason::UnknownPlayer),
+            Some(player) if player.surrendered => Err(RejectReason::Surrendered),
+            Some(_) => Ok(()),
+        }
     }
 
     /// Town-kind buildings `p` owns, sites included, and the town limit.
@@ -147,6 +159,7 @@ impl<'a> SimView<'a> {
         kind: BuildingKindId,
         tile: Tile,
     ) -> Result<Vec<i64>, RejectReason> {
+        self.check_player(p)?;
         let def = self
             .rules
             .map(&self.setup.map)

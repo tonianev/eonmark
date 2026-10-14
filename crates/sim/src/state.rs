@@ -88,7 +88,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// progresses in step 6b, `Cancel` refunds a queue entry, `SetRally` sets
 /// where trained units walk. `Train` and `SetRally` no longer draw from the
 /// RNG.
-pub const SIM_VERSION: u32 = 9;
+///
+/// 10: a trained unit spawns in the component of the rally goal, or else of
+/// the largest component touching the building's ring, instead of on the
+/// first passable spiral tile, which could lie in a pocket sealed off by
+/// neighbouring buildings.
+pub const SIM_VERSION: u32 = 10;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

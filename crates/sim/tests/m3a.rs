@@ -1416,3 +1416,651 @@ fn economy_standard_start_units_never_share_a_tile() {
     assert_eq!(tiles.len(), 16);
     assert!(tiles.iter().all(|t| map.passable(*t)));
 }
+
+// ---------------------------------------------------------------------------
+// Gathering, the Yield Cap, Lore, idle seeking and Town growth
+// ---------------------------------------------------------------------------
+
+/// A two-player scenario (debug commands on) with an empty start.
+fn empty(seed: u64) -> Sim {
+    let rules = load_rules();
+    let setup = MatchSetup::scenario(&rules, seed);
+    assert_eq!(setup.start, StartKind::Empty);
+    Sim::new(setup, rules, Box::new(NoAi))
+}
+
+fn place(p: u8, seq: u32, kind: BuildingKindId, x: u16, y: u16, complete: bool) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::DebugPlaceBuilding {
+            owner: PlayerId(p),
+            kind,
+            tile: Tile::new(x, y),
+            complete,
+        },
+    )
+}
+
+fn gather(p: u8, seq: u32, units: &[u32], node: u32) -> PlayerCommand {
+    PlayerCommand::new(
+        PlayerId(p),
+        seq,
+        Command::Gather {
+            units: units.iter().copied().map(UnitId).collect(),
+            node: BuildingId(node),
+        },
+    )
+}
+
+fn unit_kind(rules: &Rules, id: &str) -> u16 {
+    u16::try_from(
+        rules
+            .units
+            .iter()
+            .position(|u| u.id == id)
+            .expect("unit kind"),
+    )
+    .unwrap()
+}
+
+/// Total worked slots over `nodes`.
+fn worked(sim: &Sim, nodes: impl IntoIterator<Item = u32>) -> u32 {
+    nodes
+        .into_iter()
+        .map(|n| u32::from(sim.view().worked_slots(BuildingId(n)).unwrap().0))
+        .sum()
+}
+
+/// M3a acceptance 1a: one Yeoman working a Croft adds exactly the Croft's
+/// `rate_per_worker` (from `buildings.ron`) every income period, for three
+/// consecutive periods, from whatever phase the work started in.
+#[test]
+fn economy_one_yeoman_on_a_croft_yields_exactly_the_croft_rate_per_income_period() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    let rate_u32 = rules
+        .building_kind(croft.0)
+        .unwrap()
+        .gather
+        .as_ref()
+        .unwrap()
+        .rate_per_worker;
+    let rate = i64::from(rate_u32);
+    let grain = resource(&rules, "grain");
+    let period = rules.income_period_ticks();
+    let mut sim = empty(20);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, croft, 30, 60, true),
+            spawn_kind(0, 1, 0, 30, 66, 1),
+        ],
+    );
+    let events = apply(&mut sim, vec![gather(0, 2, &[1], 1)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, 600, |s| worked(s, [1]) == 1));
+    let info = sim.view().income(PlayerId(0))[grain];
+    assert_eq!((info.raw, info.credited), (rate_u32, rate_u32));
+    for _ in 0..3 {
+        let before = stock(&sim, 0, grain);
+        for _ in 0..period {
+            sim.step(&[]);
+        }
+        assert_eq!(stock(&sim, 0, grain) - before, rate);
+    }
+}
+
+/// M3a acceptance 1b: with 10 Crofts worked (two complete Towns host them,
+/// placed by `DebugPlaceBuilding`, owner decision D2) the raw Grain rate is
+/// above the Yield Cap, the credited rate is the cap, and the stockpile
+/// grows by exactly the cap per income period.
+#[test]
+fn economy_ten_worked_crofts_flatline_at_the_yield_cap() {
+    let rules = load_rules();
+    let (town, croft) = (kind(&rules, "town"), kind(&rules, "croft"));
+    let grain = resource(&rules, "grain");
+    let rate = rules
+        .building_kind(croft.0)
+        .unwrap()
+        .gather
+        .as_ref()
+        .unwrap()
+        .rate_per_worker;
+    let town_grain = rules.building_kind(town.0).unwrap().base_yield["grain"];
+    let cap = rules.yield_cap(0);
+    let period = rules.income_period_ticks();
+    let mut sim = empty(21);
+    let mut cmds = vec![
+        place(0, 0, town, 23, 63, true),
+        place(0, 1, town, 40, 63, true),
+    ];
+    let sites: Vec<(u16, u16)> = [28, 31, 34, 37, 40, 43]
+        .map(|x| (x, 58))
+        .into_iter()
+        .chain([28, 31, 34, 37].map(|x| (x, 60)))
+        .collect();
+    for (i, (x, y)) in sites.iter().enumerate() {
+        cmds.push(place(0, 2 + u32::try_from(i).unwrap(), croft, *x, *y, true));
+    }
+    cmds.push(spawn_kind(0, 20, 0, 32, 67, 10));
+    apply(&mut sim, cmds);
+    // Towns are BuildingId(1) and (2); Crofts (3..=12); Yeomen UnitId(1..=10).
+    let gathers = (0..10u32)
+        .map(|i| gather(0, 21 + i, &[1 + i], 3 + i))
+        .collect();
+    let events = apply(&mut sim, gathers);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, 2000, |s| worked(s, 3..=12) == 10));
+    let info = sim.view().income(PlayerId(0))[grain];
+    assert_eq!(info.raw, 10 * rate + 2 * town_grain);
+    assert!(info.raw > cap, "the setup must exceed the cap");
+    assert_eq!((info.cap, info.credited), (Some(cap), cap));
+    for _ in 0..3 {
+        let before = stock(&sim, 0, grain);
+        for _ in 0..period {
+            sim.step(&[]);
+        }
+        assert_eq!(stock(&sim, 0, grain) - before, i64::from(cap));
+    }
+}
+
+/// M3a acceptance 1c: Lore is exempt from the Yield Cap. Three Scriptoria
+/// with three Scribes each produce more than the cap, and all of it is
+/// credited (the smallest such count is derived from the data).
+#[test]
+fn economy_lore_ignores_the_yield_cap() {
+    let rules = load_rules();
+    let scriptorium = kind(&rules, "scriptorium");
+    let def = rules.building_kind(scriptorium.0).unwrap();
+    let g = def.gather.as_ref().unwrap();
+    let rules::Slots::Fixed(slots) = g.slots else {
+        panic!("Scriptorium slots are fixed");
+    };
+    let per = def.base_yield["lore"] + slots * g.rate_per_worker;
+    let cap = rules.yield_cap(0);
+    let n = cap / per + 1;
+    assert!(n * per > cap);
+    assert!(n <= 3, "the test places at most 3 Scriptoria");
+    let lore = resource(&rules, "lore");
+    let period = rules.income_period_ticks();
+    let mut sim = empty(22);
+    let mut cmds: Vec<PlayerCommand> = [(28u16, 59u16), (32, 59), (36, 59)]
+        .iter()
+        .take(usize::try_from(n).unwrap())
+        .enumerate()
+        .map(|(i, (x, y))| place(0, u32::try_from(i).unwrap(), scriptorium, *x, *y, true))
+        .collect();
+    let scribes = u16::try_from(n * slots).unwrap();
+    cmds.push(spawn_kind(
+        0,
+        10,
+        unit_kind(&rules, "scribe"),
+        32,
+        66,
+        scribes,
+    ));
+    apply(&mut sim, cmds);
+    let gathers: Vec<PlayerCommand> = (0..n)
+        .map(|b| {
+            let units: Vec<u32> = (0..slots).map(|k| 1 + b * slots + k).collect();
+            gather(0, 11 + b, &units, 1 + b)
+        })
+        .collect();
+    let events = apply(&mut sim, gathers);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, 2000, |s| worked(s, 1..=n) == n * slots));
+    let info = sim.view().income(PlayerId(0))[lore];
+    assert_eq!(info.cap, None, "Lore is not capped");
+    assert_eq!((info.raw, info.credited), (n * per, n * per));
+    let before = stock(&sim, 0, lore);
+    for _ in 0..period {
+        sim.step(&[]);
+    }
+    assert_eq!(stock(&sim, 0, lore) - before, i64::from(n * per));
+}
+
+/// Lore stops at its `stockpile_cap`, whether it comes from income or a
+/// grant, and never goes past it.
+#[test]
+fn economy_lore_stockpile_stops_at_its_cap() {
+    let rules = load_rules();
+    let lore = resource(&rules, "lore");
+    let cap = i64::from(rules.resources.resources[lore].stockpile_cap.unwrap());
+    let mut sim = empty(23);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, kind(&rules, "scriptorium"), 30, 59, true),
+            PlayerCommand::new(
+                PlayerId(0),
+                1,
+                Command::DebugGrant {
+                    owner: PlayerId(0),
+                    resource: u8::try_from(lore).unwrap(),
+                    amount: u32::try_from(cap - 9).unwrap(),
+                },
+            ),
+        ],
+    );
+    let mut reached = false;
+    for _ in 0..(rules.income_period_ticks() * 2) {
+        sim.step(&[]);
+        let s = stock(&sim, 0, lore);
+        assert!(s <= cap, "{s} > {cap}");
+        reached |= s == cap;
+    }
+    assert!(reached, "the Scriptorium's base Lore fills the stockpile");
+    let events = apply(
+        &mut sim,
+        vec![PlayerCommand::new(
+            PlayerId(0),
+            2,
+            Command::DebugGrant {
+                owner: PlayerId(0),
+                resource: u8::try_from(lore).unwrap(),
+                amount: 500,
+            },
+        )],
+    );
+    assert!(rejections(&events).is_empty());
+    assert_eq!(stock(&sim, 0, lore), cap);
+}
+
+/// A Yeoman with no job and no order takes a free slot on its own exactly
+/// `idle_seek_delay` ticks after it became idle, not one tick earlier.
+#[test]
+fn economy_idle_yeoman_seeks_work_after_the_delay() {
+    let rules = load_rules();
+    let mut sim = empty(24);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, kind(&rules, "croft"), 30, 60, true),
+            spawn_kind(0, 1, 0, 30, 66, 1),
+        ],
+    );
+    let u = sim.view().unit(UnitId(1)).unwrap();
+    let at = u.seek_at.expect("an idle Yeoman starts its timer");
+    let spawned = sim.tick() - 1;
+    assert_eq!(at, spawned + rules.idle_seek_delay_ticks());
+    assert!(run_until(&mut sim, at + 1, |s| s.tick() == at));
+    assert!(
+        sim.view().unit(UnitId(1)).unwrap().job.is_none(),
+        "not before the delay"
+    );
+    sim.step(&[]);
+    let u = sim.view().unit(UnitId(1)).unwrap();
+    assert_eq!(
+        u.job,
+        Some(Job::Gather {
+            node: BuildingId(1),
+            slot: 0
+        })
+    );
+    assert_eq!(u.seek_at, None);
+    assert!(u.order.is_some(), "it walks to the slot's stand tile");
+    assert!(run_until(&mut sim, 600, |s| worked(s, [1]) == 1));
+}
+
+/// With nothing to work, an idle Yeoman retries every `idle_seek_retry`
+/// ticks, and takes a slot at the first retry after one appears.
+#[test]
+fn economy_idle_seek_retries_on_the_retry_interval() {
+    let rules = load_rules();
+    let mut sim = empty(25);
+    apply(&mut sim, vec![spawn_kind(0, 0, 0, 30, 66, 1)]);
+    let first = sim.view().unit(UnitId(1)).unwrap().seek_at.unwrap();
+    assert!(run_until(&mut sim, first + 2, |s| s.tick() == first + 1));
+    let second = sim.view().unit(UnitId(1)).unwrap().seek_at.unwrap();
+    assert_eq!(second, first + rules.idle_seek_retry_ticks());
+    assert!(sim.view().unit(UnitId(1)).unwrap().job.is_none());
+    apply(
+        &mut sim,
+        vec![place(0, 1, kind(&rules, "croft"), 30, 60, true)],
+    );
+    assert!(sim.tick() < second);
+    assert!(run_until(&mut sim, second + 1, |s| s.tick() == second));
+    assert!(sim.view().unit(UnitId(1)).unwrap().job.is_none());
+    sim.step(&[]);
+    assert!(matches!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Gather { .. })
+    ));
+}
+
+/// Idle seeking picks the nearest free building by squared distance to its
+/// footprint centre, and the lower `BuildingId` on an exact tie.
+#[test]
+fn economy_idle_seek_orders_by_distance_then_building_id() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    // Equidistant: Crofts mirrored about x = 30 around a Yeoman at (30, 66):
+    // the lower id wins even though it was placed second in space order.
+    let mut sim = empty(26);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, croft, 32, 62, true),
+            place(0, 1, croft, 27, 62, true),
+            spawn_kind(0, 2, 0, 30, 66, 1),
+        ],
+    );
+    let c1 = sim.view().building(BuildingId(1)).unwrap().tile;
+    let c2 = sim.view().building(BuildingId(2)).unwrap().tile;
+    // Centres (in half tiles) 2 * x + 2 sit 5 half tiles either side of
+    // the Yeoman's 61.
+    let half = |x: u16| 2 * i32::from(x) + 2;
+    assert_eq!(half(c1.x) - 61, 61 - half(c2.x));
+    let at = sim.view().unit(UnitId(1)).unwrap().seek_at.unwrap();
+    assert!(run_until(&mut sim, at + 2, |s| s.tick() == at + 1));
+    assert!(matches!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Gather {
+            node: BuildingId(1),
+            ..
+        })
+    ));
+    // Nearer beats a lower id.
+    let mut sim = empty(27);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, croft, 40, 62, true),
+            place(0, 1, croft, 31, 62, true),
+            spawn_kind(0, 2, 0, 30, 66, 1),
+        ],
+    );
+    let at = sim.view().unit(UnitId(1)).unwrap().seek_at.unwrap();
+    assert!(run_until(&mut sim, at + 2, |s| s.tick() == at + 1));
+    assert!(matches!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Gather {
+            node: BuildingId(2),
+            ..
+        })
+    ));
+}
+
+/// Every `Gather` rejection reason, each leaving the RNG and every job
+/// unchanged.
+#[test]
+fn economy_gather_rejections() {
+    let rules = load_rules();
+    let (croft, town) = (kind(&rules, "croft"), kind(&rules, "town"));
+    let scribe = unit_kind(&rules, "scribe");
+    let mut sim = empty(28);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, croft, 30, 60, true),
+            place(0, 1, croft, 34, 60, false),
+            place(0, 2, town, 40, 63, true),
+            place(0, 3, kind(&rules, "scriptorium"), 34, 70, true),
+            place(1, 0, croft, 90, 60, true),
+            spawn_kind(0, 4, 0, 30, 66, 2),
+            spawn_kind(0, 5, scribe, 36, 68, 1),
+        ],
+    );
+    assert_eq!(sim.view().buildings().count(), 5, "every placement landed");
+    // Croft 1 takes Yeoman 1.
+    apply(&mut sim, vec![gather(0, 6, &[1], 1)]);
+    let cases = [
+        (gather(0, 7, &[2], 1), RejectReason::NoFreeSlot),
+        (gather(0, 8, &[2], 2), RejectReason::UnderConstruction),
+        (gather(0, 9, &[2], 3), RejectReason::NotAGatherNode),
+        (gather(0, 10, &[2], 5), RejectReason::UnknownBuilding),
+        (gather(0, 11, &[2], 99), RejectReason::UnknownBuilding),
+        (gather(0, 12, &[2], 4), RejectReason::NoValidUnits),
+        (gather(0, 13, &[3], 1), RejectReason::NoValidUnits),
+        (gather(0, 14, &[999], 1), RejectReason::NoValidUnits),
+    ];
+    for (cmd, want) in cases {
+        let rng = sim.sub_hashes().rng;
+        let jobs: Vec<_> = sim.view().units().map(|u| u.job).collect();
+        let events = apply(&mut sim, vec![cmd.clone()]);
+        assert_eq!(rejections(&events), [want], "{cmd:?}");
+        assert_eq!(sim.sub_hashes().rng, rng);
+        let after: Vec<_> = sim.view().units().map(|u| u.job).collect();
+        assert_eq!(jobs[0], after[0], "the worker keeps its slot");
+    }
+}
+
+/// A Lumber Yard's slots are the forest tiles around its footprint (edge
+/// or corner), counted from the map at placement and capped at `max`; with
+/// none, `Build` is rejected.
+#[test]
+fn economy_adjacent_slots_count_forest_and_mountain_tiles() {
+    let rules = load_rules();
+    let def = rules.map(&rules.default_map).unwrap();
+    for (id, nw) in [("lumber_yard", (13u16, 57u16)), ("ore_pit", (31, 57))] {
+        let k = kind(&rules, id);
+        let bk = rules.building_kind(k.0).unwrap();
+        let rules::Slots::Adjacent { terrain, max } = bk.gather.as_ref().unwrap().slots else {
+            panic!("{id} counts adjacent tiles");
+        };
+        let rect =
+            sim::construction::footprint(bk, Tile::new(nw.0, nw.1), def.width, def.height).unwrap();
+        let count = sim::construction::ring(rect, def.width, def.height)
+            .iter()
+            .filter(|t| def.tile(t.x, t.y) == terrain)
+            .count();
+        let want = u8::try_from(count.min(usize::try_from(max).unwrap())).unwrap();
+        assert!(want > 0, "{id} at {nw:?} touches {terrain:?}");
+        let mut sim = empty(29);
+        apply(&mut sim, vec![place(0, 0, k, nw.0, nw.1, true)]);
+        assert_eq!(
+            sim.view().building(BuildingId(1)).unwrap().slots,
+            want,
+            "{id}"
+        );
+        if id == "lumber_yard" {
+            assert_eq!(want, 3, "golden: three forest tiles touch (13, 57)");
+        }
+    }
+}
+
+/// A worked Yeoman shoved off its stand tile by a crowd walking through
+/// keeps earning: work is judged by its post, not its live position.
+#[test]
+fn economy_pushed_worker_keeps_working() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    let grain = resource(&rules, "grain");
+    let rate = rules
+        .building_kind(croft.0)
+        .unwrap()
+        .gather
+        .as_ref()
+        .unwrap()
+        .rate_per_worker;
+    let mut sim = empty(30);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, croft, 30, 60, true),
+            spawn_kind(0, 1, 0, 30, 66, 1),
+        ],
+    );
+    apply(&mut sim, vec![gather(0, 2, &[1], 1)]);
+    assert!(run_until(&mut sim, 600, |s| worked(s, [1]) == 1));
+    let stand = sim.view().unit(UnitId(1)).unwrap().post.unwrap().goal;
+    // 30 Yeomen walk through the stand tile and beyond.
+    apply(&mut sim, vec![spawn_kind(0, 3, 0, 22, 59, 30)]);
+    let through: Vec<u32> = (2..=31).collect();
+    let target = FxVec2::from_ints(40, 59);
+    apply(
+        &mut sim,
+        vec![PlayerCommand::new(
+            PlayerId(0),
+            4,
+            Command::Move {
+                units: through.into_iter().map(UnitId).collect(),
+                target,
+                queue: false,
+            },
+        )],
+    );
+    let mut displaced = false;
+    for _ in 0..400 {
+        sim.step(&[]);
+        let u = sim.view().unit(UnitId(1)).unwrap();
+        displaced |= u.pos != stand;
+        assert_eq!(worked(&sim, [1]), 1, "the slot stays worked");
+        assert_eq!(sim.view().income(PlayerId(0))[grain].raw, rate);
+    }
+    assert!(displaced, "the crowd must push the worker");
+}
+
+/// Ordering a worker elsewhere frees its slot; another idle Yeoman takes it
+/// at its next seek.
+#[test]
+fn economy_a_freed_slot_is_taken_by_an_idle_worker() {
+    let rules = load_rules();
+    let mut sim = empty(31);
+    apply(
+        &mut sim,
+        vec![
+            place(0, 0, kind(&rules, "croft"), 30, 60, true),
+            spawn_kind(0, 1, 0, 30, 66, 2),
+        ],
+    );
+    apply(&mut sim, vec![gather(0, 2, &[1], 1)]);
+    assert!(run_until(&mut sim, 600, |s| worked(s, [1]) == 1));
+    let events = apply(
+        &mut sim,
+        vec![PlayerCommand::new(
+            PlayerId(0),
+            3,
+            Command::Move {
+                units: vec![UnitId(1)],
+                target: FxVec2::from_ints(20, 70),
+                queue: false,
+            },
+        )],
+    );
+    assert!(rejections(&events).is_empty());
+    assert!(sim.view().unit(UnitId(1)).unwrap().job.is_none());
+    let retry = rules.idle_seek_delay_ticks() + rules.idle_seek_retry_ticks();
+    assert!(run_until(&mut sim, retry + 600, |s| {
+        s.view().unit(UnitId(2)).unwrap().job
+            == Some(Job::Gather {
+                node: BuildingId(1),
+                slot: 0,
+            })
+    }));
+}
+
+/// The builder of a Croft takes its slot when the Croft completes.
+#[test]
+fn economy_croft_builder_takes_its_slot() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    let mut sim = standard(32);
+    apply(&mut sim, vec![build(0, 0, 1, croft, 28, 60)]);
+    let done = rules.build_time_ticks(rules.building_kind(croft.0).unwrap());
+    assert!(run_until(&mut sim, done + 600, |s| {
+        s.view().building(BuildingId(3)).unwrap().construction == Construction::Complete
+    }));
+    assert_eq!(
+        sim.view().unit(UnitId(1)).unwrap().job,
+        Some(Job::Gather {
+            node: BuildingId(3),
+            slot: 0
+        })
+    );
+    assert!(run_until(&mut sim, 300, |s| worked(s, [3]) == 1));
+}
+
+/// A Town grows to tier 2 when its complete attributed buildings cover
+/// `town_growth_distinct_buildings` distinct kinds: its radius moves to
+/// `town_radius_grown_tiles` and the field equals a fresh one.
+#[test]
+fn territory_town_grows_to_tier_two_at_five_distinct_kinds() {
+    let rules = load_rules();
+    let need = usize::try_from(rules.town_growth_distinct_buildings).unwrap();
+    let kinds = [
+        ("croft", 28u16, 58u16),
+        ("scriptorium", 28, 67),
+        ("muster_hall", 32, 67),
+        ("engine_yard", 36, 67),
+        ("watchtower", 31, 58),
+    ];
+    assert_eq!(kinds.len(), need, "one placement per kind needed");
+    let mut sim = standard(33);
+    for (i, (id, x, y)) in kinds.iter().enumerate() {
+        let seq = u32::try_from(i).unwrap();
+        let events = apply(
+            &mut sim,
+            vec![place(0, seq, kind(&rules, id), *x, *y, true)],
+        );
+        assert!(rejections(&events).is_empty(), "{id}: {events:?}");
+        let b = BuildingId(3 + seq);
+        assert_eq!(
+            sim.view().building(b).unwrap().town,
+            Some(BuildingId(1)),
+            "{id}"
+        );
+        let tier = sim
+            .view()
+            .building(BuildingId(1))
+            .unwrap()
+            .town_state
+            .unwrap()
+            .tier;
+        let grew = events.contains(&SimEvent::TownTierChanged {
+            town: BuildingId(1),
+            tier: 2,
+        });
+        if i + 1 < need {
+            assert_eq!(tier, 1, "after {id}");
+            assert!(!grew);
+        } else {
+            assert_eq!(tier, 2, "after {id}");
+            assert!(grew && events.contains(&SimEvent::TerritoryChanged));
+        }
+    }
+    let (r1, r2) = town_radii(&rules);
+    let def = rules.map(&rules.default_map).unwrap();
+    let mut expected = TerritoryField::new(def.width, def.height, 2);
+    expected.add_source(
+        BuildingId(1),
+        source(player(0), def.starts[0].x, def.starts[0].y, r2),
+    );
+    expected.add_source(
+        BuildingId(2),
+        source(player(1), def.starts[1].x, def.starts[1].y, r1),
+    );
+    expected.add_source(
+        BuildingId(7),
+        source(player(0), 31, 58, watchtower_radius(&rules)),
+    );
+    assert_eq!(sim.view().territory(), &expected);
+}
+
+/// Snapshot mid-gather (workers walking and working, idle timers running),
+/// restore into a fresh sim, keep issuing commands: every later tick hashes
+/// the same as the uninterrupted run.
+#[test]
+fn economy_restore_mid_gather_matches_uninterrupted() {
+    let rules = load_rules();
+    let croft = kind(&rules, "croft");
+    let mut a = standard(34);
+    a.step(&[build(0, 0, 1, croft, 28, 60), build(0, 1, 2, croft, 32, 60)]);
+    for _ in 1..700 {
+        a.step(&[]);
+    }
+    let mut b = standard(34);
+    b.restore(&a.snapshot()).unwrap();
+    for t in 700..2400u32 {
+        let cmds = if t == 900 {
+            vec![build(0, 2, 3, croft, 36, 60)]
+        } else {
+            Vec::new()
+        };
+        a.step(&cmds);
+        b.step(&cmds);
+        assert_eq!(a.hash(), b.hash(), "tick {t}");
+    }
+    assert!(worked(&a, [3, 4, 5]) >= 2);
+}

@@ -235,10 +235,12 @@ fn return_to_post_converges_100_units_and_settles() {
     // ranks behind; return to post (`units.ron`,
     // `return_to_post_radius_tiles_x100`) walks them back. After 3000
     // ticks every unit is within 3 tiles of its own spiral target and the
-    // block holds still: the `units` sub-hash is constant over the last 100
-    // ticks (no perpetual motion between neighbours; the whole-state hash
-    // cannot be constant because it covers the tick counter) and pathing is
-    // idle (no returning unit is stuck asking for paths).
+    // block holds still: every unit's position, post and order are
+    // constant over the last 100 ticks (no perpetual motion between
+    // neighbours; neither the whole-state hash nor the `units` sub-hash can
+    // be constant, since they cover the tick counter and the idle workers'
+    // seek timers) and pathing is idle (no returning unit is stuck asking
+    // for paths).
     let click = FxVec2::from_ints(39, 64);
     let mut sim = scenario(21);
     let delay = sim.setup().cmd_delay;
@@ -264,7 +266,14 @@ fn return_to_post_converges_100_units_and_settles() {
     for t in sim.tick()..total {
         sim.step(&[]);
         if t >= total - settle {
-            hashes.push(sim.sub_hashes().units);
+            // Positions, posts and orders only: idle Yeomen rewrite their
+            // work-seeking timer (`seek_at`) every retry interval (M3a).
+            let still: Vec<_> = sim
+                .view()
+                .units()
+                .map(|u| (u.id, u.pos, u.post, u.order.clone()))
+                .collect();
+            hashes.push(sim::hash::hash_value(&still));
         }
     }
     assert_eq!(hashes.len(), settle as usize);
@@ -332,7 +341,8 @@ fn restore_rebuilds_caches() {
 
 /// A random command stream over the scenario: spawns, moves, stops, and
 /// (from M3a) Croft sites placed and cancelled around a complete P0 Town,
-/// so the cost grid changes while searches are suspended.
+/// so the cost grid changes while searches are suspended, and Gathers onto
+/// them (idle Yeomen also take free slots on their own).
 fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
     let rules = load_rules();
@@ -422,6 +432,20 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 Command::Cancel {
                     building: sim::BuildingId(1 + rng.next_u32() % 8),
                     slot: 0,
+                },
+            ));
+            seq += 1;
+        } else if roll < 62 && spawned > 0 {
+            let n = 1 + rng.next_u32() % 3;
+            let units = (0..n)
+                .map(|_| UnitId(1 + rng.next_u32() % spawned.max(1)))
+                .collect();
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Gather {
+                    units,
+                    node: sim::BuildingId(1 + rng.next_u32() % 8),
                 },
             ));
             seq += 1;

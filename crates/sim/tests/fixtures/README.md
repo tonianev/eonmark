@@ -18,6 +18,17 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-14 at `rules_version` 9, `SIM_VERSION` 8 with `just rerecord`
+(M3a gathering: idle Yeomen set and renew the hashed `Unit::seek_at` work
+timer, a finished builder takes a slot at its building, worked slots earn
+income). `move_500` and `snapshot_restore` have new final hashes because
+their arrived, idle Yeomen now run the timer. In `economy_second_town` the
+Croft builders work their Crofts once the Crofts complete and the idle Yeomen
+keep retrying, so its hash changed too. `group_spiral` keeps its final hash
+(its units are still walking at the end) but its intermediate hash records
+changed; `move_500_short` (no arrival in 300 ticks) keeps every hash and
+only its header differs.
+
 Recorded 2026-10-14 at `rules_version` 8, `SIM_VERSION` 7 with `just rerecord`
 (a `Build` builder walks only to ring tiles it can reach, and standard-start
 units spawn after every Seat; no fixture meets either case, so every final

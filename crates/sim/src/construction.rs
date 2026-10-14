@@ -457,8 +457,9 @@ pub(crate) fn order_move(state: &mut State, rules: &Rules, unit: UnitId, goal: F
 }
 
 /// Step 6a: every site whose builder is at work gains one tick of progress,
-/// in id order; a site reaching its build time completes.
-pub(crate) fn step(state: &mut State, rules: &Rules, events: &mut Vec<SimEvent>) {
+/// in id order; a site reaching its build time completes, and its builder
+/// takes a slot there when its kind works the building.
+pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec<SimEvent>) {
     let builders: std::collections::BTreeMap<BuildingId, UnitId> = state
         .units
         .values()
@@ -489,16 +490,18 @@ pub(crate) fn step(state: &mut State, rules: &Rules, events: &mut Vec<SimEvent>)
         };
         *progress += 1;
         if *progress >= done {
-            complete(state, rules, id, events);
             if let Some(u) = state.units.get_mut(&builder) {
                 u.job = None;
             }
+            complete(state, rules, id, events);
+            crate::gather::builder_takes_slot(state, rules, builder, id, tick);
         }
     }
 }
 
 /// Finish building `id`: a Town gets its town state and projects its
-/// tier-1 border, a kind with a border radius projects that. Emits
+/// tier-1 border, a kind with a border radius projects that, and the Town
+/// the building is attributed to may grow a tier. Emits
 /// `BuildingCompleted` (and `TerritoryChanged` when a border moved).
 pub(crate) fn complete(
     state: &mut State,
@@ -520,6 +523,7 @@ pub(crate) fn complete(
     } else {
         kind.border_radius_tiles
     };
+    let attributed = b.town;
     events.push(SimEvent::BuildingCompleted { building: id });
     if let Some(r) = radius {
         state.territory.add_source(
@@ -531,6 +535,9 @@ pub(crate) fn complete(
             },
         );
         events.push(SimEvent::TerritoryChanged);
+    }
+    if let Some(t) = attributed {
+        town::recompute_tier(state, rules, t, events);
     }
 }
 

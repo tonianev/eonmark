@@ -8,6 +8,7 @@
 use crate::command::Command;
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, PlayerEconomy, RateInfo};
+use crate::gather;
 use crate::ids::{BuildingId, BuildingKindId, PlayerId, Tile, UnitId};
 use crate::map::Map;
 use crate::pathing::Pathing;
@@ -64,6 +65,33 @@ impl<'a> SimView<'a> {
     /// One building or site, if it exists.
     pub fn building(&self, id: BuildingId) -> Option<&'a Building> {
         self.state.buildings.get(&id)
+    }
+
+    /// A gathering building's slots: `(worked, taken, slots)`. Taken slots
+    /// have a unit assigned (walking or working); worked ones earn income.
+    /// `None` when the building does not exist.
+    pub fn worked_slots(&self, id: BuildingId) -> Option<(u8, u8, u8)> {
+        let b = self.state.buildings.get(&id)?;
+        let taken = u8::try_from(gather::taken_slots(self.state, id).len()).expect("<= 255");
+        Some((
+            gather::worked_slots(self.state, self.rules, id),
+            taken,
+            b.slots,
+        ))
+    }
+
+    /// `p`'s idle workers in id order: units of a kind that works some
+    /// building's slots, with no job and no order.
+    pub fn idle_workers(&self, p: PlayerId) -> Vec<UnitId> {
+        let workers = gather::worker_kinds(self.rules);
+        self.state
+            .units
+            .values()
+            .filter(|u| {
+                u.owner == p && workers.contains(&u.kind) && u.job.is_none() && u.order.is_none()
+            })
+            .map(|u| u.id)
+            .collect()
     }
 
     /// Town-kind buildings `p` owns, sites included, and the town limit.

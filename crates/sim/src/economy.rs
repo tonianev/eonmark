@@ -11,10 +11,13 @@
 //! whole resources move to the stockpile and the remainder stays. A rate `r`
 //! therefore adds exactly `r` every P ticks from any phase.
 //!
-//! M3a part 1 credits building base yields (the Town's Grain and Lumber);
-//! worked gather slots join in the next slice.
+//! Raw income is the base yield of every complete building (a Town's Grain
+//! and Lumber, a Scriptorium's Lore) plus the rate of every worked slot
+//! (`gather`). The Yield Cap applies per resource to resources with
+//! `yield_capped`; Lore is exempt and stops at its `stockpile_cap` instead.
 
 use crate::construction::{at_work, building_rect};
+use crate::gather;
 use crate::ids::{BuildingKindId, PlayerId};
 use crate::state::{Construction, Job, State};
 use rules::Rules;
@@ -95,6 +98,7 @@ pub(crate) fn rates(state: &State, rules: &Rules, p: PlayerId) -> Vec<RateInfo> 
             raw[r] = raw[r].checked_add(amount).expect("income rate fits u32");
         }
     }
+    gather::worked_income(state, rules, p, &mut raw);
     let cap = yield_cap(rules, p);
     rules
         .resources
@@ -112,23 +116,26 @@ pub(crate) fn rates(state: &State, rules: &Rules, p: PlayerId) -> Vec<RateInfo> 
         .collect()
 }
 
-/// Step 6c: drop every job that can no longer be done, in unit id order. A
-/// build job ends when its site is gone, is not the unit's owner's or is
-/// complete, or when the unit has no order and is not at work there (its
-/// path ended somewhere else: unreachable, or the goal was corrected).
-/// Gather jobs arrive in the next M3a slice.
-pub(crate) fn jobs_step(state: &mut State, rules: &Rules) {
+/// Step 6c: drop every job that can no longer be done, in unit id order,
+/// then let idle workers seek work ([`gather::idle_seek_step`]). A build job
+/// ends when its site is gone, is not the unit's owner's or is complete; a
+/// gather job when its building is gone, not the owner's, not complete or
+/// not worked by the unit's kind. Either ends when the unit has no order
+/// and is not at work there (its path ended somewhere else: unreachable, or
+/// the goal was corrected).
+pub(crate) fn jobs_step(state: &mut State, rules: &Rules, tick: u32) {
     let mut dropped = Vec::new();
     for u in state.units.values() {
-        let Some(Job::Build { site }) = u.job else {
-            continue;
+        let keep = match u.job {
+            None => continue,
+            Some(Job::Build { site }) => state.buildings.get(&site).is_some_and(|b| {
+                b.owner == u.owner
+                    && matches!(b.construction, Construction::Site { .. })
+                    && (u.order.is_some()
+                        || at_work(u, &state.map, building_rect(rules, &state.map, b)))
+            }),
+            Some(Job::Gather { node, .. }) => gather::gather_job_valid(state, rules, u.id, node),
         };
-        let keep = state.buildings.get(&site).is_some_and(|b| {
-            b.owner == u.owner
-                && matches!(b.construction, Construction::Site { .. })
-                && (u.order.is_some()
-                    || at_work(u, &state.map, building_rect(rules, &state.map, b)))
-        });
         if !keep {
             dropped.push(u.id);
         }
@@ -138,6 +145,7 @@ pub(crate) fn jobs_step(state: &mut State, rules: &Rules) {
             u.job = None;
         }
     }
+    gather::idle_seek_step(state, rules, tick);
 }
 
 /// Step 6d: credit one tick of income to every player, in id order and

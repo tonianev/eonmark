@@ -42,7 +42,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 8 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 9 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -71,10 +71,11 @@ when you can; the validator does not require it.
 
 Of the M3a fields, the Town loop (the first M3a slice) reads
 `standard_start`, `building_ramp_step_permille`, `yield_cap_table` (at
-Trade level 0), `town_limit_base` and `town_radius_tiles`. The tier-2
-radius and growth threshold, the military ramp, `train_queue_max`, the
-idle-seek fields and `pop_cap_base` are read when gathering and training
-land later in M3a.
+Trade level 0), `town_limit_base` and `town_radius_tiles`. Gathering
+(`rules_version` 9) adds `idle_seek_delay_ds`, `idle_seek_retry_ds`,
+`town_growth_distinct_buildings` and `town_radius_grown_tiles`. The
+military ramp, `train_queue_max` and `pop_cap_base` are read when training
+lands later in M3a.
 
 The M0 `vision` block (`unit_tiles`, `building_tiles`, `town_tiles`) was
 removed at `rules_version` 6: vision is now `vision_tiles` on every kind in
@@ -192,8 +193,10 @@ loop: `town`, the footprint, `cost` with the building ramp,
 `build_time_ds`, `hp`, `base_yield`, `max_per_town`, `gather.slots`
 (counted at placement) and `border_radius_tiles` (tests reach a complete
 Watchtower only through `DebugPlaceBuilding` until a `Build` of one is
-tested). The rest of `gather` is read when gathering lands later in M3a,
-`vision_tiles` in M7.
+tested). Gathering (`rules_version` 9) reads the rest of `gather`:
+`resource`, `worker` (which unit kind may take the slots and seeks them
+when idle) and `rate_per_worker` (credited per worked slot). `vision_tiles`
+is read in M7.
 
 | Field | Meaning |
 |-------|---------|
@@ -271,7 +274,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (8 to 9) and put the one-line reason
+2. Bump `rules_version` in `rules.ron` (9 to 10) and put the one-line reason
    in the commit message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
 
@@ -282,8 +285,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=9 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
-(the repository is at 8; the hash is new because a file changed).
+`OK rules_version=10 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
+(the repository is at 9; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture

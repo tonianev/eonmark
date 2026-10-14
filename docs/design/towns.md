@@ -121,7 +121,7 @@ These are measured with `sim-cli play-bots`, not enforced by the sim.
 
 ## M3a implementation notes
 
-The first M3a slice (the Town loop, `SIM_VERSION` 6) implements the standard start, founding and the town limit in `crates/sim/src/town.rs` and `construction.rs`. Where it is more precise than the sections above:
+The first M3a slice (the Town loop, `SIM_VERSION` 6) implements the standard start, founding and the town limit in `crates/sim/src/town.rs` and `construction.rs`; the gathering slice (`SIM_VERSION` 8) adds tier-2 growth. Where it is more precise than the sections above:
 
 | Topic | As implemented |
 | --- | --- |
@@ -129,7 +129,7 @@ The first M3a slice (the Town loop, `SIM_VERSION` 6) implements the standard sta
 | Borders | A founded Town projects its border when it completes, not when its site is placed; a site claims nothing. The kernel centre is the footprint's centre tile. |
 | Town limit | Counts every Town-kind building of the player, sites and the Seat included, against `town_limit_base` plus the Statecraft level (0 until M4a). The proposed name `TownLimitReached` is the one used. |
 | Attribution | Fixed at placement: the nearest own complete Town by `dist_sq_i64` between footprint centres, then `BuildingId`. Town sites do not count. A kind with `max_per_town` (the Croft) placed while the player has no complete Town is rejected with `PerTownLimitReached`; any other non-Town kind is then placed with no Town. |
-| Tier 2 | Not yet: every Town projects its tier-1 radius until tier-2 growth arrives with gathering, later in M3a. |
+| Tier 2 | `town::recompute_tier` runs when a building attributed to a Town completes. The Town is tier 2 when the owner's complete buildings attributed to it cover at least `town_growth_distinct_buildings` (5) distinct non-Town kinds, else tier 1. Sites do not count, and attribution is fixed at placement: a building counts for the Town it was attributed to then, even after a nearer Town completes. A tier change moves the Town's border source to the tier's radius (`town_radius_grown_tiles`, 24, plus Statecraft, 0 until M4a) with `TerritoryField::change_source` and emits `TownTierChanged { town, tier }` and `TerritoryChanged`. The rule would also drop a Town back to tier 1, but nothing removes a complete building before combat (M4a). The Masonry Age gate waits for ages in M4a (open question 4). `territory_town_grows_to_tier_two_at_five_distinct_kinds` checks the radius and that the field equals a fresh recompute. |
 
 `Build` checks run in this order and the first failure is the reason (the one the M3b HUD will show); a rejected `Build` changes nothing and draws no randomness:
 

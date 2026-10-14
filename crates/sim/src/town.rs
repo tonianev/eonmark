@@ -1,13 +1,10 @@
 //! Towns (`docs/design/towns.md`): the standard start, the town count and
-//! limit, and attribution of other buildings to a Town.
-//!
-//! Tier-2 growth arrives with gathering in the next M3a slice; until then
-//! every Town projects its tier-1 radius.
+//! limit, attribution of other buildings to a Town, and tier growth.
 
 use crate::construction::{self, centre_fx};
 use crate::economy::building_kind;
 use crate::ids::{BuildingId, PlayerId, Tile, UnitKindId};
-use crate::state::{Construction, State, TownState, Unit};
+use crate::state::{Construction, SimEvent, State, TownState, Unit};
 use crate::territory::{Source, SourceOwner};
 use rules::{MapDef, Rules};
 use std::collections::BTreeSet;
@@ -49,6 +46,50 @@ pub(crate) fn attribute(
             (c.dist_sq_i64(centre), b.id)
         })
         .map(|b| b.id)
+}
+
+/// Re-derive Town `town`'s tier: 2 when the owner's complete buildings
+/// attributed to it cover at least `town_growth_distinct_buildings`
+/// distinct non-Town kinds, else 1 (sites do not count; the Masonry Age
+/// gate arrives in M4a). A change moves the Town's border source to the
+/// tier's radius and emits `TownTierChanged` and `TerritoryChanged`.
+pub(crate) fn recompute_tier(
+    state: &mut State,
+    rules: &Rules,
+    town: BuildingId,
+    events: &mut Vec<SimEvent>,
+) {
+    let Some(t) = state.buildings.get(&town) else {
+        return;
+    };
+    let Some(ts) = t.town_state else {
+        return;
+    };
+    let owner = t.owner;
+    let town_kind = rules.town_kind();
+    let kinds: BTreeSet<u16> = state
+        .buildings
+        .values()
+        .filter(|b| {
+            b.owner == owner
+                && b.town == Some(town)
+                && b.kind.0 != town_kind
+                && b.construction == Construction::Complete
+        })
+        .map(|b| b.kind.0)
+        .collect();
+    let threshold = usize::try_from(rules.town_growth_distinct_buildings).expect("small");
+    let tier = if kinds.len() >= threshold { 2 } else { 1 };
+    if tier == ts.tier {
+        return;
+    }
+    let radius = rules.town_radius_for(tier, statecraft(owner));
+    let mut source = state.territory.sources()[&town];
+    source.radius = u16::try_from(radius).expect("validated radius fits u16");
+    state.territory.change_source(town, source);
+    state.buildings.get_mut(&town).expect("exists").town_state = Some(TownState { tier, ..ts });
+    events.push(SimEvent::TownTierChanged { town, tier });
+    events.push(SimEvent::TerritoryChanged);
 }
 
 /// The standard start (`rules.ron` `standard_start`): first every player's

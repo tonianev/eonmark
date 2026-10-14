@@ -17,12 +17,14 @@
 //!    need a repath get a new `PathRequest`.
 //! 6. Economy and Towns, each in id order:
 //!    - 6a construction: sites whose builder is at work gain progress; a
-//!      finished site completes (a Town or Watchtower adds its border);
+//!      finished site completes (a Town or Watchtower adds its border, its
+//!      Town may grow a tier) and its builder may take a slot there;
 //!    - 6b training (a later M3a slice);
 //!    - 6c jobs: a job whose target is gone, or whose worker stopped
-//!      somewhere it cannot work, is dropped;
-//!    - 6d income: every player's base yields go through the Yield Cap
-//!      into the accumulators and stockpiles.
+//!      somewhere it cannot work, is dropped; then idle workers past their
+//!      timer take the nearest free slot;
+//!    - 6d income: every player's base yields and worked slots go through
+//!      the Yield Cap into the accumulators and stockpiles.
 //! 7. `tick += 1`.
 
 use crate::ai_hook::{AiController, SimView};
@@ -30,6 +32,7 @@ use crate::command::{Command, PlayerCommand, sort_commands};
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, Economy};
 use crate::fx::{Fx, FxVec2};
+use crate::gather;
 use crate::ids::{BuildingId, BuildingKindId, IdGen, PlayerId, Tile, UnitId, UnitKindId};
 use crate::map::Map;
 use crate::movement::{self, SpatialGrid};
@@ -71,7 +74,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// nearest passable one, which could be sealed off; resuming a site checks
 /// the same, so it can no longer panic on an enclosed site. Standard-start
 /// units spawn after every Seat is placed, on tiles not already taken.
-pub const SIM_VERSION: u32 = 7;
+///
+/// 8: gathering. `Gather` assigns slots (it no longer draws from the RNG),
+/// worked slots earn income, idle workers set `Unit::seek_at` and take free
+/// slots on their own, a finished builder takes a slot at its building, and
+/// a Town grows to tier 2 at enough distinct attributed kinds.
+pub const SIM_VERSION: u32 = 8;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +250,7 @@ pub struct Unit {
     /// who builds a site and who works a slot.
     pub job: Option<Job>,
     /// Tick at which an idle worker next looks for work; `None` while busy
-    /// (idle seeking arrives with gathering).
+    /// or not yet idle for a tick.
     pub seek_at: Option<u32>,
 }
 
@@ -283,7 +291,7 @@ pub enum Job {
         /// The site.
         site: BuildingId,
     },
-    /// Work a gather slot (gathering arrives in the next M3a slice).
+    /// Work a gather slot.
     Gather {
         /// The gathering building.
         node: BuildingId,
@@ -414,6 +422,14 @@ pub enum RejectReason {
     NoAdjacentResource,
     /// The queue slot does not exist (a site has only slot 0).
     InvalidSlot,
+    /// The building is still a construction site.
+    UnderConstruction,
+    /// The building has no gather slots.
+    NotAGatherNode,
+    /// Every gather slot of the building is taken. (A worker that cannot
+    /// reach any tile beside the building is not a valid unit for it:
+    /// `NoValidUnits`.)
+    NoFreeSlot,
 }
 
 /// Something the presenter or a test may want to know about a tick. Events
@@ -463,6 +479,13 @@ pub enum SimEvent {
     /// The territory field changed: a border source was added, moved or
     /// removed.
     TerritoryChanged,
+    /// A Town's border tier changed.
+    TownTierChanged {
+        /// The Town.
+        town: BuildingId,
+        /// Its new tier (1 or 2).
+        tier: u8,
+    },
 }
 
 /// Per-subsystem hashes for localising a divergence. Field order is the
@@ -788,9 +811,10 @@ impl Sim {
             }
         }
 
-        // 6. Economy and Towns: construction, (training), jobs, income.
-        construction::step(&mut self.state, &self.rules, &mut self.events);
-        economy::jobs_step(&mut self.state, &self.rules);
+        // 6. Economy and Towns: construction, (training), jobs and idle
+        //    seeking, income.
+        construction::step(&mut self.state, &self.rules, tick, &mut self.events);
+        economy::jobs_step(&mut self.state, &self.rules, tick);
         economy::income_step(&mut self.state, &self.rules);
 
         self.state.tick += 1;
@@ -972,8 +996,16 @@ impl Sim {
                     &amount_v,
                 );
             }
+            Command::Gather { units, node } => {
+                match gather::validate_gather(&self.state, &self.rules, pc.player, units, *node) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(plan) => {
+                        let tick = self.state.tick;
+                        gather::apply_gather(&mut self.state, &self.rules, *node, &plan, tick);
+                    }
+                }
+            }
             Command::Attack { .. }
-            | Command::Gather { .. }
             | Command::Train { .. }
             | Command::Research { .. }
             | Command::AdvanceAge { .. }

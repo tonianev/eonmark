@@ -24,6 +24,7 @@
 //! | [`territory`] | `TerritoryField`: integer disc kernels per owner layer, tie-to-neutral ownership |
 //! | [`economy`] | `Economy` stockpiles and accumulators, `RateInfo`, exact income, jobs step, cost helpers |
 //! | [`construction`] | footprints, `Build` validation, sites, construction, site cancel |
+//! | [`gather`] | `Gather`, slots and stand tiles, worked-slot income, idle workers seeking work |
 //! | [`town`] | standard start, town count and limit, attribution to the nearest Town |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
@@ -35,6 +36,7 @@ pub mod command;
 pub mod construction;
 pub mod economy;
 pub mod fx;
+pub mod gather;
 pub mod hash;
 pub mod ids;
 pub mod map;

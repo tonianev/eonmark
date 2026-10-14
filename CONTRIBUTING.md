@@ -76,7 +76,7 @@ Any edit to a RON file changes `rules_hash`, and every golden replay fixture rec
 ```bash
 # 1. Edit a value, for example the Croft gather rate in data/rules/buildings.ron
 #    (rate_per_worker: 10 -> 12).
-# 2. Bump rules_version in data/rules/rules.ron (for example 7 -> 8).
+# 2. Bump rules_version in data/rules/rules.ron (for example 9 -> 10).
 # 3. Validate every file under data/. Errors name the file and the field.
 cargo run -p sim-cli -- data-check data
 # 4. Re-record every golden fixture; each .hash comes from sim-cli verify.
@@ -86,6 +86,35 @@ cargo test -p sim
 ```
 
 Commit the RON edit, the version bump and the re-recorded fixtures together, with a one-line reason in the commit message (see "Golden replay fixtures" below). `just rerecord` ends by failing if a fixture differs from the merge base with main while the working-tree `rules_version` is not larger than the base's; CI runs the same rule (`scripts/check_fixture_policy.sh`) on the commits of every pull request. If the sim does not read the edited value yet, every `.hash` stays the same and only the replay headers change; if it does, the hashes change too, and the bump is what makes that legal. A changed hash without a bump is a bug, not a fixture update. The field reference and a worked example are in [data/rules/README.md](data/rules/README.md). Balance PRs attach a `play-bots` table once that command exists (M5b).
+
+This exact walkthrough was run on 2026-10-14 (M3a, `rules_version` 9) in a clean copy of the repository. The only edits were the rate and the version; every test that depends on the rate reads it from `buildings.ron`:
+
+```text
+$ git diff --stat
+ data/rules/buildings.ron | 2 +-
+ data/rules/rules.ron     | 2 +-
+$ cargo run -q -p sim-cli -- data-check data
+OK rules_version=10 rules_hash=0x0d912d5df45fdd91 resources=4 units=3 buildings=8 maps=plains_1v1
+$ just rerecord
+rerecord: economy_second_town 0xcaf4e950d36ebc5a
+rerecord: group_spiral 0xa4cdd70f88732cf4
+rerecord: move_500 0x432f8194acff3212
+rerecord: move_500_short 0xc0f4da561f63721a
+rerecord: snapshot_restore 0x26c0b03a2f5750a9
+rerecord: fixtures differ from d17d958ed614 with rules_version 4 -> 10
+$ cargo test -p sim
+test result: ok. 74 passed ... (lib)
+test result: ok. 6 passed ... (m0)
+test result: ok. 16 passed; 1 ignored ... (m1)
+test result: ok. 8 passed ... (m2)
+test result: ok. 36 passed ... (m3a, including the one-Yeoman-on-a-Croft and ten-Croft flatline tests)
+$ git status --short
+ M crates/sim/tests/fixtures/*.eonreplay (5 files), economy_second_town.hash
+ M data/rules/buildings.ron
+ M data/rules/rules.ron
+```
+
+Only `economy_second_town` changes its final hash: it is the only fixture with a worked Croft. A test that hard-codes a number the data controls fails this walkthrough; read the value from `Rules` instead.
 
 ## Golden replay fixtures
 

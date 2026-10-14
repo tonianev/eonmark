@@ -27,7 +27,7 @@ if [ $# -eq 0 ]; then
 fi
 
 cargo build -q -p sim-cli --locked --release
-bin=target/release/sim-cli
+bin="${CARGO_TARGET_DIR:-target}/release/sim-cli"
 
 for name in "$@"; do
   file="$dir/$name.eonreplay"

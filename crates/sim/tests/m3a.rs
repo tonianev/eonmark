@@ -2593,6 +2593,11 @@ fn economy_unit_ramps_count_only_their_kind_class_and_owner() {
     let events = apply(&mut sim, vec![train(0, 5, 3, sk)]);
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert!(quote(&sim, sk) > sk_base, "queued raises k");
+    assert_eq!(
+        quote(&sim, yeoman),
+        y0 + 2 * ystep,
+        "a queued Skirmisher is not a Yeoman"
+    );
     let ticks = rules.train_time_ticks(rules.unit_kind(sk).unwrap());
     assert!(run_until(&mut sim, ticks + 5, |s| s
         .view()
@@ -2753,6 +2758,12 @@ fn economy_train_rejections() {
             cancel(0, 0, 3, 0),
             RejectReason::InvalidSlot,
         ),
+        (
+            "cancel at another player's Seat",
+            Box::new(|_| {}),
+            cancel(0, 0, 2, 0),
+            RejectReason::UnknownBuilding,
+        ),
     ];
     for (name, setup, cmd, want) in cases {
         let mut sim = standard(63);
@@ -2849,15 +2860,18 @@ fn economy_trained_unit_spawns_beside_the_building_and_walks_to_the_rally() {
     );
 }
 
-/// A trained unit never appears in a pocket that neighbouring buildings
-/// seal against its building: four Crofts around a Town's east side leave
-/// two tiles there cut off, and the spiral reaches them first. Without a
-/// rally, or with one outside, the unit appears on the open side and can
-/// leave; a rally inside the pocket puts it there.
+/// A pocket that neighbouring buildings seal against a trainer takes the
+/// trained unit only when the rally point is inside it. Four Crofts around
+/// a Town's east side leave two tiles there cut off, and the spiral reaches
+/// them first. With no rally, a rally outside, a rally on the Town itself
+/// (whose corrected goal lies in the pocket) or a rally into a far pocket
+/// that does not touch the Town, the unit appears on the open side; a rally
+/// inside the pocket puts it there.
 #[test]
-fn economy_trained_unit_never_spawns_in_a_sealed_pocket() {
+fn economy_trained_unit_spawns_in_a_sealed_pocket_only_when_rallied_into_it() {
     let rules = load_rules();
     let (town, croft) = (kind(&rules, "town"), kind(&rules, "croft"));
+    let tower = kind(&rules, "watchtower");
     let yeoman = unit_kind(&rules, "yeoman");
     let ticks = rules.train_time_ticks(rules.unit_kind(yeoman).unwrap());
     let mut sim = empty(68);
@@ -2870,17 +2884,25 @@ fn economy_trained_unit_never_spawns_in_a_sealed_pocket() {
             place(0, 3, croft, 25, 66, true),
             place(0, 4, croft, 27, 66, true),
             grant(0, 5, resource(&rules, "grain"), 1000),
+            // A one-tile pocket far from the Town.
+            place(0, 6, tower, 41, 42, true),
+            place(0, 7, tower, 43, 42, true),
+            place(0, 8, tower, 42, 41, true),
+            place(0, 9, tower, 42, 43, true),
         ],
     );
     assert!(rejections(&events).is_empty(), "{events:?}");
     let map = sim.view().map();
-    let (pocket, open) = (Tile::new(26, 64), Tile::new(22, 64));
+    let (pocket, open, far) = (Tile::new(26, 64), Tile::new(22, 64), Tile::new(42, 42));
     assert!(map.passable(pocket) && map.passable(Tile::new(26, 65)));
     assert_ne!(
         map.component_of(pocket),
         map.component_of(open),
         "the layout seals a pocket"
     );
+    assert!(map.passable(far));
+    assert_ne!(map.component_of(far), map.component_of(open));
+    assert_ne!(map.component_of(far), map.component_of(pocket));
     let comp = |s: &Sim, u: u32| {
         let map = s.view().map();
         map.component_of(map.tile_of(s.view().unit(UnitId(u)).unwrap().pos))
@@ -2899,16 +2921,16 @@ fn economy_trained_unit_never_spawns_in_a_sealed_pocket() {
     let pocket_comp = map.component_of(pocket);
 
     // No rally: the open side.
-    let events = apply(&mut sim, vec![train(0, 6, 1, yeoman)]);
+    let events = apply(&mut sim, vec![train(0, 10, 1, yeoman)]);
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 1));
-    assert_eq!(comp(&sim, 1), open_comp);
+    assert_eq!(comp(&sim, 1), open_comp, "no rally");
 
     // A rally outside: the open side, and the unit gets there.
-    let events = apply(&mut sim, vec![rally(7, 20, 70), train(0, 8, 1, yeoman)]);
+    let events = apply(&mut sim, vec![rally(11, 20, 70), train(0, 12, 1, yeoman)]);
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 2));
-    assert_eq!(comp(&sim, 2), open_comp);
+    assert_eq!(comp(&sim, 2), open_comp, "rally outside");
     assert!(run_until(&mut sim, 600, |s| s
         .view()
         .unit(UnitId(2))
@@ -2918,11 +2940,179 @@ fn economy_trained_unit_never_spawns_in_a_sealed_pocket() {
     let at = sim.view().unit(UnitId(2)).unwrap().pos;
     assert!(at.dist_sq_i64(FxVec2::from_ints(20, 70)) <= (2 * 2) << 32);
 
-    // A rally inside the pocket: the pocket.
-    let events = apply(&mut sim, vec![rally(9, 26, 65), train(0, 10, 1, yeoman)]);
+    // A rally on the Town itself: its tile is blocked, so it names no side.
+    let events = apply(&mut sim, vec![rally(13, 24, 64), train(0, 14, 1, yeoman)]);
     assert!(rejections(&events).is_empty(), "{events:?}");
     assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 3));
-    assert_eq!(comp(&sim, 3), pocket_comp);
+    assert_eq!(comp(&sim, 3), open_comp, "rally on the trainer");
+
+    // A rally into a pocket that does not touch the Town: not a side of it.
+    let events = apply(&mut sim, vec![rally(15, 42, 42), train(0, 16, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 4));
+    assert_eq!(comp(&sim, 4), open_comp, "rally in a far pocket");
+
+    // A rally inside the pocket: the pocket.
+    let events = apply(&mut sim, vec![rally(17, 26, 65), train(0, 18, 1, yeoman)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(run_until(&mut sim, ticks + 5, |s| s.view().unit_count() == 5));
+    assert_eq!(comp(&sim, 5), pocket_comp, "rally inside the pocket");
+}
+
+/// A Town walled in by Watchtowers: the spawn component is the largest of
+/// the pockets on its ring (ties to the lower id), and with every ring tile
+/// blocked it is the largest component on the map unless the rally point
+/// names another.
+#[test]
+fn economy_trained_unit_at_an_enclosed_trainer_follows_the_component_rule() {
+    let rules = load_rules();
+    let town = kind(&rules, "town");
+    let tower = kind(&rules, "watchtower");
+    let yeoman = unit_kind(&rules, "yeoman");
+    let ticks = rules.train_time_ticks(rules.unit_kind(yeoman).unwrap());
+    // The Town covers (23..=25, 63..=65); its ring is the square at
+    // Chebyshev distance 1 from the footprint, the wall the one at 2.
+    let square = |d: u16| -> Vec<(u16, u16)> {
+        let (x0, y0, x1, y1) = (23 - d, 63 - d, 25 + d, 65 + d);
+        (y0..=y1)
+            .flat_map(|y| (x0..=x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| x == x0 || x == x1 || y == y0 || y == y1)
+            .collect()
+    };
+    // Train one Yeoman at a Town with Watchtowers on `blocked`, optionally
+    // rallied to `rally`, and return the trained unit's tile with the map.
+    let run = |blocked: Vec<(u16, u16)>, rally: Option<(i32, i32)>| {
+        let mut sim = empty(69);
+        let mut cmds = vec![
+            place(0, 0, town, 23, 63, true),
+            grant(0, 1, resource(&rules, "grain"), 1000),
+        ];
+        let mut seq = 2;
+        for (x, y) in blocked {
+            cmds.push(place(0, seq, tower, x, y, true));
+            seq += 1;
+        }
+        if let Some((x, y)) = rally {
+            cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::SetRally {
+                    building: BuildingId(1),
+                    target: FxVec2::from_ints(x, y),
+                },
+            ));
+            seq += 1;
+        }
+        cmds.push(train(0, seq, 1, yeoman));
+        let events = apply(&mut sim, cmds);
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        assert!(run_until(&mut sim, ticks + 5, |s| s.view().units().count() == 1));
+        let u = sim.view().units().next().unwrap();
+        let tile = sim.view().map().tile_of(u.pos);
+        (sim, tile)
+    };
+    let comp = |sim: &Sim, t: Tile| sim.view().map().component_of(t);
+    let walled = |open: &[(u16, u16)]| -> Vec<(u16, u16)> {
+        square(1)
+            .into_iter()
+            .filter(|t| !open.contains(t))
+            .chain(square(2))
+            .collect()
+    };
+
+    // Two pockets on the ring: one tile north (lower id, row-major) and two
+    // tiles south (higher id). The larger wins.
+    let (sim, tile) = run(walled(&[(24, 62), (23, 66), (24, 66)]), None);
+    let (north, south) = (Tile::new(24, 62), Tile::new(24, 66));
+    assert!(comp(&sim, north) < comp(&sim, south), "ids follow rows");
+    assert_eq!(comp(&sim, tile), comp(&sim, south), "the larger pocket");
+
+    // Two one-tile pockets: the lower id wins.
+    let (sim, tile) = run(walled(&[(24, 62), (24, 66)]), None);
+    assert_eq!(
+        comp(&sim, tile),
+        comp(&sim, north),
+        "a tie goes to the lower id"
+    );
+
+    // Every ring tile blocked, and a one-tile pocket at (27, 64), which is
+    // the first tile of the next spiral ring. The unit appears in the
+    // largest component on the map instead.
+    let mut sealed = square(1);
+    sealed.extend([(27, 63), (27, 65), (28, 63), (28, 64), (28, 65)]);
+    let pocket = Tile::new(27, 64);
+    let (sim, tile) = run(sealed.clone(), None);
+    assert!(sim.view().map().passable(pocket));
+    assert_ne!(comp(&sim, pocket), comp(&sim, Tile::new(20, 70)));
+    assert_eq!(
+        comp(&sim, tile),
+        comp(&sim, Tile::new(20, 70)),
+        "the main area"
+    );
+
+    // The same with the rally point inside that pocket: any component is a
+    // candidate when the ring is blocked, so the pocket.
+    let (_, tile) = run(sealed, Some((27, 64)));
+    assert_eq!(tile, pocket, "rallied into the pocket");
+}
+
+/// `SimView::check_train` and `check_build` agree with applying the command
+/// for an unknown player and for one that has surrendered.
+#[test]
+fn economy_view_checks_agree_with_apply_for_unknown_and_surrendered_players() {
+    let rules = load_rules();
+    let yeoman = unit_kind(&rules, "yeoman");
+    let town = kind(&rules, "town");
+    let mut sim = standard(70);
+    let view = sim.view();
+    let nobody = PlayerId(9);
+    assert_eq!(
+        view.check_train(nobody, BuildingId(1), UnitKindId(yeoman)),
+        Err(RejectReason::UnknownPlayer)
+    );
+    assert_eq!(
+        view.check_build(nobody, UnitId(1), town, Tile::new(40, 63)),
+        Err(RejectReason::UnknownPlayer)
+    );
+    assert!(
+        view.check_train(PlayerId(0), BuildingId(1), UnitKindId(yeoman))
+            .is_ok()
+    );
+    assert!(
+        view.check_build(PlayerId(0), UnitId(1), town, Tile::new(40, 63))
+            .is_ok()
+    );
+    let events = apply(
+        &mut sim,
+        vec![train(9, 0, 1, yeoman), build(9, 1, 1, town, 40, 63)],
+    );
+    assert_eq!(
+        rejections(&events),
+        [RejectReason::UnknownPlayer, RejectReason::UnknownPlayer]
+    );
+
+    let events = apply(
+        &mut sim,
+        vec![PlayerCommand::new(PlayerId(0), 0, Command::Surrender)],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let view = sim.view();
+    assert_eq!(
+        view.check_train(PlayerId(0), BuildingId(1), UnitKindId(yeoman)),
+        Err(RejectReason::Surrendered)
+    );
+    assert_eq!(
+        view.check_build(PlayerId(0), UnitId(1), town, Tile::new(40, 63)),
+        Err(RejectReason::Surrendered)
+    );
+    let events = apply(
+        &mut sim,
+        vec![train(0, 1, 1, yeoman), build(0, 2, 1, town, 40, 63)],
+    );
+    assert_eq!(
+        rejections(&events),
+        [RejectReason::Surrendered, RejectReason::Surrendered]
+    );
 }
 
 /// A Scribe trained at a Scriptorium takes a slot there at once and works

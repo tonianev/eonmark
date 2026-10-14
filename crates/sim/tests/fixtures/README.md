@@ -18,10 +18,17 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-14 at `rules_version` 12, `SIM_VERSION` 11 with `just rerecord`
+(second review follow-up: a rally point names the spawn side only when its
+own tile is passable, and a trainer with every ring tile blocked picks
+among all components). Again every final hash and every `.hash` file is
+unchanged; only the headers differ.
+
 Recorded 2026-10-14 at `rules_version` 11, `SIM_VERSION` 10 with `just rerecord`
-(review follow-up: a trained unit spawns in the rally goal's component, or
-else the largest component touching its building, never in a sealed
-pocket). No fixture trains next to a pocket, so every final hash and every
+(review follow-up: a trained unit spawns in the rally goal's component when
+that touches its building's ring, or else in the largest component touching
+the ring, so a sealed pocket takes it only when the rally point is inside).
+No fixture trains next to a pocket, so every final hash and every
 `.hash` file is unchanged; only the headers differ.
 
 Recorded 2026-10-14 at `rules_version` 10, `SIM_VERSION` 9 with `just rerecord`

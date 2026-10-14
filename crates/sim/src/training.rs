@@ -5,7 +5,8 @@
 //! kind, up to `train_queue_max` entries. The cost is deducted and the pop
 //! charged when an entry is queued; `Cancel` refunds exactly what the entry
 //! paid. Only the head progresses, one tick per step, and a finished unit
-//! appears beside the building, on the side it can leave from (see
+//! appears beside the building: on the side the rally point is on when the
+//! player pointed there, otherwise on the side it can leave from (see
 //! `spawn_tile`). It walks to the building's rally point when one is set,
 //! or else takes a free slot at its own building when its kind works it (a
 //! Scribe at a Scriptorium); otherwise it starts idle, and a worker kind
@@ -15,6 +16,7 @@ use crate::construction::{building_rect, centre_tile, order_move, ring};
 use crate::economy::{self, building_kind, first_short};
 use crate::fx::FxVec2;
 use crate::ids::{BuildingId, PlayerId, Tile, UnitKindId};
+use crate::map::{Map, NO_COMPONENT};
 use crate::movement;
 use crate::state::{
     Building, Construction, QueueEntry, QueueItem, RejectReason, SimEvent, State, Unit,
@@ -202,9 +204,10 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
         let goal = b
             .rally
             .map(|target| movement::group_targets(&state.map, target, 1)[0]);
-        // A finished head waits, complete, while no tile around can take
-        // the unit (never on a real map; the spiral covers every tile).
-        let Some(tile) = spawn_tile(state, rules, b, goal.map(|g| state.map.tile_of(g))) else {
+        let rally_tile = b.rally.map(|target| state.map.tile_of(target));
+        // A finished head waits, complete, while no tile can take the unit
+        // (only on a map with no passable tile; the spiral covers them all).
+        let Some(tile) = spawn_tile(state, rules, b, rally_tile) else {
             continue;
         };
         let b = state.buildings.get_mut(&id).expect("listed");
@@ -225,40 +228,51 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
 
 /// Where a unit trained at `b` appears: the first passable tile of the
 /// spiral around the footprint's centre tile that lies in the spawn
-/// component. With a rally goal on a component that touches the building's
-/// ring, that is the goal's component; otherwise it is the largest
-/// component, by tile count and then the lower id, among the passable ring
-/// tiles, so a pocket that neighbouring buildings seal against this one
-/// never takes the unit. With no passable ring tile, any passable tile.
-/// The tile may hold a unit already; separation pushes them apart.
-fn spawn_tile(state: &State, rules: &Rules, b: &Building, goal: Option<Tile>) -> Option<Tile> {
+/// component. The candidates are the components of the passable tiles on
+/// the building's ring, or every component when the ring is fully blocked.
+/// The spawn component is the rally point's when the rally point's own tile
+/// (`rally`) is passable and its component is a candidate, so the player
+/// pointed into it; otherwise it is the largest candidate by tile count,
+/// then the lower id. A pocket that neighbouring buildings seal against the
+/// building therefore takes the unit only when the rally point is inside
+/// it. The tile may hold a unit already; separation pushes them apart.
+/// `None` only on a map with no passable tile.
+fn spawn_tile(state: &State, rules: &Rules, b: &Building, rally: Option<Tile>) -> Option<Tile> {
     let map = &state.map;
     let rect = building_rect(rules, map, b);
-    let touching: BTreeSet<u16> = ring(rect, map.width(), map.height())
+    let ring_comps: BTreeSet<u16> = ring(rect, map.width(), map.height())
         .into_iter()
         .filter(|t| map.passable(*t))
         .map(|t| map.component_of(t))
         .collect();
-    let want = goal
-        .map(|g| map.component_of(g))
-        .filter(|c| touching.contains(c))
-        .or_else(|| {
-            if touching.len() <= 1 {
-                return touching.first().copied();
-            }
-            let mut size: BTreeMap<u16, u32> = touching.iter().map(|&c| (c, 0)).collect();
-            for c in map.components() {
-                if let Some(n) = size.get_mut(c) {
-                    *n += 1;
-                }
-            }
-            size.into_iter()
-                .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
-                .map(|(c, _)| c)
-        });
+    let candidate =
+        |c: u16| c != NO_COMPONENT && (ring_comps.is_empty() || ring_comps.contains(&c));
+    let want = rally
+        .filter(|t| map.passable(*t))
+        .map(|t| map.component_of(t))
+        .filter(|&c| candidate(c))
+        .or_else(|| largest_component(map, &ring_comps));
     let centre = centre_tile(building_kind(rules, b.kind), b.tile);
     map.spiral(centre)
         .find(|t| map.passable(*t) && want.is_none_or(|w| map.component_of(*t) == w))
+}
+
+/// The largest of `among` by tile count, then the lower id; of every
+/// component when `among` is empty. `None` when the map has no passable
+/// tile.
+fn largest_component(map: &Map, among: &BTreeSet<u16>) -> Option<u16> {
+    if among.len() == 1 {
+        return among.first().copied();
+    }
+    let mut size: BTreeMap<u16, u32> = BTreeMap::new();
+    for &c in map.components() {
+        if c != NO_COMPONENT && (among.is_empty() || among.contains(&c)) {
+            *size.entry(c).or_default() += 1;
+        }
+    }
+    size.into_iter()
+        .max_by_key(|&(c, n)| (n, std::cmp::Reverse(c)))
+        .map(|(c, _)| c)
 }
 
 /// Validate `SetRally { building, target }`: the building (complete or a

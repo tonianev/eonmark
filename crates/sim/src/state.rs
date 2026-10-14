@@ -93,7 +93,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// the largest component touching the building's ring, instead of on the
 /// first passable spiral tile, which could lie in a pocket sealed off by
 /// neighbouring buildings.
-pub const SIM_VERSION: u32 = 10;
+///
+/// 11: the spawn component is the rally point's only when the rally point's
+/// own tile is passable (a rally on a building names no side), and with
+/// every ring tile blocked the candidates are every component, not just the
+/// first passable spiral tile's.
+pub const SIM_VERSION: u32 = 11;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

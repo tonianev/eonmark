@@ -32,17 +32,17 @@ The pop cap bounds real unit counts: 25 + 25 per Arms level gives at most 100 un
 
 `Map` owns `cost: Vec<u8>` with one byte per tile in row-major order (`index = y * 128 + x`). A tile is passable when its cost is 1 and blocked when it is 255. No other values are used in v0.1; the type is u8 so terrain weights can be added later without a format change.
 
-Water, mountain and forest tiles are blocked by the map loader. Buildings block the tiles of their footprint when construction starts and unblock them when the building is destroyed. Units are never written into the cost grid; unit-to-unit avoidance is handled by the movement step, not by pathfinding.
+Water, mountain and forest tiles are blocked by the map loader. A building blocks the tiles of its footprint as soon as its `Build` is accepted, while it is still a site, with one `Map::set_blocked_many` call for the whole footprint (the Seat at the standard start and `DebugPlaceBuilding` do the same). A cancelled site unblocks its footprint the same way, with one call; a destroyed building will too (M4a). Units are never written into the cost grid; unit-to-unit avoidance is handled by the movement step, not by pathfinding.
 
-Every mutation of `cost` goes through `Map::set_blocked(tile, blocked) -> bool`, which bumps `cost_grid_generation` only when the cost actually changes. Three derived structures depend on the generation:
+Every mutation of `cost` goes through `Map::set_blocked(tile, blocked) -> bool` or, for a footprint, `Map::set_blocked_many(tiles, blocked) -> bool` (M3a). Each call bumps `cost_grid_generation` once, and only when at least one cost actually changes. Three derived structures depend on the generation:
 
 | Derived structure | Hashed | Rebuilt |
 | --- | --- | --- |
 | Path cache | no | cleared wholesale on any generation change and on `restore()` |
-| Connected component ids (one u16 per tile, `NO_COMPONENT` for blocked tiles) | no | eagerly, by flood fill inside `set_blocked` when the generation changes, and in `restore()` |
+| Connected component ids (one u16 per tile, `NO_COMPONENT` for blocked tiles) | no | eagerly, by flood fill inside `set_blocked` and `set_blocked_many` when the generation changes, and in `restore()` |
 | Spatial grid of unit positions | no | every tick, and in `restore()` |
 
-Components are rebuilt eagerly rather than on first use so that `Map::component_of` works through a shared `&Map` inside `group_targets` and `Pathing::service` (M1 decision; one flood fill per changed tile is cheap at 16k tiles, and M3a may add a batched `set_blocked_many` if building footprints make it matter). `restore()` rebuilds all three before it returns, so a restored sim never serves a stale derived value. `Map` itself (`cost` plus the generation) is hashed state with its own sub-hash, `map`.
+Components are rebuilt eagerly rather than on first use so that `Map::component_of` works through a shared `&Map` inside `group_targets` and `Pathing::service` (M1 decision; one flood fill per changed tile is cheap at 16k tiles, and since M3a `set_blocked_many` makes a whole footprint one flood fill and one generation bump, so the path cache and a suspended search see one change per building). `restore()` rebuilds all three before it returns, so a restored sim never serves a stale derived value. `Map` itself (`cost` plus the generation) is hashed state with its own sub-hash, `map`.
 
 Two fixed neighbour orders exist and both are total:
 
@@ -168,7 +168,7 @@ Units never move into a blocked tile. A unit that would cross into one stops at 
 
 | System | Interaction |
 | --- | --- |
-| Construction ([towns.md](towns.md), [economy.md](economy.md)) | placing a building writes 255 into its footprint and bumps the generation; destroying one writes 1. Build sites are validated against the cost grid and against `is_buildable` from [territory.md](territory.md). |
+| Construction ([towns.md](towns.md), [economy.md](economy.md)) | an accepted `Build` writes 255 into the site's footprint with one `set_blocked_many` call (one generation bump); cancelling a site writes 1 the same way, and so will destroying a building (M4a). Build sites are validated against the cost grid and against `is_buildable` from [territory.md](territory.md), and the builder walks to the passable tile around the footprint nearest to it. |
 | Combat ([combat.md](combat.md)) | AttackMove reuses Move pathing with the target's current tile as the goal; the periodic repath follows a moving target. |
 | Economy | Gather paths the Yeoman to an adjacent passable tile of the resource building; forest and mountain tiles themselves are blocked. |
 | AI ([ai.md](ai.md)) | the bot issues the same commands as a human and shares the same budget; it never gets its own queue. |

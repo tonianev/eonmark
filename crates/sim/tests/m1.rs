@@ -330,15 +330,45 @@ fn restore_rebuilds_caches() {
     assert_eq!(a.sub_hashes(), b.sub_hashes());
 }
 
-/// A random command stream over the scenario: spawns, moves, stops.
+/// A random command stream over the scenario: spawns, moves, stops, and
+/// (from M3a) Croft sites placed and cancelled around a complete P0 Town,
+/// so the cost grid changes while searches are suspended.
 fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
+    let rules = load_rules();
+    let (town, _) = rules.building_kind_by_id("town").unwrap();
+    let (croft, _) = rules.building_kind_by_id("croft").unwrap();
+    let lumber = u8::try_from(rules.resource_index("lumber").unwrap()).unwrap();
     let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
     let mut out = Vec::new();
     let mut seq = 0u32;
     let mut spawned: u32 = 0;
-    for _ in 0..ticks {
+    for t in 0..ticks {
         let mut tick_cmds = Vec::new();
+        if t == 0 {
+            // The scenario starts empty: a complete P0 Town centred on WEST
+            // gives P0 borders to build in, and Lumber pays for the sites.
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::DebugPlaceBuilding {
+                    owner: PlayerId(0),
+                    kind: sim::BuildingKindId(town),
+                    tile: Tile::new(23, 63),
+                    complete: true,
+                },
+            ));
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq + 1,
+                Command::DebugGrant {
+                    owner: PlayerId(0),
+                    resource: lumber,
+                    amount: 100_000,
+                },
+            ));
+            seq += 2;
+        }
         let roll = rng.next_u32() % 100;
         if roll < 10 && spawned < 200 {
             let x = i32::try_from(rng.next_u32() % 128).unwrap();
@@ -372,10 +402,58 @@ fn random_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 Command::Stop { units },
             ));
             seq += 1;
+        } else if roll < 55 && spawned > 0 {
+            let x = u16::try_from(24 - 18 + rng.next_u32() % 37).unwrap();
+            let y = u16::try_from(64 - 18 + rng.next_u32() % 37).unwrap();
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Build {
+                    unit: UnitId(1 + rng.next_u32() % spawned.max(1)),
+                    kind: sim::BuildingKindId(croft),
+                    tile: Tile::new(x, y),
+                },
+            ));
+            seq += 1;
+        } else if roll < 58 {
+            tick_cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq,
+                Command::Cancel {
+                    building: sim::BuildingId(1 + rng.next_u32() % 8),
+                    slot: 0,
+                },
+            ));
+            seq += 1;
         }
         out.push(tick_cmds);
     }
     out
+}
+
+/// The random stream really changes the cost grid: over a few seeds it
+/// places sites (generation bumps) and cancels some, so the two proptests
+/// below exercise suspended searches across grid changes.
+#[test]
+fn random_commands_place_and_cancel_sites() {
+    let (mut placed, mut removed) = (0, 0);
+    for seed in 0..8 {
+        let stream = random_commands(seed, 300);
+        let mut sim = scenario(seed);
+        for cmds in &stream {
+            sim.step(cmds);
+            for e in sim.drain_events() {
+                match e {
+                    sim::SimEvent::BuildingPlaced { .. } => placed += 1,
+                    sim::SimEvent::BuildingRemoved { .. } => removed += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    // One placement per seed is the debug Town.
+    assert!(placed > 8 + 4, "sites placed: {}", placed - 8);
+    assert!(removed > 0, "sites cancelled: {removed}");
 }
 
 fn run_with(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> Vec<u64> {
@@ -696,13 +774,17 @@ fn dist_sq_i64_map_corners() {
 #[test]
 fn debug_spawn_is_rejected_in_a_skirmish_and_accepted_in_a_scenario() {
     let rules = load_rules();
+    let start: u32 = rules.standard_start.units.values().sum();
     let mut skirmish = Sim::new(MatchSetup::skirmish(&rules, 1), rules, Box::new(NoAi));
     let delay = skirmish.setup().cmd_delay;
+    // A skirmish begins from the standard start: both players' start units.
+    let before = skirmish.view().unit_count();
+    assert_eq!(before, usize::try_from(2 * start).unwrap());
     skirmish.step(&[spawn(0, 0, WEST, 3)]);
     for _ in 0..delay {
         skirmish.step(&[]);
     }
-    assert_eq!(skirmish.view().unit_count(), 0);
+    assert_eq!(skirmish.view().unit_count(), before, "DebugSpawn adds none");
     let events = skirmish.drain_events();
     assert!(
         events.iter().any(|e| matches!(

@@ -42,7 +42,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated | 6 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated | 7 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -55,7 +55,7 @@ when you can; the validator does not require it.
 | `train_queue_max` | Most entries one building's training queue holds | 5 | M3a |
 | `idle_seek_delay_ds` | An idle worker looks for a free gather slot on its own after this long (50 = 5 s = 100 ticks) | 50 | M3a |
 | `idle_seek_retry_ds` | An idle worker that found no free slot tries again after this long (50 = 100 ticks, equal to the delay) | 50 | M3a |
-| `standard_start` | What each player starts with besides the Seat (one Town of the `town: true` kind, centred on the map start): `units` per unit id and `stockpile` per resource id. Validated now; the sim reads it later in M3a, when skirmish matches use the standard start and scenarios start empty | `units: {"yeoman": 5}`, `stockpile: {"grain": 150, "lumber": 150, "ore": 0, "lore": 0}` | M3a |
+| `standard_start` | What each player starts with besides the Seat (one Town of the `town: true` kind, centred on the map start): `units` per unit id and `stockpile` per resource id. The sim reads it in `Sim::new` when `MatchSetup.start` is `Standard`, the skirmish default; scenarios start `Empty` unless they set it | `units: {"yeoman": 5}`, `stockpile: {"grain": 150, "lumber": 150, "ore": 0, "lore": 0}` | M3a |
 | `town_radius_tiles` | Border radius of a new Town | 20 | M3a |
 | `town_radius_grown_tiles` | Radius once the Town has enough distinct building kinds | 24 | M3a |
 | `town_growth_distinct_buildings` | Distinct kinds needed to grow | 5 | M3a |
@@ -68,6 +68,13 @@ when you can; the validator does not require it.
 | `repath_interval_ds` | Deciseconds between periodic repaths while a unit is moving (30 = 3 s = 60 ticks) | 30 | M1 |
 | `separation_push_moving_div` | The separation push on a moving unit is capped at `speed / this` so steering keeps the upper hand | 2 | M1 |
 | `separation_push_idle_div` | The separation push on a unit without an order is capped at `speed / this`: parked units yield slowly to a passing crowd instead of jamming it | 8 | M1 |
+
+Of the M3a fields, the Town loop (the first M3a slice) reads
+`standard_start`, `building_ramp_step_permille`, `yield_cap_table` (at
+Trade level 0), `town_limit_base` and `town_radius_tiles`. The tier-2
+radius and growth threshold, the military ramp, `train_queue_max`, the
+idle-seek fields and `pop_cap_base` are read when gathering and training
+land later in M3a.
 
 The M0 `vision` block (`unit_tiles`, `building_tiles`, `town_tiles`) was
 removed at `rules_version` 6: vision is now `vision_tiles` on every kind in
@@ -132,8 +139,9 @@ How the movement fields are used is specified in
 `docs/design/pathing.md` ("Movement step"): speed is converted once at
 spawn to tiles per tick (`x100 / (100 * tick_rate_hz)`), the radius to
 fixed-point tiles; the arrive, separation and return-to-post radii are read
-per tick. The training fields are validated now and read by the sim later
-in M3a, when training lands.
+per tick. Of the training fields the sim reads `builder` from the M3a Town
+loop (a `Build` by a kind without it is rejected with `NotABuilder`); the
+others are validated now and read later in M3a, when training lands.
 
 | Field | Meaning | Yeoman | Scribe | Skirmisher |
 |-------|---------|--------|--------|------------|
@@ -179,9 +187,13 @@ A list of building kinds, added in M3a; the list index is the sim's
 `BuildingKindId`, but code looks kinds up by `id`, never by index. Costs,
 yields and rates are integers per resource id; rates are per 30 s (600
 ticks at 20 Hz); footprints and radii are in tiles. A building's tile is
-the north-west corner of its footprint. The sim reads this file later in
-M3a, when construction and income land; until then it is validated and
-part of `rules_hash`.
+the north-west corner of its footprint. The sim reads it from the M3a Town
+loop: `town`, the footprint, `cost` with the building ramp,
+`build_time_ds`, `hp`, `base_yield`, `max_per_town`, `gather.slots`
+(counted at placement) and `border_radius_tiles` (tests reach a complete
+Watchtower only through `DebugPlaceBuilding` until a `Build` of one is
+tested). The rest of `gather` is read when gathering lands later in M3a,
+`vision_tiles` in M7.
 
 | Field | Meaning |
 |-------|---------|
@@ -259,7 +271,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (6 to 7) and put the one-line reason
+2. Bump `rules_version` in `rules.ron` (7 to 8) and put the one-line reason
    in the commit message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
 
@@ -270,8 +282,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=7 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
-(the repository is at 6; the hash is new because a file changed).
+`OK rules_version=8 rules_hash=0x<16 hex> resources=4 units=3 buildings=8 maps=plains_1v1`
+(the repository is at 7; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture

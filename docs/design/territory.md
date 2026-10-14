@@ -143,9 +143,20 @@ cargo test -p sim territory
 cargo run -p sim-cli --release -- bench --territory --sources 16 --edits 100
 ```
 
-The field, its unit tests, the 200-edit proptests (on the default map and on an odd-width field, with mirrored source pairs), the bench and the criterion bench `territory_recompute` landed first, before construction wires the field into `State`. Measured 2026-10-10 on a 4-vCPU Linux cloud VM: mean 0.036 ms, p95 0.057 ms per edit for 16 sources and 100 edits (budget 2 ms; [../BUILD_TIMES.md](../BUILD_TIMES.md)).
+The field, its unit tests, the 200-edit proptests (on the default map and on an odd-width field, with mirrored source pairs), the bench and the criterion bench `territory_recompute` landed first, before construction wired the field into `State` (see "M3a implementation notes" below). Measured 2026-10-10 on a 4-vCPU Linux cloud VM: mean 0.036 ms, p95 0.057 ms per edit for 16 sources and 100 edits (budget 2 ms; [../BUILD_TIMES.md](../BUILD_TIMES.md)).
 
 On the even-width mirrored `plains_1v1` no tile is exactly equidistant from two mirrored centres (they straddle x = 63.5), so midline ties come only from the floored square root: two Towns at (48, 64) and (79, 64) with R = 20 own 1167 tiles each, and exactly 8 tiles tie, all neutral (`territory_mirrored_towns_tie_only_by_isqrt_floor_and_ties_go_neutral`). On an odd-width field the centre column is an exact tie wherever a kernel reaches it (`territory_odd_width_centre_column_is_neutral_wherever_reached`).
+
+## M3a implementation notes
+
+Since the Town loop (`SIM_VERSION` 6) the field is part of the hashed `State` and fills the `territory` sub-hash. Where it is more precise than the sections above:
+
+| Topic | As implemented |
+| --- | --- |
+| Sources | Each Seat projects from the standard start. A founded Town or a Watchtower projects when it completes (`BuildingCompleted`, then `TerritoryChanged`), never while it is a site. The centre is the footprint's centre tile, `nw + ((w - 1) / 2, (h - 1) / 2)`. Tier 2, Statecraft, destruction and annexation edits arrive with their slices and milestones. |
+| Watchtower | `Build` of a Watchtower takes the same path as any kind, but so far tests complete one only through `DebugPlaceBuilding` (no Ore income exists yet). |
+| Golden counts at sim level | From the standard start on `plains_1v1` each Seat owns 1245 tiles. With a P0 Watchtower completed at (43, 64), the "2 Towns + 1 Watchtower" fixture (the two Seats plus the tower) gives P0 1248 and P1 1245, and columns 63 and 64 are neutral on every row (`territory_fixture_two_towns_and_a_watchtower_has_golden_owned_tiles_and_a_neutral_midline`), the same counts as the field-level `territory_fixture_two_towns_and_a_watchtower_golden_counts_field_level`. |
+| Outside borders | `OutsideBorders` is the sixth `Build` check (the order is in [towns.md](towns.md)); every footprint tile must pass `is_buildable`. `territory_build_outside_own_borders_is_rejected_without_state_change` compares every hash and sub-hash with a control sim whose command at the same `(player, seq)` is rejected for another reason, over the following ticks, and checks that the `rng` sub-hash is unchanged. |
 
 ## Open tuning questions
 

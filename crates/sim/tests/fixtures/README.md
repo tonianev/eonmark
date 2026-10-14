@@ -2,8 +2,9 @@
 
 Each fixture is `<name>.eonreplay` (written by `sim-cli record --scenario <name>`)
 with a sibling `<name>.hash` holding the final state hash as `0x<16 hex>` and a
-newline. `crates/sim/tests/m1.rs::golden(name)` verifies the replay and compares
-the final hash; `sim-cli verify` does the same from the command line.
+newline. `crates/sim/tests/m1.rs::golden(name)` (and its copy in `m3a.rs`
+for `economy_second_town`) verifies the replay and compares the final hash;
+`sim-cli verify` does the same from the command line.
 
 | Fixture | Ticks | Scenario (`sim::scenarios`) | Runs in |
 | --- | --- | --- | --- |
@@ -11,10 +12,18 @@ the final hash; `sim-cli verify` does the same from the command line.
 | `move_500` | 1200 | 500 Yeomen west to east, Stop for every third id at tick 400 (seed 42) | `sim-cli verify --release` in CI on both OSes (hash-parity job); `cargo test -- --ignored` locally |
 | `group_spiral` | 600 | 64 Yeomen to the west edge, then onto a mountain tile (seed 7) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 | `snapshot_restore` | 1200 | 200 Yeomen east, 50 more spawned for player 1 after a snapshot/restore swap at tick 300 (seed 7) | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `economy_second_town` | 3600 | from the standard start, mirrored build orders: during tick 0 Yeoman 1 founds a Town at (40, 63) and Yeoman 2 places a Croft at (28, 60), spending exactly the 150 starting Lumber; during tick 2400 Yeoman 3 places a Croft at (44, 60), attributed to the new Town; P1 mirrors them with Yeomen 6, 7 and 8 (seed 11) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 
 The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
+
+Recorded 2026-10-14 at `rules_version` 7, `SIM_VERSION` 6 with `just rerecord`
+(M3a Town loop: `State` gained hashed fields, namely the stockpiles and
+income accumulators, the territory field and the M3a building and unit
+fields, and the header gained `MatchSetup.start`; the four M1 scenarios
+start empty and use no M3a command, but every `.hash` changed because the
+hashed state grew; `economy_second_town` is a first recording).
 
 Recorded 2026-10-14 at `rules_version` 6, `SIM_VERSION` 5 with `just rerecord`
 (M3a rules data: `buildings.ron`, the Scribe and Skirmisher, the ramp,

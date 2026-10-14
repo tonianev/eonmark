@@ -76,7 +76,7 @@ Any edit to a RON file changes `rules_hash`, and every golden replay fixture rec
 ```bash
 # 1. Edit a value, for example the Croft gather rate in data/rules/buildings.ron
 #    (rate_per_worker: 10 -> 12).
-# 2. Bump rules_version in data/rules/rules.ron (for example 6 -> 7).
+# 2. Bump rules_version in data/rules/rules.ron (for example 7 -> 8).
 # 3. Validate every file under data/. Errors name the file and the field.
 cargo run -p sim-cli -- data-check data
 # 4. Re-record every golden fixture; each .hash comes from sim-cli verify.

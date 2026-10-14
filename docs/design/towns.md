@@ -119,6 +119,34 @@ These are measured with `sim-cli play-bots`, not enforced by the sim.
 | Median game length | at most tick 54000 |
 | Games lasting past tick 24000 | at least 10 of 20 |
 
+## M3a implementation notes
+
+The first M3a slice (the Town loop, `SIM_VERSION` 6) implements the standard start, founding and the town limit in `crates/sim/src/town.rs` and `construction.rs`. Where it is more precise than the sections above:
+
+| Topic | As implemented |
+| --- | --- |
+| Standard start | With `MatchSetup.start: Standard` (the skirmish default), `Sim::new` places per player, in id order, the Seat (a complete Town, `TownState { seat: true, tier: 1 }`, centred on the map start and projecting its border), then the start units on the nearest passable tiles, then the stockpile. On `plains_1v1` the Seats are `BuildingId(1)` (P0) and `BuildingId(2)` (P1), P0's Yeomen `UnitId(1..=5)` and P1's `UnitId(6..=10)`, and each Seat owns 1245 tiles. |
+| Borders | A founded Town projects its border when it completes, not when its site is placed; a site claims nothing. The kernel centre is the footprint's centre tile. |
+| Town limit | Counts every Town-kind building of the player, sites and the Seat included, against `town_limit_base` plus the Statecraft level (0 until M4a). The proposed name `TownLimitReached` is the one used. |
+| Attribution | Fixed at placement: the nearest own complete Town by `dist_sq_i64` between footprint centres, then `BuildingId`. Town sites do not count. A kind with `max_per_town` (the Croft) placed while the player has no complete Town is rejected with `PerTownLimitReached`; any other non-Town kind is then placed with no Town. |
+| Tier 2 | Not yet: every Town projects its tier-1 radius until tier-2 growth arrives with gathering, later in M3a. |
+
+`Build` checks run in this order and the first failure is the reason (the one the M3b HUD will show); a rejected `Build` changes nothing and draws no randomness:
+
+1. the unit exists and is the player's (`NoValidUnits`);
+2. the kind exists (`UnknownBuildingKind`);
+3. the unit's kind can build (`NotABuilder`);
+4. an own site of the same kind at the same tile is resumed instead, at no cost (see [economy.md](economy.md));
+5. the footprint is on the map (`SiteOutOfBounds`);
+6. every footprint tile is the player's territory (`OutsideBorders`);
+7. every footprint tile is passable (`SiteBlocked`);
+8. no unit of any player stands on it (`SiteOccupied`);
+9. a Town keeps the player within the town limit (`TownLimitReached`);
+10. a kind with `max_per_town` has a complete Town to belong to and room under its limit there, sites included (`PerTownLimitReached`);
+11. a gatherer with `Adjacent` slots has at least one tile of its terrain beside the footprint (`NoAdjacentResource`);
+12. at least one tile around the footprint is passable for the builder (`SiteBlocked`);
+13. the player can pay the ramped cost (`CannotAfford`, naming the first short resource).
+
 ## Interactions
 
 | System | Interaction |

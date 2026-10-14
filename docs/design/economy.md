@@ -176,11 +176,24 @@ The ordering is a total order with an id tiebreak, as every sort in the sim must
 | Yield Cap | 70 |
 | Pop cap | 25 |
 
-The Seat, the Yeomen and the stockpiles are data: `standard_start` in `rules.ron` holds `units: {"yeoman": 5}` and `stockpile: {"grain": 150, "lumber": 150, "ore": 0, "lore": 0}`, and the Seat is one Town of the `town: true` kind in `buildings.ron`, centred on the map start (the map validator checks that the 3x3 footprint fits there on grass). By owner decision the sim selects it through `MatchSetup.start: StartKind { Empty, Standard }`, added later in M3a: skirmish matches use `Standard`, scenarios `Empty`.
+The Seat, the Yeomen and the stockpiles are data: `standard_start` in `rules.ron` holds `units: {"yeoman": 5}` and `stockpile: {"grain": 150, "lumber": 150, "ore": 0, "lore": 0}`, and the Seat is one Town of the `town: true` kind in `buildings.ron`, centred on the map start (the map validator checks that the 3x3 footprint fits there on grass). By owner decision the sim selects it through `MatchSetup.start: StartKind { Empty, Standard }`, added in the first M3a slice: skirmish matches use `Standard`, scenarios `Empty` unless they set `Standard` (the economy fixture does). The resulting ids are in [towns.md](towns.md) ("M3a implementation notes").
 
 ## Commands and rejections
 
 The economy consumes `Build { unit, kind, tile }`, `Train { building, kind }`, `Gather { units, node }`, `Cancel { building, slot }` and `SetRally { building, target }`. Costs are deducted when the order is accepted; `Cancel` refunds the deducted cost. Rejections never panic; they emit `SimEvent::CommandRejected { player, seq, reason }` with reasons including `OutsideBorders` (see [territory.md](territory.md)), `PopCapReached` and `CannotAfford`.
+
+## M3a implementation notes
+
+The first M3a slice (the Town loop, `SIM_VERSION` 6) implements income from base yields, building costs, construction and the site `Cancel`; gathering, training, pop and idle-worker seeking follow later in M3a. Where it is more precise than the sections above:
+
+| Topic | As implemented |
+| --- | --- |
+| Income | Only complete buildings' `base_yield` is credited (the Town's 10 Grain and 10 Lumber per 30 s); worked slots join with gathering. The Yield Cap is level 0 (70) until Trade research in M4a. After each tick's credit every stockpile with a `stockpile_cap` is clamped to it. Only stockpiles and accumulators are stored; rates, pop and ramp counters are computed when needed. `SimView::income` returns `RateInfo { raw, cap, credited }` per resource for the M3b readout. |
+| Building cost | Deducted when `Build` is accepted. The ramp's `n` counts every own building of the kind, sites and the Seat included. `SimView::building_cost` and `SimView::check_build` quote with the same functions `Build` uses. |
+| Construction | One builder per site. The builder walks to the passable tile around the footprint nearest to it (ties by tile). The site gains one tick of progress per tick its builder is at work: no order, and its post (the tile it arrived at) touches the footprint (Chebyshev distance 1). The post counts, not the live position, so separation jostle never pauses work. A `Move`, `AttackMove` or `Stop` ends the job, and a builder whose path ends anywhere else loses it; the site keeps its progress and waits. |
+| Resuming | Re-issuing `Build` with the same kind and tile on an own site, by any builder, makes that unit its builder at no cost; a previous builder goes idle. |
+| Site cancel | `Cancel { building: site, slot: 0 }` refunds `paid` in full, clamped to the stockpile caps, unblocks the footprint and idles the builder. Any other slot, or a complete building (its queue is empty until training lands), is `InvalidSlot`; a missing building or another player's is `UnknownBuilding`. |
+| Rejections | `Build` and `Cancel` rejections change no state and draw no randomness; the full `Build` check order is in [towns.md](towns.md) ("M3a implementation notes"). |
 
 ## Interactions
 

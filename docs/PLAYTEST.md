@@ -116,6 +116,18 @@ Captured on 2026-10-06 from the M2 integration build with `--screenshot` (dev bu
 
 `--screenshot-at <TICK>:<PATH>` (repeatable) captures the window once the sim reaches a tick instead of after a wall-clock delay, so a scripted scenario's beats land in the picture however slowly the renderer runs. The M3b walkthrough: `target/ci/eonmark --scenario economy_walkthrough --camera 38,64,60 --exit-after-seconds 145 --screenshot-at 20:outside.png --screenshot-at 1400:expanded.png --screenshot-at 2100:amber.png --screenshot-at 2262:popcap.png` shows "Outside your borders" on the message line, the border grown around the second Town with "Town complete", the Grain readout in amber with "capped at 70", and Pop 25 / 25 with "Population cap reached" (`--exit-after-seconds` must outlast tick 2262 at the renderer's speed; 145 s is enough under lavapipe). CI's game-linux job runs the same walkthrough for 60 s in background mode with `scripts/render_smoke.sh` (`just render-smoke` locally), captures the window at tick 100, fails on any ERROR line in the log (a WGSL shader that does not compile is only logged by Bevy; a pipeline that never becomes ready, such as one with an unresolvable `#import`, is logged by `render_watchdog.rs`), and uploads the PNG, log and replay as the `render-smoke` artifact.
 
+## Screenshots (M3b)
+
+Captured on 2026-10-21 from the M3b branch (f3dabf6) on Linux under Xvfb with Mesa's lavapipe (the `ci` profile binary, background mode, a 1280x800 window), not on the dev Mac: the same pipelines and shaders, rendered in software. Recompressed losslessly. They are the owner proxies for the M3b acceptance lines: the walkthrough beats and the border against `docs/ART_STYLE.md`. Both windowed runs' replays verify (`OK final_hash=0xe6ad2978b1a587b4 ticks=3000` and `OK final_hash=0xdc5fe5e6d4edc476 ticks=2000`; they run past the scenario's 2400 ticks, so their hashes differ from the fixture's). Retake them on the Mac for the owner sign-off.
+
+| File | Command (prefix `xvfb-run ... env VK_ICD_FILENAMES=...` on Linux) | What to look for |
+|---|---|---|
+| [screenshots/m3b-outside.png](screenshots/m3b-outside.png) | `target/ci/eonmark --scenario economy_walkthrough --camera 38,64,60 --exit-after-seconds 150 --screenshot-at 20:m3b-outside.png --screenshot-at 1400:m3b-second-town.png --screenshot-at 2100:m3b-amber.png --screenshot-at 2262:m3b-popcap.png` | "Outside your borders" on the message line; the Seat's territory tinted with a soft blue border line; the second Town's site (larger) and a Croft site inside it |
+| [screenshots/m3b-second-town.png](screenshots/m3b-second-town.png) | (same run) | "Town complete"; the territory and its border line grown east around the second Town |
+| [screenshots/m3b-amber.png](screenshots/m3b-amber.png) | (same run) | The Grain readout amber, "+70 / 30 s, capped at 70"; Lumber and the others in the normal colour |
+| [screenshots/m3b-popcap.png](screenshots/m3b-popcap.png) | (same run) | "Pop 25 / 25" and "Population cap reached"; the spawned Yeomen grouped south of the Seat |
+| [screenshots/m3b-border-40m.png](screenshots/m3b-border-40m.png) | `target/ci/eonmark --scenario economy_walkthrough --camera 46,56,40 --exit-after-seconds 100 --screenshot-at 1500:m3b-border-40m.png` | The border at 40 m: a soft line about a tile wide with rounded steps along the tile edges, the 12% tint inside, matte, crossing a forest patch; check it against the ART_STYLE checklist (the window is 1280x800, the checklist's frame 1280x720) |
+
 ## Match log (M6)
 
 Play against the Standard bot from New Game to the game-over screen. One row per match. Keep the replay file; its name is the seed and timestamp.

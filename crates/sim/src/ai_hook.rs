@@ -223,6 +223,21 @@ impl<'a> SimView<'a> {
         }
     }
 
+    /// Whether `p` could place a new building of `kind` now, before a
+    /// builder and a tile are chosen, and what it would deduct: the checks
+    /// of `check_build` that need neither, in its order (`UnknownPlayer`,
+    /// `Surrendered`, `UnknownBuildingKind`, `AgeRequired`,
+    /// `TownLimitReached`, `CannotAfford`). `check_build` on a tile can
+    /// still reject the site.
+    pub fn check_build_kind(
+        &self,
+        p: PlayerId,
+        kind: BuildingKindId,
+    ) -> Result<Vec<i64>, RejectReason> {
+        self.check_player(p)?;
+        construction::validate_build_kind(self.state, self.rules, p, kind)
+    }
+
     /// The rules this match runs under.
     pub fn rules(&self) -> &'a Rules {
         self.rules

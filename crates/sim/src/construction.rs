@@ -317,6 +317,36 @@ pub(crate) fn validate_build(
     Ok(BuildPlan::New { cost, slots, town })
 }
 
+/// The checks of [`validate_build`] for a new building of `kind_id` that
+/// need neither the builder nor the site, in its order, through the same
+/// functions: the kind exists (`UnknownBuildingKind`, check 2), `p` has
+/// reached the age that unlocks it (`AgeRequired`, 5), a Town keeps `p`
+/// within the town limit (`TownLimitReached`, 10) and `p` can pay the
+/// ramped cost (`CannotAfford`, 14). Returns the cost. A rejection here is
+/// `validate_build`'s on every tile where the other checks pass; resuming
+/// an own site (check 4) is not considered.
+pub(crate) fn validate_build_kind(
+    state: &State,
+    rules: &Rules,
+    p: PlayerId,
+    kind_id: BuildingKindId,
+) -> Result<Vec<i64>, RejectReason> {
+    let kind = rules
+        .building_kind(kind_id.0)
+        .ok_or(RejectReason::UnknownBuildingKind)?;
+    if !tech::age_allows_building(state, rules, p, kind_id) {
+        return Err(RejectReason::AgeRequired);
+    }
+    if kind.town && town::town_count(state, rules, p) >= tech::town_limit(state, rules, p) {
+        return Err(RejectReason::TownLimitReached);
+    }
+    let cost = economy::building_cost_for(state, rules, p, kind_id);
+    if let Some(resource) = economy::first_short(&state.economy.player(p).stock, &cost) {
+        return Err(RejectReason::CannotAfford { resource });
+    }
+    Ok(cost)
+}
+
 /// Worker slots a building of `kind` gets at `rect`: `Fixed(n)` is `n`;
 /// `Adjacent` counts the ring tiles of its terrain on the map definition,
 /// up to `max`, and rejects zero with `NoAdjacentResource`.

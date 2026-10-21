@@ -136,7 +136,7 @@ impl<'a> SimView<'a> {
     pub fn towns(&self, p: PlayerId) -> (u32, u32) {
         (
             town::town_count(self.state, self.rules, p),
-            self.rules.town_limit(town::statecraft(p)),
+            self.rules.town_limit_base,
         )
     }
 

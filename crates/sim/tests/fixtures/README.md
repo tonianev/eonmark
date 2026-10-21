@@ -20,6 +20,15 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-21 at `rules_version` 13, `SIM_VERSION` 11 with
+`just rerecord` (M4a rules data: `techs.ron`, `ages.ron` and
+`factions.ron`, the five new unit kinds, the unit and shooter combat
+fields, the Skirmisher's own speed and the counter table joined
+`rules_hash`, and `yield_cap_table` became `yield_cap_base`). The fixtures use only the Town, the Croft and the
+Yeoman, and the sim reads none of the new data and keeps no rules hash in
+its state, so every final hash and every `.hash` file is unchanged; only
+the headers differ.
+
 Recorded 2026-10-21 at `rules_version` 12, `SIM_VERSION` 11 with
 `just rerecord economy_walkthrough` (M3b owner proxy: `economy_walkthrough`
 is a first recording of a new scenario, so nothing bumps; no other fixture

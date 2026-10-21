@@ -282,7 +282,7 @@ pub(crate) fn validate_build(
     }
     let town = if kind.town {
         let towns = town::town_count(state, rules, p);
-        if towns >= rules.town_limit(town::statecraft(p)) {
+        if towns >= rules.town_limit_base {
             return Err(RejectReason::TownLimitReached);
         }
         None
@@ -519,7 +519,7 @@ pub(crate) fn complete(
             seat: false,
             tier: 1,
         });
-        Some(rules.town_radius_for(1, town::statecraft(owner)))
+        Some(rules.town_radius_base(1))
     } else {
         kind.border_radius_tiles
     };

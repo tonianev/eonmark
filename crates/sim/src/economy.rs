@@ -78,10 +78,11 @@ pub struct RateInfo {
     pub credited: u32,
 }
 
-/// The Yield Cap for a player. Trade research arrives in M4a; until then
-/// every player is at level 0.
+/// The Yield Cap for a player. The `YieldCap` Modifier rows (Trade) are
+/// applied from the M4a tech slice; until then every player has
+/// `yield_cap_base`.
 pub(crate) fn yield_cap(rules: &Rules, _p: PlayerId) -> u32 {
-    rules.yield_cap(0)
+    rules.yield_cap_base
 }
 
 /// The player's income per resource this tick, `resources.ron` order.

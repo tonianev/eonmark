@@ -1540,7 +1540,7 @@ fn economy_ten_worked_crofts_flatline_at_the_yield_cap() {
         .unwrap()
         .rate_per_worker;
     let town_grain = rules.building_kind(town.0).unwrap().base_yield["grain"];
-    let cap = rules.yield_cap(0);
+    let cap = rules.yield_cap_base;
     let period = rules.income_period_ticks();
     let mut sim = empty(21);
     let mut cmds = vec![
@@ -1590,7 +1590,7 @@ fn economy_lore_ignores_the_yield_cap() {
         panic!("Scriptorium slots are fixed");
     };
     let per = def.base_yield["lore"] + slots * g.rate_per_worker;
-    let cap = rules.yield_cap(0);
+    let cap = rules.yield_cap_base;
     let n = cap / per + 1;
     assert!(n * per > cap);
     assert!(n <= 3, "the test places at most 3 Scriptoria");
@@ -2620,7 +2620,7 @@ fn economy_unit_ramps_count_only_their_kind_class_and_owner() {
 fn economy_train_is_rejected_at_the_pop_cap() {
     let rules = load_rules();
     let yeoman = unit_kind(&rules, "yeoman");
-    let cap = rules.pop_cap(0);
+    let cap = rules.pop_cap_base;
     let start = rules.standard_start.units["yeoman"];
     let mut sim = standard(62);
     let grain = resource(&rules, "grain");
@@ -2668,11 +2668,11 @@ fn economy_train_rejections() {
         assert!(rejections(&events).is_empty(), "{events:?}");
     };
     let crowd = |s: &mut Sim| {
-        let room = rules.pop_cap(0) - rules.standard_start.units["yeoman"];
+        let room = rules.pop_cap_base - rules.standard_start.units["yeoman"];
         let spawn = spawn_kind(0, 120, 0, 34, 70, u16::try_from(room).unwrap());
         let events = apply(s, vec![spawn]);
         assert!(rejections(&events).is_empty(), "{events:?}");
-        assert_eq!(s.view().pop(PlayerId(0)).0, rules.pop_cap(0));
+        assert_eq!(s.view().pop(PlayerId(0)).0, rules.pop_cap_base);
     };
     type Setup<'a> = Box<dyn Fn(&mut Sim) + 'a>;
     let none: Setup = Box::new(|_| {});

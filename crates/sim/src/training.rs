@@ -46,10 +46,10 @@ pub(crate) fn pop_used(state: &State, rules: &Rules, p: PlayerId) -> u32 {
     alive.checked_add(queued).expect("pop fits u32")
 }
 
-/// `p`'s population cap. Arms research arrives in M4a; until then every
-/// player is at level 0.
+/// `p`'s population cap. The `PopCap` Modifier rows (Arms) are applied
+/// from the M4a tech slice; until then every player has `pop_cap_base`.
 pub(crate) fn pop_cap(rules: &Rules, _p: PlayerId) -> u32 {
-    rules.pop_cap(0)
+    rules.pop_cap_base
 }
 
 /// What one more unit of `kind` costs `p` now. `n` counts own units of the

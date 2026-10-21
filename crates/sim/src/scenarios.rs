@@ -518,7 +518,7 @@ pub fn economy_walkthrough(rules: &Rules) -> (MatchSetup, Stream) {
     // Pop: the standard start's Yeomen plus the one trained during tick 0;
     // spawn up to one Yeoman below the cap, then train that one, whose
     // ramped cost counts every Yeoman alive before it.
-    let cap = rules.pop_cap(0);
+    let cap = rules.pop_cap_base;
     let pop = yeoman_def.pop;
     let alive = (rules.standard_start.units["yeoman"] + 1) * pop;
     let to_spawn = (cap - pop - alive) / pop;

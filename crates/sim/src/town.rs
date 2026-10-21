@@ -9,12 +9,6 @@ use crate::territory::{Source, SourceOwner};
 use rules::{MapDef, Rules};
 use std::collections::BTreeSet;
 
-/// A player's Statecraft level. Research arrives in M4a; until then every
-/// player is at level 0.
-pub(crate) fn statecraft(_p: PlayerId) -> u32 {
-    0
-}
-
 /// Town-kind buildings `p` owns, sites included (the town limit counts
 /// both).
 pub(crate) fn town_count(state: &State, rules: &Rules, p: PlayerId) -> u32 {
@@ -50,9 +44,10 @@ pub(crate) fn attribute(
 
 /// Re-derive Town `town`'s tier: 2 when the owner's complete buildings
 /// attributed to it cover at least `town_growth_distinct_buildings`
-/// distinct non-Town kinds, else 1 (sites do not count; the Masonry Age
-/// gate arrives in M4a). A change moves the Town's border source to the
-/// tier's radius and emits `TownTierChanged` and `TerritoryChanged`.
+/// distinct non-Town kinds, else 1 (sites do not count; the
+/// `town_growth_age` gate in `rules.ron` is applied from the M4a tech
+/// slice). A change moves the Town's border source to the tier's radius
+/// and emits `TownTierChanged` and `TerritoryChanged`.
 pub(crate) fn recompute_tier(
     state: &mut State,
     rules: &Rules,
@@ -83,7 +78,7 @@ pub(crate) fn recompute_tier(
     if tier == ts.tier {
         return;
     }
-    let radius = rules.town_radius_for(tier, statecraft(owner));
+    let radius = rules.town_radius_base(tier);
     let mut source = state.territory.sources()[&town];
     source.radius = u16::try_from(radius).expect("validated radius fits u16");
     state.territory.change_source(town, source);
@@ -128,7 +123,7 @@ pub(crate) fn apply_standard_start(state: &mut State, rules: &Rules, def: &MapDe
             seat: true,
             tier: 1,
         });
-        let radius = rules.town_radius_for(1, statecraft(p));
+        let radius = rules.town_radius_base(1);
         state.territory.add_source(
             seat,
             Source {

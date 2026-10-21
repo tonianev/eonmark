@@ -455,6 +455,27 @@ pub enum RejectReason {
     /// reach any tile beside the building is not a valid unit for it:
     /// `NoValidUnits`.)
     NoFreeSlot,
+    /// `TechId` not in `techs.ron`.
+    UnknownTech,
+    /// The building's kind is not the tech's `host`.
+    CannotResearchHere,
+    /// `Research`: the level below the tech in its line is not researched
+    /// yet. `Train`: the unit kind's `requires_tech` is not researched yet.
+    PrerequisiteMissing,
+    /// The player has not reached the age (`ages.ron`) that unlocks the
+    /// tech, unit kind or building kind.
+    AgeRequired,
+    /// The player has researched the tech already.
+    AlreadyResearched,
+    /// The tech is queued at one of the player's buildings.
+    ResearchInProgress,
+    /// `AdvanceAge` before the player has researched the next age's
+    /// `techs_required` techs (queued ones do not count).
+    NotEnoughTechs,
+    /// `AdvanceAge` in the last age of `ages.ron`.
+    FinalAge,
+    /// `AdvanceAge { player }` names a player other than the issuer.
+    PlayerMismatch,
 }
 
 /// Something the presenter or a test may want to know about a tick. Events

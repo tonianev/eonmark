@@ -96,6 +96,15 @@ pub fn reject_key(reason: &RejectReason) -> &'static str {
         RejectReason::CannotTrainHere => "cannot_train_here",
         RejectReason::QueueFull => "queue_full",
         RejectReason::NoFreeSlot => "no_free_slot",
+        RejectReason::UnknownTech => "unknown_tech",
+        RejectReason::CannotResearchHere => "cannot_research_here",
+        RejectReason::PrerequisiteMissing => "prerequisite_missing",
+        RejectReason::AgeRequired => "age_required",
+        RejectReason::AlreadyResearched => "already_researched",
+        RejectReason::ResearchInProgress => "research_in_progress",
+        RejectReason::NotEnoughTechs => "not_enough_techs",
+        RejectReason::FinalAge => "final_age",
+        RejectReason::PlayerMismatch => "player_mismatch",
     }
 }
 
@@ -379,6 +388,15 @@ mod tests {
             RejectReason::CannotTrainHere,
             RejectReason::QueueFull,
             RejectReason::NoFreeSlot,
+            RejectReason::UnknownTech,
+            RejectReason::CannotResearchHere,
+            RejectReason::PrerequisiteMissing,
+            RejectReason::AgeRequired,
+            RejectReason::AlreadyResearched,
+            RejectReason::ResearchInProgress,
+            RejectReason::NotEnoughTechs,
+            RejectReason::FinalAge,
+            RejectReason::PlayerMismatch,
         ]
     }
 

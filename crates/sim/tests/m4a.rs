@@ -1,7 +1,11 @@
-//! M4a acceptance tests, tech slice: research, ages, the Modifier resolver
-//! and what the resolved stats change. Test names start with `tech_` so
+//! M4a acceptance tests. The tech slice: research, ages, the Modifier
+//! resolver and what the resolved stats change, in tests named `tech_` so
 //! that `cargo test -p sim tech` selects them (the filter matches test
-//! paths, not integration-test file names).
+//! paths, not integration-test file names). The combat core: hit points,
+//! the explicit `Attack`, simultaneous hits, death and destruction, in
+//! tests named `combat_` (`cargo test -p sim combat`), plus the Arms hit
+//! point and damage rows (`tech_arms_*`, `tech_every_arms_*`) and the
+//! seeded random streams over both (`m4a_*`).
 //!
 //! Most tests run on `MatchSetup::scenario`, an empty start: with no
 //! building there is no income, so stockpiles are exact through
@@ -10,10 +14,12 @@
 //! control sim that receives a rejected no-op with the same `(player,
 //! seq)`, on every sub-hash (`rng` included) and the whole hash.
 
+use proptest::prelude::*;
 use rules::{ModOp, Modifier, Rules, StatPath, UnitRamp};
 use sim::{
-    BuildingId, BuildingKindId, Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, QueueEntry,
-    QueueItem, RejectReason, Sim, SimEvent, SimView, StartKind, TechId, Tile, UnitId, UnitKindId,
+    BuildingId, BuildingKindId, Command, Fx, FxVec2, Intent, MatchSetup, PlayerCommand, PlayerId,
+    QueueEntry, QueueItem, RejectReason, Sim, SimEvent, SimView, StartKind, TargetId, TechId, Tile,
+    UnitId, UnitKindId,
 };
 use std::path::{Path, PathBuf};
 
@@ -1951,4 +1957,1590 @@ fn tech_view_checks_agree_with_apply() {
     );
     let events = m.run(vec![research(2, t("letters_1"))]);
     assert_eq!(rejections(&events), [RejectReason::UnderConstruction]);
+}
+
+// ---------------------------------------------------------------------------
+// Combat core: hit points, the explicit Attack, simultaneous hits, death and
+// destruction (`combat_*`), and the Arms hit point and damage rows.
+// ---------------------------------------------------------------------------
+
+fn spawn_for(owner: PlayerId, kind: UnitKindId, x: i32, y: i32, count: u16) -> Command {
+    Command::DebugSpawn {
+        owner,
+        kind,
+        at: FxVec2::from_ints(x, y),
+        count,
+    }
+}
+
+fn attack(units: &[u32], target: TargetId) -> Command {
+    Command::Attack {
+        units: units.iter().map(|&u| UnitId(u)).collect(),
+        target,
+    }
+}
+
+fn unit_t(id: u32) -> TargetId {
+    TargetId::Unit(UnitId(id))
+}
+
+fn building_t(id: u32) -> TargetId {
+    TargetId::Building(BuildingId(id))
+}
+
+fn stop(units: &[u32]) -> Command {
+    Command::Stop {
+        units: units.iter().map(|&u| UnitId(u)).collect(),
+    }
+}
+
+/// `(attacker, target, damage)` of every `Hit`.
+fn hits(events: &[SimEvent]) -> Vec<(TargetId, TargetId, i32)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::Hit {
+                attacker,
+                target,
+                damage,
+            } => Some((*attacker, *target, *damage)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn deaths(events: &[SimEvent]) -> Vec<UnitId> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::UnitDied { unit } => Some(*unit),
+            _ => None,
+        })
+        .collect()
+}
+
+fn destroyed(events: &[SimEvent]) -> Vec<BuildingId> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::BuildingDestroyed { building } => Some(*building),
+            _ => None,
+        })
+        .collect()
+}
+
+impl M {
+    /// Issue `p0` from P0 and `p1` from P1 this tick, then step one tick
+    /// at a time through the tick they apply in and `n` ticks more: every
+    /// event with the tick it happened in.
+    fn issue_tagged(&mut self, p0: Vec<Command>, p1: Vec<Command>, n: u32) -> Vec<(u32, SimEvent)> {
+        let mut pcs: Vec<PlayerCommand> = p0.into_iter().map(|c| self.stamp(0, c)).collect();
+        pcs.extend(p1.into_iter().map(|c| self.stamp(1, c)));
+        let tick = self.sim.tick();
+        self.sim.step(&pcs);
+        let mut out: Vec<(u32, SimEvent)> = self
+            .sim
+            .drain_events()
+            .into_iter()
+            .map(|e| (tick, e))
+            .collect();
+        let delay = self.sim.setup().cmd_delay;
+        out.extend(self.step_tagged(delay + n));
+        assert!(
+            out.iter()
+                .all(|(_, e)| !matches!(e, SimEvent::CommandRejected { .. })),
+            "{out:?}"
+        );
+        out
+    }
+
+    /// Step one tick at a time, `n` ticks: every event with the tick it
+    /// happened in.
+    fn step_tagged(&mut self, n: u32) -> Vec<(u32, SimEvent)> {
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let tick = self.sim.tick();
+            self.sim.step(&[]);
+            out.extend(self.sim.drain_events().into_iter().map(|e| (tick, e)));
+        }
+        out
+    }
+
+    fn unit(&self, id: u32) -> Option<sim::Unit> {
+        self.view().unit(UnitId(id)).cloned()
+    }
+
+    fn hp(&self, id: u32) -> Option<(i32, i32)> {
+        self.view().unit_hp(UnitId(id))
+    }
+}
+
+/// `(tick, damage)` of every hit by `attacker` among tagged events.
+fn hits_by(events: &[(u32, SimEvent)], attacker: TargetId) -> Vec<(u32, i32)> {
+    events
+        .iter()
+        .filter_map(|(t, e)| match e {
+            SimEvent::Hit {
+                attacker: a,
+                damage,
+                ..
+            } if *a == attacker => Some((*t, *damage)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The tick a unit died in, among tagged events.
+fn died_at(events: &[(u32, SimEvent)], unit: u32) -> Option<u32> {
+    events.iter().find_map(|(t, e)| match e {
+        SimEvent::UnitDied { unit: u } if *u == UnitId(unit) => Some(*t),
+        _ => None,
+    })
+}
+
+/// Consecutive differences.
+fn gaps(ticks: &[u32]) -> Vec<u32> {
+    ticks.windows(2).map(|w| w[1] - w[0]).collect()
+}
+
+/// A hit does `floor(floor(raw * counter / 1000) * variance / 1000)` with
+/// variance 1000 by default: the attacker's damage with its owner's Arms
+/// rows, the counter row's permille, floored, once per cooldown. Checked
+/// against the data (Skirmisher on Bowman 2500, on buildings 250; the
+/// Shieldbearer on a Yeoman has no row) with P0 at Arms I, where the
+/// products are not multiples of 1000.
+#[test]
+fn combat_damage_is_raw_times_counter_floored_every_cooldown() {
+    let rules = load_rules();
+    let (skirm, bow, shield, yeoman) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "bowman"),
+        ukind(&rules, "shieldbearer"),
+        ukind(&rules, "yeoman"),
+    );
+    let mut m = M::new(rules.clone(), 30);
+    assert_eq!(m.view().unit_stats(P0, skirm).attack.unwrap().damage, 10);
+    m.ok(vec![debug_research(tech(&rules, "arms_1"))]);
+    let stats = |m: &M, k| m.view().unit_stats(P0, k).attack.expect("the kind attacks");
+    let (raw_skirm, raw_shield) = (
+        i64::from(stats(&m, skirm).damage),
+        i64::from(stats(&m, shield).damage),
+    );
+    assert_eq!(
+        (raw_skirm, raw_shield),
+        (11, 13),
+        "Arms I: 10 -> 11, 12 -> 13"
+    );
+    let counter = |a: &str, d: rules::Defender| i64::from(rules.counter_permille(a, &d));
+    let vs_bow = raw_skirm * counter("skirmisher", rules::Defender::Kind("bowman".into())) / 1000;
+    let vs_building = raw_skirm * counter("skirmisher", rules::Defender::Buildings) / 1000;
+    let vs_yeoman =
+        raw_shield * counter("shieldbearer", rules::Defender::Kind("yeoman".into())) / 1000;
+    assert_eq!(
+        (vs_bow, vs_building, vs_yeoman),
+        (27, 2, 13),
+        "27.5, 2.75, 13"
+    );
+    let (cd_skirm, cd_shield) = (
+        stats(&m, skirm).cooldown_ticks,
+        stats(&m, shield).cooldown_ticks,
+    );
+    assert_eq!((cd_skirm, cd_shield), (20, 24), "10 ds and 12 ds at 20 Hz");
+    let damages = |h: &[(u32, i32)]| h.iter().map(|h| i64::from(h.1)).collect::<Vec<_>>();
+    let ticks = |h: &[(u32, i32)]| h.iter().map(|h| h.0).collect::<Vec<_>>();
+
+    // P0's Skirmisher is UnitId(1), P1's Bowman UnitId(2), a tile apart;
+    // P1's complete Croft is BuildingId(1).
+    m.ok(vec![spawn(skirm, 10, 30, 1)]);
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, bow, 11, 30, 1),
+            place_for(P1, bkind(&rules, "croft"), 14, 26, true),
+        ],
+    );
+    let events = m.issue_tagged(vec![attack(&[1], unit_t(2))], vec![], 60);
+    let on_bow = hits_by(&events, unit_t(1));
+    assert_eq!(damages(&on_bow), [vs_bow; 2], "46 hp: two hits");
+    assert_eq!(gaps(&ticks(&on_bow)), [cd_skirm]);
+    assert_eq!(
+        died_at(&events, 2),
+        Some(on_bow[1].0),
+        "dies at the second hit"
+    );
+    let u = m.unit(1).unwrap();
+    assert_eq!(
+        (u.target, u.intent),
+        (None, Intent::Plain),
+        "the order ended"
+    );
+
+    let events = m.issue_tagged(vec![attack(&[1], building_t(1))], vec![], 140);
+    let on_croft = hits_by(&events, unit_t(1));
+    assert!(on_croft.len() >= 5, "{on_croft:?}");
+    assert!(damages(&on_croft).iter().all(|d| *d == vs_building));
+    assert!(gaps(&ticks(&on_croft)).iter().all(|g| *g == cd_skirm));
+    let n = i32::try_from(on_croft.len()).unwrap();
+    assert_eq!(
+        m.view().building(BuildingId(1)).unwrap().hp,
+        300 - 2 * n,
+        "a building loses exactly what hit it"
+    );
+
+    // P0's Shieldbearer (UnitId(3)) on P1's Yeoman (UnitId(4)): 13 a hit,
+    // 40 hp, so the fourth hit kills, 24 ticks apart.
+    m.ok(vec![stop(&[1]), spawn(shield, 10, 36, 1)]);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 11, 36, 1)]);
+    let events = m.issue_tagged(vec![attack(&[3], unit_t(4))], vec![], 120);
+    let on_yeoman = hits_by(&events, unit_t(3));
+    assert_eq!(damages(&on_yeoman), [vs_yeoman; 4]);
+    assert_eq!(gaps(&ticks(&on_yeoman)), [cd_shield; 3]);
+    assert_eq!(died_at(&events, 4), Some(on_yeoman[3].0));
+    eprintln!(
+        "damage: skirmisher (Arms I) on bowman {vs_bow} x2 every {cd_skirm} ticks, on a croft {vs_building}; shieldbearer (Arms I) on yeoman {vs_yeoman} x4 every {cd_shield} ticks"
+    );
+}
+
+/// Two equal Skirmishers attack each other: every hit of a tick is collected
+/// from the post-movement positions before any is applied, so both land
+/// their eighth hit and die in the same tick, whichever has the lower id.
+#[test]
+fn combat_hits_resolve_simultaneously_without_id_bias() {
+    let rules = load_rules();
+    let skirm = ukind(&rules, "skirmisher");
+    let mut outcomes = Vec::new();
+    for p0_first in [true, false] {
+        let mut m = M::new(rules.clone(), 31);
+        // The first spawn is UnitId(1), the second UnitId(2).
+        let (p0_id, p1_id) = if p0_first { (1, 2) } else { (2, 1) };
+        if p0_first {
+            m.ok(vec![spawn(skirm, 10, 30, 1)]);
+            m.run_as(1, vec![spawn_for(P1, skirm, 11, 30, 1)]);
+        } else {
+            m.run_as(1, vec![spawn_for(P1, skirm, 11, 30, 1)]);
+            m.ok(vec![spawn(skirm, 10, 30, 1)]);
+        }
+        let events = m.issue_tagged(
+            vec![attack(&[p0_id], unit_t(p1_id))],
+            vec![attack(&[p1_id], unit_t(p0_id))],
+            200,
+        );
+        let a = hits_by(&events, unit_t(p0_id));
+        let b = hits_by(&events, unit_t(p1_id));
+        assert_eq!(a.len(), 8, "80 hp at 10 a hit");
+        assert_eq!(a, b, "same ticks, same damage");
+        let (da, db) = (died_at(&events, p0_id), died_at(&events, p1_id));
+        assert!(da.is_some() && da == db, "both die in the same tick");
+        assert_eq!(da, Some(a[7].0), "in the tick of their last hits");
+        // The tick, relative to the first hit, does not depend on the ids.
+        outcomes.push((a[7].0 - a[0].0, a.len()));
+    }
+    assert_eq!(outcomes[0], outcomes[1], "no first strike for the lower id");
+}
+
+/// With `damage_variance_permille` 0 (the shipped value) a fight draws
+/// nothing: the `rng` sub-hash is the same on every tick of it.
+#[test]
+fn combat_zero_variance_draws_no_randomness() {
+    let rules = load_rules();
+    assert_eq!(rules.damage_variance_permille, 0);
+    let (skirm, bow) = (ukind(&rules, "skirmisher"), ukind(&rules, "bowman"));
+    let mut m = M::new(rules.clone(), 32);
+    // P0 Skirmishers 1..=3, P1 Bowmen 4..=6.
+    m.ok(vec![spawn(skirm, 10, 30, 3)]);
+    m.run_as(1, vec![spawn_for(P1, bow, 13, 30, 3)]);
+    let rng = m.sim.sub_hashes().rng;
+    let mut count = 0;
+    let p0 = vec![
+        attack(&[1], unit_t(4)),
+        attack(&[2], unit_t(5)),
+        attack(&[3], unit_t(6)),
+    ];
+    let p1 = vec![attack(&[4, 5, 6], unit_t(1))];
+    let events = m.issue_tagged(p0, p1, 0);
+    count += hits_by(&events, unit_t(1)).len();
+    for _ in 0..200 {
+        m.sim.step(&[]);
+        count += hits(&m.sim.drain_events()).len();
+        assert_eq!(m.sim.sub_hashes().rng, rng, "no draw");
+    }
+    assert!(count > 0 && m.view().unit_count() < 6, "they fought");
+}
+
+/// `damage_variance_permille` 100, set in memory: each hit draws once from
+/// the sim's RNG and lands within 900..=1100 permille of the floored
+/// counter damage. The same seed gives the same hits and hashes; another
+/// seed gives other hits.
+#[test]
+fn combat_variance_is_seeded_and_reproducible() {
+    let mut rules = load_rules();
+    rules.damage_variance_permille = 100;
+    let (skirm, shield) = (ukind(&rules, "skirmisher"), ukind(&rules, "shieldbearer"));
+    let fight = |seed: u64| {
+        let mut m = M::new(rules.clone(), seed);
+        m.ok(vec![spawn(skirm, 10, 30, 1)]);
+        m.run_as(1, vec![spawn_for(P1, shield, 11, 30, 1)]);
+        let rng = m.sim.sub_hashes().rng;
+        let events = m.issue_tagged(vec![attack(&[1], unit_t(2))], vec![], 400);
+        assert_ne!(m.sim.sub_hashes().rng, rng, "hits drew");
+        let damage: Vec<i32> = hits_by(&events, unit_t(1)).iter().map(|h| h.1).collect();
+        (damage, m.sim.hash())
+    };
+    let (a, hash_a) = fight(5);
+    let (b, hash_b) = fight(5);
+    assert_eq!((&a, hash_a), (&b, hash_b), "same seed, same fight");
+    // 10 a hit, no counter row: floor(10 * v / 1000) for v in 900..=1100.
+    assert!(a.iter().all(|d| (9..=11).contains(d)), "{a:?}");
+    assert!(
+        a.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        "{a:?}"
+    );
+    let (c, _) = fight(6);
+    assert_ne!(a, c, "another seed, other draws");
+    eprintln!("variance 100: seed 5 {a:?}, seed 6 {c:?}");
+}
+
+/// P1's complete Town at `TOWN` brought to 0 HP by 17 Mangonels (120 a hit
+/// on buildings, 2040 against 2000 HP) in one volley: P0's Mangonels are
+/// `UnitId(1..=17)`, the Town `BuildingId(1)`.
+fn town_at_zero(rules: &Rules, seed: u64) -> M {
+    let mut m = M::new(rules.clone(), seed);
+    m.run_as(
+        1,
+        vec![place_for(P1, bkind(rules, "town"), TOWN.0, TOWN.1, true)],
+    );
+    m.ok(vec![spawn(ukind(rules, "mangonel"), 15, 31, 17)]);
+    let ids: Vec<u32> = (1..=17).collect();
+    let events = m.ok(vec![attack(&ids, building_t(1))]);
+    assert_eq!(hits(&events).len(), 17, "one volley");
+    assert!(events.contains(&SimEvent::TownAtZeroHp {
+        town: BuildingId(1)
+    }));
+    m
+}
+
+/// Every `Attack` rejection, first failure wins (the target, then the
+/// units), changes nothing, the `rng` sub-hash included: an `Attack` no
+/// longer draws from the RNG. `SimView::check_attack` agrees.
+#[test]
+fn combat_attack_rejections_change_nothing() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    // P0: Skirmisher 1, Yeoman 2. P1: Skirmisher 3. P0's Croft is
+    // BuildingId(1), P1's BuildingId(2).
+    let field = || {
+        let mut m = M::new(rules.clone(), 33);
+        m.ok(vec![
+            spawn(skirm, 10, 30, 1),
+            spawn(yeoman, 10, 32, 1),
+            place(bkind(&rules, "croft"), 4, 26, true),
+        ]);
+        m.run_as(
+            1,
+            vec![
+                spawn_for(P1, skirm, 20, 30, 1),
+                place_for(P1, bkind(&rules, "croft"), 24, 26, true),
+            ],
+        );
+        m
+    };
+    let cases: Vec<(&str, Vec<u32>, TargetId, RejectReason)> = vec![
+        (
+            "no such unit",
+            vec![1],
+            unit_t(99),
+            RejectReason::InvalidTarget,
+        ),
+        (
+            "no such building",
+            vec![1],
+            building_t(99),
+            RejectReason::InvalidTarget,
+        ),
+        ("own unit", vec![1], unit_t(2), RejectReason::InvalidTarget),
+        (
+            "own building",
+            vec![1],
+            building_t(1),
+            RejectReason::InvalidTarget,
+        ),
+        (
+            "target before units",
+            vec![2, 99],
+            unit_t(2),
+            RejectReason::InvalidTarget,
+        ),
+        (
+            "an unarmed Yeoman",
+            vec![2],
+            unit_t(3),
+            RejectReason::NoValidUnits,
+        ),
+        (
+            "another player's unit",
+            vec![3],
+            building_t(2),
+            RejectReason::NoValidUnits,
+        ),
+        (
+            "no such unit",
+            vec![99],
+            unit_t(3),
+            RejectReason::NoValidUnits,
+        ),
+        ("no units", vec![], unit_t(3), RejectReason::NoValidUnits),
+    ];
+    for (name, units, target, want) in cases {
+        let m = field();
+        assert_eq!(
+            m.view().check_attack(
+                P0,
+                &units.iter().map(|&u| UnitId(u)).collect::<Vec<_>>(),
+                target
+            ),
+            Err(want),
+            "{name}"
+        );
+        rejected_without_change(name, &field, 0, attack(&units, target), want);
+    }
+    // A complete Town at 0 HP is no target.
+    let m = town_at_zero(&rules, 33);
+    assert_eq!(
+        m.view().check_attack(P0, &[UnitId(1)], building_t(1)),
+        Err(RejectReason::InvalidTarget)
+    );
+    rejected_without_change(
+        "a Town at 0 HP",
+        &|| town_at_zero(&rules, 33),
+        0,
+        attack(&[1], building_t(1)),
+        RejectReason::InvalidTarget,
+    );
+    // The accepted case agrees with the view: armed own units, deduplicated.
+    let mut m = field();
+    assert_eq!(
+        m.view()
+            .check_attack(P0, &[UnitId(2), UnitId(1), UnitId(1)], unit_t(3)),
+        Ok(vec![UnitId(1)])
+    );
+    m.ok(vec![attack(&[2, 1, 1], unit_t(3))]);
+    let (a, y) = (m.unit(1).unwrap(), m.unit(2).unwrap());
+    assert_eq!((a.target, a.intent), (Some(unit_t(3)), Intent::Attack));
+    assert_eq!(
+        (y.target, y.intent),
+        (None, Intent::Plain),
+        "the Yeoman stays out"
+    );
+}
+
+/// `Stop` clears the target and the order: no hit follows. `Move` does the
+/// same.
+#[test]
+fn combat_stop_clears_the_target() {
+    let rules = load_rules();
+    let (skirm, shield) = (ukind(&rules, "skirmisher"), ukind(&rules, "shieldbearer"));
+    let mut m = M::new(rules.clone(), 34);
+    // P0's Skirmishers either side of P1's Shieldbearer.
+    m.ok(vec![spawn(skirm, 10, 30, 1), spawn(skirm, 12, 30, 1)]);
+    m.run_as(1, vec![spawn_for(P1, shield, 11, 30, 1)]);
+    let events = m.issue_tagged(vec![attack(&[1, 2], unit_t(3))], vec![], 30);
+    assert!(!hits_by(&events, unit_t(1)).is_empty());
+    assert!(!hits_by(&events, unit_t(2)).is_empty());
+    m.ok(vec![
+        stop(&[1]),
+        Command::Move {
+            units: vec![UnitId(2)],
+            target: FxVec2::from_ints(4, 36),
+            queue: false,
+        },
+    ]);
+    for id in [1, 2] {
+        let u = m.unit(id).unwrap();
+        assert_eq!((u.target, u.intent), (None, Intent::Plain), "unit {id}");
+    }
+    assert!(m.unit(1).unwrap().order.is_none());
+    let later = m.step(200);
+    assert!(hits(&later).is_empty(), "{later:?}");
+    assert!(m.hp(3).is_some_and(|(hp, max)| hp < max && hp > 0));
+}
+
+/// What one unit did over a run, sampled after every tick.
+#[derive(Default, Debug)]
+struct Trace {
+    /// Ticks with a move order (a path chase).
+    with_order: u32,
+    /// Ticks without an order while attacking (holding or chasing
+    /// directly).
+    direct: u32,
+    /// Path requests made: ticks at which a request appeared.
+    requests: u32,
+    /// Distinct order goals.
+    goals: Vec<FxVec2>,
+    /// Every tile it stood on was passable.
+    always_passable: bool,
+    /// Largest x reached.
+    max_x: Fx,
+}
+
+/// Step `n` ticks, tracing unit `id` (while it lives).
+fn trace(m: &mut M, id: u32, n: u32) -> (Trace, Vec<(u32, SimEvent)>) {
+    let mut t = Trace {
+        always_passable: true,
+        ..Trace::default()
+    };
+    let mut had_request = m.view().pathing().has_request(UnitId(id));
+    let mut events = Vec::new();
+    for _ in 0..n {
+        events.extend(m.step_tagged(1));
+        let view = m.view();
+        let Some(u) = view.unit(UnitId(id)) else {
+            break;
+        };
+        match &u.order {
+            Some(o) => {
+                t.with_order += 1;
+                if t.goals.last() != Some(&o.goal) {
+                    t.goals.push(o.goal);
+                }
+            }
+            None if u.intent == Intent::Attack => t.direct += 1,
+            None => {}
+        }
+        let request = view.pathing().has_request(UnitId(id));
+        if request && !had_request {
+            t.requests += 1;
+        }
+        had_request = request;
+        t.always_passable &= view.map().passable(view.map().tile_of(u.pos));
+        t.max_x = t.max_x.max(u.pos.x);
+    }
+    (t, events)
+}
+
+/// An explicit `Attack` chases its target with no leash. Within reach (6
+/// tiles edge to edge) on a clear line the chase is direct: no order, no
+/// path request. Farther away the unit walks a path, re-goaled as the
+/// target walks off, and switches to a direct chase once it is close.
+#[test]
+fn combat_attack_chases_an_ordered_target() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    // Direct: P1's Yeoman (UnitId(2)) walks east, 4 tiles ahead of P0's
+    // faster Skirmisher (UnitId(1)).
+    let mut m = M::new(rules.clone(), 35);
+    m.ok(vec![spawn(skirm, 16, 30, 1)]);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 20, 30, 1)]);
+    let walk_off = |m: &mut M, to: (i32, i32)| {
+        m.run_as(
+            1,
+            vec![Command::Move {
+                units: vec![UnitId(2)],
+                target: FxVec2::from_ints(to.0, to.1),
+                queue: false,
+            }],
+        );
+    };
+    walk_off(&mut m, (42, 30));
+    m.ok(vec![attack(&[1], unit_t(2))]);
+    let (t, events) = trace(&mut m, 1, 400);
+    assert!(died_at(&events, 2).is_some(), "caught and killed");
+    assert_eq!((t.with_order, t.requests), (0, 0), "a direct chase: {t:?}");
+    assert!(t.direct > 0);
+    let u = m.unit(1).unwrap();
+    assert_eq!((u.target, u.intent, u.order), (None, Intent::Plain, None));
+
+    // A path chase: the Yeoman starts 20 tiles away and walks south-east.
+    let mut m = M::new(rules.clone(), 35);
+    m.ok(vec![spawn(skirm, 6, 26, 1)]);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 26, 26, 1)]);
+    walk_off(&mut m, (40, 40));
+    m.ok(vec![attack(&[1], unit_t(2))]);
+    let (t, events) = trace(&mut m, 1, 1200);
+    assert!(died_at(&events, 2).is_some(), "caught and killed: {t:?}");
+    assert!(t.with_order > 0, "walked a path first: {t:?}");
+    assert!(t.goals.len() >= 2, "re-goaled as the target moved: {t:?}");
+    assert!(t.direct > 0, "then chased directly: {t:?}");
+    assert!(
+        t.requests <= 2 * u32::try_from(t.goals.len()).unwrap() + 4,
+        "a request per re-goal and the periodic repaths: {t:?}"
+    );
+    eprintln!("chase: {t:?}");
+}
+
+/// Within reach but across the river the line is blocked, so the
+/// attacker walks a path through the ford instead of steering into the
+/// water, and kills the target on the far bank.
+#[test]
+fn combat_attack_paths_across_the_ford_when_the_line_is_blocked() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 36);
+    // Water at x 62..=65 on row 55; the ford is rows 60..=67.
+    let map = m.view().map().clone();
+    assert!((62..=65).all(|x| !map.passable(Tile::new(x, 55))));
+    assert!((62..=65).all(|x| map.passable(Tile::new(x, 60))));
+    m.ok(vec![spawn(skirm, 60, 55, 1)]);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 66, 55, 1)]);
+    let (a, b) = (m.unit(1).unwrap().pos, m.unit(2).unwrap().pos);
+    assert_eq!(
+        a.dist_sq_i64(b),
+        Fx::from_int(36).to_bits(),
+        "6 tiles apart"
+    );
+    m.ok(vec![attack(&[1], unit_t(2))]);
+    let (t, events) = trace(&mut m, 1, 600);
+    assert!(
+        died_at(&events, 2).is_some(),
+        "killed on the far bank: {t:?}"
+    );
+    assert!(t.with_order > 0, "walked a path: {t:?}");
+    assert!(t.always_passable, "never in the water");
+    assert!(t.max_x > Fx::from_int(65), "crossed: {t:?}");
+    eprintln!("ford: {t:?}");
+}
+
+/// A target walled in by eight Watchtowers cannot be reached: the attacker
+/// walks one path toward it, arrives beside the wall and gives up, with no
+/// further requests.
+#[test]
+fn combat_attack_on_an_unreachable_target_gives_up_without_a_request_storm() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let tower = bkind(&rules, "watchtower");
+    let mut m = M::new(rules.clone(), 37);
+    m.ok(vec![spawn(skirm, 10, 30, 1)]);
+    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)];
+    for (dx, dy) in [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+    ] {
+        walls.push(place_for(
+            P1,
+            tower,
+            20u16.wrapping_add_signed(dx),
+            30u16.wrapping_add_signed(dy),
+            true,
+        ));
+    }
+    m.run_as(1, walls);
+    m.ok(vec![attack(&[1], unit_t(2))]);
+    let (t, events) = trace(&mut m, 1, 400);
+    assert!(hits(&events.iter().map(|e| e.1.clone()).collect::<Vec<_>>()).is_empty());
+    let u = m.unit(1).unwrap();
+    assert_eq!(
+        (u.target, u.intent),
+        (None, Intent::Plain),
+        "gave up: {t:?}"
+    );
+    assert!(t.with_order > 0, "it tried a path: {t:?}");
+    assert!(t.requests <= 3, "one path and its periodic repaths: {t:?}");
+    let quiet = trace(&mut m, 1, 200).0;
+    assert_eq!(quiet.requests, 0, "no more requests once given up");
+    assert!(m.view().pathing().is_idle());
+    eprintln!("unreachable: {t:?}");
+}
+
+/// P1's Mangonels destroy P0's complete Watchtower, one of the five
+/// distinct kinds that grew the Seat to tier 2 (no age gate, set in
+/// memory): the footprint is free with one generation bump, the tower's
+/// border source is gone and the field equals a full recompute, and the
+/// Seat falls back to tier 1 and its tier-1 radius.
+#[test]
+fn combat_watchtower_destroyed_frees_footprint_border_and_tier() {
+    let mut rules = load_rules();
+    rules.town_growth_age = None;
+    let r1 = u16::try_from(rules.town_radius_tiles).unwrap();
+    let mut m = M::standard(rules.clone(), 38);
+    // BuildingId(3..=7); the Watchtower is 7.
+    m.ok([
+        ("croft", 28u16, 58u16),
+        ("scriptorium", 28, 67),
+        ("muster_hall", 32, 67),
+        ("engine_yard", 36, 67),
+        ("watchtower", 31, 58),
+    ]
+    .iter()
+    .map(|(id, x, y)| place(bkind(&rules, id), *x, *y, true))
+    .collect());
+    let tower = BuildingId(7);
+    assert_eq!(
+        m.view().building(tower).unwrap().kind,
+        bkind(&rules, "watchtower")
+    );
+    let seat = |m: &M| {
+        (
+            m.view()
+                .building(BuildingId(1))
+                .unwrap()
+                .town_state
+                .unwrap()
+                .tier,
+            m.view().territory().sources()[&BuildingId(1)].radius,
+        )
+    };
+    assert_eq!(seat(&m).0, 2, "grown");
+    assert!(m.view().territory().sources().contains_key(&tower));
+    // Five P1 Mangonels: 5 x 120 against 500 HP. P0's Yeomen are
+    // UnitId(1..=5), P1's UnitId(6..=10), the Mangonels UnitId(11..=15).
+    let first = u32::try_from(m.view().unit_count()).unwrap() + 1;
+    m.run_as(1, vec![spawn_for(P1, ukind(&rules, "mangonel"), 35, 53, 5)]);
+    let ids: Vec<u32> = (first..first + 5).collect();
+    assert!(ids.iter().all(|id| m.unit(*id).unwrap().owner == P1));
+    let generation = m.view().map().cost_grid_generation();
+    assert!(!m.view().map().passable(Tile::new(31, 58)));
+    let events = m.run_as(1, vec![attack(&ids, TargetId::Building(tower))]);
+    assert_eq!(hits(&events).len(), 5);
+    assert_eq!(destroyed(&events), [tower]);
+    assert!(m.view().building(tower).is_none());
+    assert_eq!(m.view().map().cost_grid_generation(), generation + 1);
+    assert!(m.view().map().passable(Tile::new(31, 58)), "footprint free");
+    assert!(!m.view().territory().sources().contains_key(&tower));
+    assert_eq!(m.view().territory(), &m.view().territory().recomputed());
+    assert!(events.contains(&SimEvent::TerritoryChanged));
+    assert!(events.contains(&SimEvent::TownTierChanged {
+        town: BuildingId(1),
+        tier: 1
+    }));
+    assert_eq!(seat(&m), (1, r1), "back to tier 1");
+    // Their target gone, the Mangonels give up next tick.
+    m.step(1);
+    for id in ids {
+        let u = m.unit(id).unwrap();
+        assert_eq!((u.target, u.intent), (None, Intent::Plain));
+    }
+}
+
+/// A destroyed Muster Hall takes its training queue with it: no refund,
+/// no unit, and the pop it charged is free again.
+#[test]
+fn combat_destroyed_building_loses_its_queue_and_frees_pop() {
+    let rules = load_rules();
+    let skirm = ukind(&rules, "skirmisher");
+    let mut m = M::new(rules.clone(), 39);
+    let p1_grain = Command::DebugGrant {
+        owner: P1,
+        resource: res_u8(&rules, "grain"),
+        amount: 1000,
+    };
+    m.run_as(
+        1,
+        vec![
+            place_for(P1, bkind(&rules, "muster_hall"), TOWN.0, TOWN.1, true),
+            p1_grain,
+        ],
+    );
+    m.run_as(1, vec![train(1, skirm), train(1, skirm), train(1, skirm)]);
+    assert_eq!(m.view().building(BuildingId(1)).unwrap().queue.len(), 3);
+    assert_eq!(m.view().pop(P1).0, 3);
+    let stock = m.stock(P1);
+    // Seven Mangonels: 7 x 120 against 800 HP.
+    m.ok(vec![spawn(ukind(&rules, "mangonel"), 15, 31, 7)]);
+    let events = m.ok(vec![attack(&[1, 2, 3, 4, 5, 6, 7], building_t(1))]);
+    assert_eq!(destroyed(&events), [BuildingId(1)]);
+    assert_eq!(m.view().pop(P1).0, 0, "the queued pop is free");
+    assert_eq!(m.stock(P1), stock, "no refund");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SimEvent::TrainingCancelled { .. }))
+    );
+    let later = m.step(400);
+    assert!(
+        !later
+            .iter()
+            .any(|e| matches!(e, SimEvent::UnitSpawned { .. })),
+        "nothing is trained"
+    );
+}
+
+/// Sites of every kind, a Town site included, are destroyed at 0 HP, and
+/// two buildings destroyed in the same tick free their footprints with one
+/// generation bump. The Croft site's builder loses its job.
+#[test]
+fn combat_site_at_zero_hp_is_destroyed_town_sites_included() {
+    let rules = load_rules();
+    let (mangonel, yeoman) = (ukind(&rules, "mangonel"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 40);
+    // P1's Town site is BuildingId(1) (2000 HP), its Croft site
+    // BuildingId(2) (300 HP); its Yeoman UnitId(1) resumes the Croft.
+    let croft = bkind(&rules, "croft");
+    m.run_as(
+        1,
+        vec![
+            place_for(P1, bkind(&rules, "town"), TOWN.0, TOWN.1, false),
+            place_for(P1, croft, 20, 36, false),
+            spawn_for(P1, yeoman, 24, 38, 1),
+        ],
+    );
+    m.run_as(
+        1,
+        vec![Command::Build {
+            unit: UnitId(1),
+            kind: croft,
+            tile: Tile::new(20, 36),
+        }],
+    );
+    assert_eq!(
+        m.unit(1).unwrap().job,
+        Some(sim::Job::Build {
+            site: BuildingId(2)
+        })
+    );
+    assert_eq!(m.view().towns(P1).0, 1, "the Town site counts");
+    // UnitId(2..=18) on the Town site, UnitId(19..=21) on the Croft site.
+    m.ok(vec![
+        spawn(mangonel, 15, 31, 17),
+        spawn(mangonel, 14, 38, 3),
+    ]);
+    let generation = m.view().map().cost_grid_generation();
+    let events = m.ok(vec![
+        attack(&(2..=18).collect::<Vec<_>>(), building_t(1)),
+        attack(&[19, 20, 21], building_t(2)),
+    ]);
+    assert_eq!(hits(&events).len(), 20, "{events:?}");
+    assert_eq!(destroyed(&events), [BuildingId(1), BuildingId(2)]);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SimEvent::TownAtZeroHp { .. })),
+        "a site is not a Town yet"
+    );
+    assert_eq!(
+        m.view().map().cost_grid_generation(),
+        generation + 1,
+        "one bump"
+    );
+    for (x, y) in [
+        (TOWN.0, TOWN.1),
+        (TOWN.0 + 2, TOWN.1 + 2),
+        (20, 36),
+        (21, 37),
+    ] {
+        assert!(m.view().map().passable(Tile::new(x, y)), "({x}, {y})");
+    }
+    assert_eq!(m.view().towns(P1).0, 0);
+    assert_eq!(m.unit(1).unwrap().job, None, "the builder is idle");
+}
+
+/// A complete Town at 0 HP stays: clamped at 0 (17 hits of 120 on 2000 HP
+/// overkill it), `TownAtZeroHp` once, its footprint and border kept. It is
+/// no longer a target, so its attackers stand down and land nothing more,
+/// and its owner may still train there (until M5a's annexation).
+#[test]
+fn combat_town_at_zero_hp_stays_and_is_not_targeted() {
+    let rules = load_rules();
+    let mut m = town_at_zero(&rules, 41);
+    let town = m.view().building(BuildingId(1)).unwrap().clone();
+    assert_eq!(town.hp, 0, "clamped, not negative");
+    assert!(town.town_state.is_some());
+    assert!(!m.view().map().passable(Tile::new(TOWN.0, TOWN.1)));
+    assert!(m.view().territory().sources().contains_key(&BuildingId(1)));
+    let later = m.step(300);
+    assert!(hits(&later).is_empty());
+    assert!(!later.iter().any(|e| matches!(
+        e,
+        SimEvent::TownAtZeroHp { .. } | SimEvent::BuildingDestroyed { .. }
+    )));
+    for id in 1..=17 {
+        let u = m.unit(id).unwrap();
+        assert_eq!((u.target, u.intent), (None, Intent::Plain), "unit {id}");
+    }
+    assert_eq!(
+        m.view().building(BuildingId(1)).unwrap().hp,
+        0,
+        "no regeneration"
+    );
+    let events = m.run_as(
+        1,
+        vec![
+            Command::DebugGrant {
+                owner: P1,
+                resource: res_u8(&rules, "grain"),
+                amount: 100,
+            },
+            train(1, ukind(&rules, "yeoman")),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+}
+
+/// A dead worker takes nothing with it: the slot it worked is free, and a
+/// unit killed while its path request is still queued (behind 100 longer
+/// requests that saturate the budget) leaves no request behind.
+#[test]
+fn combat_dead_worker_frees_its_slot_and_path_request() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    // The slot: P1's Yeoman (UnitId(1)) works P1's Croft (BuildingId(1)).
+    let mut m = M::new(rules.clone(), 42);
+    m.run_as(
+        1,
+        vec![
+            place_for(P1, bkind(&rules, "croft"), 20, 30, true),
+            spawn_for(P1, yeoman, 23, 30, 1),
+        ],
+    );
+    m.run_as(
+        1,
+        vec![Command::Gather {
+            units: vec![UnitId(1)],
+            node: BuildingId(1),
+        }],
+    );
+    m.step(100);
+    assert_eq!(m.view().worked_slots(BuildingId(1)), Some((1, 1, 1)));
+    // P0's Skirmishers UnitId(2..=5).
+    m.ok(vec![spawn(skirm, 24, 33, 4)]);
+    let events = m.issue_tagged(vec![attack(&[2, 3, 4, 5], unit_t(1))], vec![], 100);
+    assert!(died_at(&events, 1).is_some());
+    assert_eq!(
+        m.view().worked_slots(BuildingId(1)),
+        Some((0, 0, 1)),
+        "free"
+    );
+
+    // The request: 100 P1 Yeomen (UnitId(1..=100)) and the victim
+    // (UnitId(101)) are ordered across the river in one Move, so the
+    // victim's request queues behind theirs. Two P0 Mangonels
+    // (UnitId(102..=103), 30 a hit against 40 HP, in range at once) attack
+    // it in the same tick and kill it with their first volley.
+    let setup = || {
+        let mut m = M::new(rules.clone(), 43);
+        m.run_as(1, vec![spawn_for(P1, yeoman, 8, 34, 100)]);
+        m.run_as(1, vec![spawn_for(P1, yeoman, 30, 30, 1)]);
+        m.ok(vec![spawn(ukind(&rules, "mangonel"), 30, 33, 2)]);
+        m
+    };
+    let go = Command::Move {
+        units: (1..=101).map(UnitId).collect(),
+        target: FxVec2::from_ints(110, 100),
+        queue: false,
+    };
+    let mut m = setup();
+    let mut control = setup();
+    let events = m.issue_tagged(vec![attack(&[102, 103], unit_t(101))], vec![go.clone()], 0);
+    control.issue_tagged(vec![], vec![go], 0);
+    let applied = m.sim.tick() - 1;
+    assert_eq!(
+        died_at(&events, 101),
+        Some(applied),
+        "dies in the tick of the Move"
+    );
+    let (view, control_view) = (m.view(), control.view());
+    assert!(
+        control_view.pathing().has_request(UnitId(101)),
+        "without the attack the victim's request is still queued"
+    );
+    assert!(!view.pathing().has_request(UnitId(101)), "cancelled");
+    assert_eq!(
+        view.pathing().outstanding() + 1,
+        control_view.pathing().outstanding()
+    );
+}
+
+/// Buildings destroyed while A* searches are suspended (the budget is
+/// saturated by 50 long requests) change the cost grid under them: the
+/// run is identical tick by tick with the path cache on and off, and with
+/// a restore taken right after the destruction.
+#[test]
+fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
+    let rules = load_rules();
+    let (mangonel, yeoman) = (ukind(&rules, "mangonel"), ukind(&rules, "yeoman"));
+    let cmd = |p: PlayerId, seq: u32, c: Command| PlayerCommand::new(p, seq, c);
+    // P0's Mangonels are UnitId(1..=15) (P0's commands apply first), P1's
+    // Yeomen UnitId(16..=65); P1's two Watchtowers and Croft
+    // BuildingId(1..=3) stand beside the block the Yeomen leave.
+    let mut stream: Vec<(u32, Vec<PlayerCommand>)> = vec![(
+        0,
+        vec![
+            cmd(P0, 0, spawn(mangonel, 12, 26, 15)),
+            cmd(P1, 0, spawn_for(P1, yeoman, 8, 34, 50)),
+            cmd(
+                P1,
+                1,
+                place_for(P1, bkind(&rules, "watchtower"), 16, 30, true),
+            ),
+            cmd(
+                P1,
+                2,
+                place_for(P1, bkind(&rules, "watchtower"), 18, 31, true),
+            ),
+            cmd(P1, 3, place_for(P1, bkind(&rules, "croft"), 16, 33, true)),
+        ],
+    )];
+    stream.push((
+        2,
+        vec![cmd(
+            P1,
+            4,
+            Command::Move {
+                units: (16..=65).map(UnitId).collect(),
+                target: FxVec2::from_ints(110, 100),
+                queue: false,
+            },
+        )],
+    ));
+    stream.push((
+        4,
+        vec![
+            cmd(P0, 1, attack(&[1, 2, 3, 4, 5], building_t(1))),
+            cmd(P0, 2, attack(&[6, 7, 8, 9, 10], building_t(2))),
+            cmd(P0, 3, attack(&[11, 12, 13, 14, 15], building_t(3))),
+        ],
+    ));
+    let at = |tick: u32| -> Vec<PlayerCommand> {
+        stream
+            .iter()
+            .find(|(t, _)| *t == tick)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default()
+    };
+    // The searches are saturated for a few ticks; the requeued ones and the
+    // first periodic repaths follow.
+    const TICKS: u32 = 75;
+    let run = |cache: bool| {
+        let mut sim = M::new(rules.clone(), 44).sim;
+        sim.set_path_cache_enabled(cache);
+        let mut hashes = Vec::new();
+        let mut destroyed_with_search = Vec::new();
+        let mut gone_total = 0;
+        for tick in 0..TICKS {
+            sim.step(&at(tick));
+            let gone = destroyed(&sim.drain_events());
+            gone_total += gone.len();
+            if !gone.is_empty() && sim.view().pathing().active.is_some() {
+                destroyed_with_search.push((tick, sim.snapshot()));
+            }
+            hashes.push((sim.hash(), sim.sub_hashes()));
+        }
+        assert_eq!(gone_total, 3, "both Watchtowers and the Croft");
+        (hashes, destroyed_with_search)
+    };
+    let (on, snaps) = run(true);
+    let (off, _) = run(false);
+    assert!(
+        !snaps.is_empty(),
+        "a building was destroyed while a search was suspended"
+    );
+    assert_eq!(
+        on, off,
+        "hashes agree on every tick with the cache on and off"
+    );
+    let (tick, snap) = &snaps[0];
+    let mut b = M::new(rules.clone(), 44).sim;
+    b.restore(snap).unwrap();
+    for t in tick + 1..TICKS {
+        b.step(&at(t));
+        assert_eq!(
+            (b.hash(), b.sub_hashes()),
+            on[t as usize],
+            "restored at {tick}, tick {t}"
+        );
+    }
+}
+
+/// A snapshot mid-fight (damage taken, cooldowns running, one unit on a
+/// path chase, one chasing directly) restores to a sim that matches the
+/// uninterrupted run on every tick, including 50 units spawned after the
+/// restore.
+#[test]
+fn combat_restore_mid_fight_matches_uninterrupted() {
+    let rules = load_rules();
+    let (skirm, shield, bow) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "shieldbearer"),
+        ukind(&rules, "bowman"),
+    );
+    let cmd = |p: PlayerId, seq: u32, c: Command| PlayerCommand::new(p, seq, c);
+    // P0 (whose commands apply first): Skirmishers 1..=4 at (10, 30) and
+    // a Bowman 5 far west. P1: Shieldbearers 6..=9 at (13, 30) and a
+    // Skirmisher 10 far east.
+    let stream: Vec<(u32, Vec<PlayerCommand>)> = vec![
+        (
+            0,
+            vec![
+                cmd(P0, 0, spawn(skirm, 10, 30, 4)),
+                cmd(P1, 0, spawn_for(P1, shield, 13, 30, 4)),
+                cmd(P0, 1, spawn(bow, 2, 38, 1)),
+                cmd(P1, 1, spawn_for(P1, skirm, 40, 38, 1)),
+            ],
+        ),
+        (
+            1,
+            vec![
+                cmd(P0, 2, attack(&[1, 2], unit_t(6))),
+                cmd(P0, 3, attack(&[3, 4], unit_t(7))),
+                cmd(P0, 4, attack(&[5], unit_t(10))),
+                cmd(P1, 2, attack(&[6, 7, 8, 9], unit_t(1))),
+                cmd(P1, 3, attack(&[10], unit_t(5))),
+            ],
+        ),
+        (
+            200,
+            vec![
+                cmd(P0, 5, spawn(skirm, 6, 26, 25)),
+                cmd(P1, 4, spawn_for(P1, shield, 30, 26, 25)),
+            ],
+        ),
+        (210, vec![cmd(P0, 6, stop(&[3]))]),
+        // The 25 Skirmishers spawned after the restore are 11..=35, the
+        // Shieldbearers 36..=60.
+        (
+            230,
+            vec![cmd(
+                P1,
+                5,
+                attack(&(36..=60).collect::<Vec<_>>(), unit_t(2)),
+            )],
+        ),
+    ];
+    let at = |tick: u32| -> Vec<PlayerCommand> {
+        stream
+            .iter()
+            .find(|(t, _)| *t == tick)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default()
+    };
+    let mut a = M::new(rules.clone(), 45).sim;
+    let snap_at = 60;
+    for tick in 0..snap_at {
+        a.step(&at(tick));
+    }
+    a.drain_events();
+    {
+        let view = a.view();
+        let damaged = view.units().filter(|u| u.damage_taken > 0).count();
+        assert!(damaged > 0, "damage taken");
+        assert!(
+            view.units().any(|u| u.ready_at > a.tick()),
+            "a cooldown running"
+        );
+        assert!(
+            view.units()
+                .any(|u| u.intent == Intent::Attack && u.order.is_some()),
+            "a path chase"
+        );
+    }
+    let mut b = M::new(rules.clone(), 45).sim;
+    b.restore(&a.snapshot()).unwrap();
+    assert_eq!((a.hash(), a.sub_hashes()), (b.hash(), b.sub_hashes()));
+    let mut died = 0;
+    for tick in snap_at..600 {
+        a.step(&at(tick));
+        b.step(&at(tick));
+        assert_eq!(a.hash(), b.hash(), "tick {tick}");
+        assert_eq!(a.sub_hashes(), b.sub_hashes(), "tick {tick}");
+        let ea = a.drain_events();
+        assert_eq!(ea, b.drain_events(), "tick {tick}");
+        died += deaths(&ea).len();
+    }
+    assert!(died > 0, "the fight went on after the restore");
+}
+
+/// Arms raises the hit points and damage of the owner's military units,
+/// living ones included: a wounded Skirmisher keeps the damage it took and
+/// gains the new maximum's difference, and its hits grow at once. The
+/// owner's civilians and the other player's units are untouched.
+#[test]
+fn tech_arms_raises_military_hp_and_damage_including_living_units() {
+    let rules = load_rules();
+    let (skirm, yeoman, shield) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "yeoman"),
+        ukind(&rules, "shieldbearer"),
+    );
+    let mut m = M::new(rules.clone(), 46);
+    // P0: Skirmisher 1, Yeoman 2. P1: Skirmisher 3 (hits P0's once) and
+    // Shieldbearer 4 (P0's target).
+    m.ok(vec![spawn(skirm, 10, 30, 1), spawn(yeoman, 4, 26, 1)]);
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, skirm, 11, 30, 1),
+            spawn_for(P1, shield, 10, 33, 1),
+        ],
+    );
+    let events = m.issue_tagged(vec![], vec![attack(&[3], unit_t(1))], 3);
+    assert_eq!(hits_by(&events, unit_t(3)).len(), 1);
+    m.run_as(1, vec![stop(&[3])]);
+    assert_eq!(m.hp(1), Some((70, 80)), "wounded");
+    assert_eq!(m.hp(2), Some((40, 40)));
+    let mut seen = Vec::new();
+    for (level, id) in ["arms_1", "arms_2", "arms_3"].iter().enumerate() {
+        m.ok(vec![debug_research(tech(&rules, id))]);
+        let (hp, max) = m.hp(1).unwrap();
+        assert_eq!(max - hp, 10, "{id}: the damage taken is kept");
+        assert_eq!(m.hp(2), Some((40, 40)), "{id}: civilians unchanged");
+        assert_eq!(m.hp(3), Some((80, 80)), "{id}: P1 unchanged");
+        assert_eq!(m.hp(4).unwrap().1, 130, "{id}: P1 unchanged");
+        // P0's Skirmisher hits P1's Shieldbearer (no counter row) once.
+        let events = m.issue_tagged(vec![attack(&[1], unit_t(4))], vec![], 30);
+        let landed = hits_by(&events, unit_t(1));
+        m.ok(vec![stop(&[1])]);
+        let damage = m.view().unit_stats(P0, skirm).attack.unwrap().damage;
+        assert!(landed.iter().all(|h| h.1 == damage), "{id}: {landed:?}");
+        assert!(!landed.is_empty(), "{id}");
+        seen.push((level + 1, max, damage));
+    }
+    // floor(80 * 1.1) = 88, then 96, 105; floor(10 * 1.1) = 11, then 12, 13.
+    assert_eq!(seen, [(1, 88, 11), (2, 96, 12), (3, 105, 13)]);
+    eprintln!("arms: skirmisher (level, hp, damage) {seen:?}");
+}
+
+/// Every Arms level strictly raises the hit points of every military kind
+/// and the damage of every one that attacks; range, reach and cooldown do
+/// not change, and civilians do not change at all.
+#[test]
+fn tech_every_arms_level_strictly_raises_every_military_stat() {
+    let rules = load_rules();
+    let mut m = M::new(rules.clone(), 47);
+    let kinds: Vec<UnitKindId> = (0..rules.units.len())
+        .map(|k| UnitKindId(u16::try_from(k).unwrap()))
+        .collect();
+    let snapshot = |m: &M| -> Vec<sim::UnitStats> {
+        kinds.iter().map(|k| m.view().unit_stats(P0, *k)).collect()
+    };
+    let mut levels = vec![snapshot(&m)];
+    for id in ["arms_1", "arms_2", "arms_3"] {
+        m.ok(vec![debug_research(tech(&rules, id))]);
+        levels.push(snapshot(&m));
+    }
+    for (k, def) in rules.units.iter().enumerate() {
+        let military = def.class != rules::UnitClass::Civilian;
+        for w in levels.windows(2) {
+            let (a, b) = (w[0][k], w[1][k]);
+            if military {
+                assert!(b.max_hp > a.max_hp, "{}: {a:?} -> {b:?}", def.id);
+            } else {
+                assert_eq!(a, b, "{}: civilian", def.id);
+            }
+            match (a.attack, b.attack) {
+                (Some(x), Some(y)) => {
+                    assert!(y.damage > x.damage, "{}", def.id);
+                    assert_eq!(
+                        (x.range, x.reach, x.cooldown_ticks),
+                        (y.range, y.reach, y.cooldown_ticks),
+                        "{}",
+                        def.id
+                    );
+                }
+                (None, None) => {}
+                other => panic!("{}: {other:?}", def.id),
+            }
+        }
+        assert_eq!(
+            levels[0][k].max_hp,
+            i32::try_from(def.hp).unwrap(),
+            "{}: Arms 0 is the data",
+            def.id
+        );
+        assert_eq!(
+            m.view().unit_stats(P1, kinds[k]),
+            levels[0][k],
+            "{}: P1 researched nothing",
+            def.id
+        );
+    }
+    let table: Vec<(String, Vec<i32>)> = rules
+        .units
+        .iter()
+        .enumerate()
+        .map(|(k, d)| (d.id.clone(), levels.iter().map(|l| l[k].max_hp).collect()))
+        .collect();
+    eprintln!("arms hp by level: {table:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Seeded random streams over tech and combat (`m4a_*`).
+// ---------------------------------------------------------------------------
+
+/// The repo rules, loaded once (loading `data/` per case would dominate).
+fn shared_rules() -> &'static Rules {
+    static RULES: std::sync::OnceLock<Rules> = std::sync::OnceLock::new();
+    RULES.get_or_init(load_rules)
+}
+
+/// A seeded random command stream over both players in the all-grass west
+/// rectangle of `plains_1v1`, at most 40 units a side: P0 has a complete
+/// Scriptorium (`BuildingId(1)`) and stock, and opens with Mangonels on
+/// P1's complete Watchtower (`BuildingId(2)`) and Skirmishers on P1's
+/// Bowmen; P1 has a Croft site (`BuildingId(3)`) too. Then, at random:
+/// spawns of the armed kinds for either side, `Attack` on enemy units or
+/// on any building id (many rejected), `AttackMove`, `Move` and `Stop`,
+/// and P0's `Research`, `AdvanceAge` and `DebugResearch`. Unit ids are
+/// tracked in allocation order (P0's commands apply first in a tick).
+fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
+    use rand_core::{Rng, SeedableRng};
+    let rules = shared_rules();
+    let armed: Vec<UnitKindId> = [
+        "skirmisher",
+        "shieldbearer",
+        "bowman",
+        "outrider",
+        "mangonel",
+    ]
+    .iter()
+    .map(|id| ukind(rules, id))
+    .collect();
+    let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
+    let mut seq = [0u32; 2];
+    let mut ids: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+    let mut next_id = 1u32;
+    let mut out = Vec::with_capacity(ticks as usize);
+    let side = |p: usize| PlayerId(u8::try_from(p).unwrap());
+    let push = |cmds: &mut Vec<PlayerCommand>, seq: &mut [u32; 2], p: usize, c: Command| {
+        cmds.push(PlayerCommand::new(side(p), seq[p], c));
+        seq[p] += 1;
+    };
+    let mut spawned = |ids: &mut [Vec<u32>; 2], p: usize, n: u32| {
+        ids[p].extend(next_id..next_id + n);
+        next_id += n;
+    };
+    let pick = |rng: &mut rand_pcg::Pcg32, v: &[u32], n: u32| -> Vec<u32> {
+        if v.is_empty() {
+            return Vec::new();
+        }
+        (0..n)
+            .map(|_| v[usize::try_from(rng.next_u32()).unwrap() % v.len()])
+            .collect()
+    };
+    let point = |rng: &mut rand_pcg::Pcg32| {
+        FxVec2::from_ints(
+            2 + i32::try_from(rng.next_u32() % 40).unwrap(),
+            25 + i32::try_from(rng.next_u32() % 16).unwrap(),
+        )
+    };
+    for t in 0..ticks {
+        let mut cmds = Vec::new();
+        if t == 0 {
+            let s = bkind(rules, "scriptorium");
+            push(
+                &mut cmds,
+                &mut seq,
+                0,
+                place(s, SCRIPTORIUM_A.0, SCRIPTORIUM_A.1, true),
+            );
+            for r in ["grain", "lumber", "ore", "lore"] {
+                push(&mut cmds, &mut seq, 0, grant(res(rules, r), 2000));
+            }
+            push(
+                &mut cmds,
+                &mut seq,
+                0,
+                spawn(ukind(rules, "mangonel"), 15, 31, 5),
+            );
+            spawned(&mut ids, 0, 5);
+            push(
+                &mut cmds,
+                &mut seq,
+                0,
+                spawn(ukind(rules, "skirmisher"), 14, 36, 6),
+            );
+            spawned(&mut ids, 0, 6);
+            let w = bkind(rules, "watchtower");
+            push(&mut cmds, &mut seq, 1, place_for(P1, w, 22, 31, true));
+            push(
+                &mut cmds,
+                &mut seq,
+                1,
+                place_for(P1, bkind(rules, "croft"), 26, 26, false),
+            );
+            push(
+                &mut cmds,
+                &mut seq,
+                1,
+                spawn_for(P1, ukind(rules, "bowman"), 20, 36, 6),
+            );
+            spawned(&mut ids, 1, 6);
+        } else if t == 1 {
+            push(&mut cmds, &mut seq, 0, attack(&ids[0][..5], building_t(2)));
+            for i in 0..6 {
+                push(
+                    &mut cmds,
+                    &mut seq,
+                    0,
+                    attack(&[ids[0][5 + i]], unit_t(ids[1][i])),
+                );
+            }
+            push(&mut cmds, &mut seq, 1, attack(&ids[1], unit_t(ids[0][5])));
+        } else {
+            let roll = rng.next_u32() % 100;
+            let p = usize::try_from(rng.next_u32() % 2).unwrap();
+            let n = 1 + rng.next_u32() % 4;
+            if roll < 6 && ids[p].len() < 40 {
+                let k = armed[usize::try_from(rng.next_u32()).unwrap() % armed.len()];
+                let at = point(&mut rng);
+                push(
+                    &mut cmds,
+                    &mut seq,
+                    p,
+                    Command::DebugSpawn {
+                        owner: side(p),
+                        kind: k,
+                        at,
+                        count: u16::try_from(n).unwrap(),
+                    },
+                );
+                spawned(&mut ids, p, n);
+            } else if roll < 30 {
+                let units = pick(&mut rng, &ids[p], n);
+                let target = if rng.next_u32() % 10 < 7 {
+                    pick(&mut rng, &ids[1 - p], 1)
+                        .first()
+                        .map_or(unit_t(0), |u| unit_t(*u))
+                } else {
+                    building_t(1 + rng.next_u32() % 5)
+                };
+                push(&mut cmds, &mut seq, p, attack(&units, target));
+            } else if roll < 36 {
+                let units = pick(&mut rng, &ids[p], n).into_iter().map(UnitId).collect();
+                let target = point(&mut rng);
+                push(
+                    &mut cmds,
+                    &mut seq,
+                    p,
+                    Command::AttackMove { units, target },
+                );
+            } else if roll < 40 {
+                let units = pick(&mut rng, &ids[p], n).into_iter().map(UnitId).collect();
+                let target = point(&mut rng);
+                push(
+                    &mut cmds,
+                    &mut seq,
+                    p,
+                    Command::Move {
+                        units,
+                        target,
+                        queue: false,
+                    },
+                );
+            } else if roll < 44 {
+                let units = pick(&mut rng, &ids[p], 1);
+                push(&mut cmds, &mut seq, p, stop(&units));
+            } else if roll < 47 {
+                let tech = TechId(u16::try_from(rng.next_u32() % 12).unwrap());
+                push(&mut cmds, &mut seq, 0, research(1, tech));
+            } else if roll < 48 {
+                push(&mut cmds, &mut seq, 0, advance());
+            } else if roll < 50 {
+                let tech = TechId(u16::try_from(rng.next_u32() % 12).unwrap());
+                push(&mut cmds, &mut seq, 0, debug_research(tech));
+            }
+        }
+        cmds.sort_by_key(PlayerCommand::sort_key);
+        out.push(cmds);
+    }
+    out
+}
+
+/// Run `stream` on the empty-start scenario with `seed`: the hash after
+/// every tick, and the events.
+fn run_m4a(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> (Vec<u64>, Vec<SimEvent>) {
+    let mut sim = Sim::new(
+        MatchSetup::scenario(shared_rules(), seed),
+        shared_rules().clone(),
+        Box::new(NoAi),
+    );
+    sim.set_path_cache_enabled(cache);
+    let mut hashes = Vec::with_capacity(stream.len());
+    let mut events = Vec::new();
+    for cmds in stream {
+        sim.step(cmds);
+        hashes.push(sim.hash());
+        events.extend(sim.drain_events());
+    }
+    (hashes, events)
+}
+
+/// The random stream really researches, kills and destroys: over 8 seeds
+/// of 300 ticks, techs complete, units die on both sides, buildings are
+/// destroyed, and Attacks are both accepted and rejected.
+#[test]
+fn m4a_random_stream_exercises_combat_and_tech() {
+    let (mut researched, mut died, mut destroyed_n, mut hit, mut rejected_attacks) =
+        (0, [0usize; 2], 0, 0, 0);
+    for seed in 0..8 {
+        let stream = random_m4a_commands(seed, 300);
+        let attacks: std::collections::BTreeSet<(PlayerId, u32)> = stream
+            .iter()
+            .flatten()
+            .filter(|pc| matches!(pc.cmd, Command::Attack { .. }))
+            .map(PlayerCommand::sort_key)
+            .collect();
+        let (_, events) = run_m4a(seed, &stream, true);
+        let mut owner = std::collections::BTreeMap::new();
+        for pc in stream.iter().flatten() {
+            if let Command::DebugSpawn {
+                owner: o, count, ..
+            } = pc.cmd
+            {
+                for _ in 0..count {
+                    let id = u32::try_from(owner.len()).unwrap() + 1;
+                    owner.insert(UnitId(id), o);
+                }
+            }
+        }
+        for e in &events {
+            match e {
+                SimEvent::ResearchCompleted { .. } => researched += 1,
+                SimEvent::UnitDied { unit } => died[usize::from(owner[unit].0)] += 1,
+                SimEvent::BuildingDestroyed { .. } => destroyed_n += 1,
+                SimEvent::Hit { .. } => hit += 1,
+                SimEvent::CommandRejected { player, seq, .. }
+                    if attacks.contains(&(*player, *seq)) =>
+                {
+                    rejected_attacks += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    eprintln!(
+        "m4a stream, 8 seeds: researched={researched} died={died:?} destroyed={destroyed_n} hits={hit} rejected attacks={rejected_attacks}"
+    );
+    assert!(researched > 0 && destroyed_n > 0 && hit > 0);
+    assert!(died[0] > 0 && died[1] > 0, "{died:?}");
+    assert!(rejected_attacks > 0);
+}
+
+/// Proptest case count: `PROPTEST_CASES` when set, else 256 in CI and 8
+/// locally (the `cargo test -p sim` budget).
+fn proptest_cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if std::env::var_os("CI").is_some() {
+            256
+        } else {
+            8
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: proptest_cases(),
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn m4a_proptest_streams_are_deterministic(seed in any::<u64>(), ticks in 50u32..300) {
+        let stream = random_m4a_commands(seed, ticks);
+        let (a, _) = run_m4a(seed, &stream, true);
+        let (b, _) = run_m4a(seed, &stream, true);
+        prop_assert_eq!(a, b);
+    }
+
+    #[test]
+    fn m4a_path_cache_is_transparent(seed in any::<u64>(), ticks in 50u32..300) {
+        let stream = random_m4a_commands(seed, ticks);
+        let (on, _) = run_m4a(seed, &stream, true);
+        let (off, _) = run_m4a(seed, &stream, false);
+        prop_assert_eq!(on, off, "hashes must agree on every tick with the cache on and off");
+    }
 }

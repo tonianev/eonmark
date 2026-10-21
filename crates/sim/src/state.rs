@@ -12,9 +12,18 @@
 //! 2. Let the AI think over a read-only view; queue its commands likewise.
 //! 3. Apply every command due this tick in `(player, seq)` order.
 //! 4. Pathing: `Pathing::service` with `rules.path_budget_expansions`;
-//!    completed paths are stored on the units' orders.
-//! 5. Movement: rebuild the spatial grid, then `movement::step`; units that
-//!    need a repath get a new `PathRequest`.
+//!    completed paths are stored on the units' orders. An unreachable goal
+//!    clears the unit's order and any combat intent.
+//! 5. Movement and combat: rebuild the spatial grid (start-of-tick
+//!    positions), then
+//!    - 5a `combat::think`: each unit with an explicit `Attack`, in id
+//!      order, holds, chases its target directly, walks a path toward it
+//!      or gives up;
+//!    - 5b `movement::step` with those engagements; units that need a
+//!      repath get a new `PathRequest`;
+//!    - 5c `combat::resolve`: hits from the post-movement positions,
+//!      summed per target and applied at once, then the dead units and the
+//!      destroyed buildings are removed.
 //! 6. Economy and Towns, each in id order:
 //!    - 6a construction: sites whose builder is at work gain progress; a
 //!      finished site completes (a Town or Watchtower adds its border, its
@@ -31,12 +40,15 @@
 //! 7. `tick += 1`.
 
 use crate::ai_hook::{AiController, SimView};
+use crate::combat;
 use crate::command::{Command, PlayerCommand, sort_commands};
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, Economy};
 use crate::fx::{Fx, FxVec2};
 use crate::gather;
-use crate::ids::{BuildingId, BuildingKindId, IdGen, PlayerId, TechId, Tile, UnitId, UnitKindId};
+use crate::ids::{
+    BuildingId, BuildingKindId, IdGen, PlayerId, TargetId, TechId, Tile, UnitId, UnitKindId,
+};
 use crate::map::Map;
 use crate::movement::{self, SpatialGrid};
 use crate::pathing::{PathRequest, Pathing};
@@ -44,7 +56,7 @@ use crate::tech::{self, TechState};
 use crate::territory::TerritoryField;
 use crate::town;
 use crate::training;
-use rand_core::{Rng, SeedableRng};
+use rand_core::SeedableRng;
 use rules::{Rules, UnitKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -111,7 +123,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// and completion; tier 2 needs `town_growth_age` (the Masonry Age).
 /// `Train` and `Build` check the age (and `Train` the kind's
 /// `requires_tech`). `DebugResearch` is appended to `Command`.
-pub const SIM_VERSION: u32 = 12;
+///
+/// 13: M4a combat core. New hashed state: `Unit::damage_taken`,
+/// `ready_at`, `target` and `intent` (sub-hash `units`) and
+/// `Building::ready_at` (`buildings`). `Attack` has a real handler
+/// (`InvalidTarget`, `NoValidUnits`; `NotImplemented` is gone) and no
+/// longer draws from the RNG, so no rejection draws. Step 5 runs
+/// `combat::think` before movement (an explicit attacker holds, chases its
+/// target directly or along a path, or gives up; no leash) and
+/// `combat::resolve` after it: hits from the post-movement positions,
+/// summed per target, then the dead are removed and buildings at 0 HP
+/// destroyed, sites of every kind included, while a complete Town stays at
+/// 0 HP. The Arms `UnitHp` and `UnitDamage` rows apply.
+pub const SIM_VERSION: u32 = 13;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,7 +279,26 @@ pub struct Post {
     pub returning: bool,
 }
 
-/// A unit. Combat fields arrive in M4a.
+/// What a unit means to do about combat (`docs/design/combat.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Intent {
+    /// No combat order.
+    #[default]
+    Plain,
+    /// Attack-moving toward `goal` (the unit's own spiral goal). Set by
+    /// `AttackMove` from the M4a combat behaviour slice; until then
+    /// `AttackMove` is applied exactly like `Move` and nothing sets it.
+    AttackMove {
+        /// The unit's goal.
+        goal: FxVec2,
+    },
+    /// Attacking `Unit::target`, ordered by `Command::Attack`: chased with
+    /// no leash until it dies, is destroyed, becomes invalid or the unit
+    /// gives up on an unreachable target.
+    Attack,
+}
+
+/// A unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
     /// Id.
@@ -284,12 +327,23 @@ pub struct Unit {
     /// Tick at which an idle worker next looks for work; `None` while busy
     /// or not yet idle for a tick.
     pub seek_at: Option<u32>,
+    /// Damage taken so far. The unit's hit points are its kind's maximum,
+    /// resolved through the owner's `UnitHp` rows every tick, minus this,
+    /// so an Arms level raises a living unit's hit points too; the unit
+    /// dies once this reaches the maximum.
+    pub damage_taken: i32,
+    /// First tick at which the unit may hit again (the cooldown).
+    pub ready_at: u32,
+    /// What the unit attacks, if anything.
+    pub target: Option<TargetId>,
+    /// Why it has that target.
+    pub intent: Intent,
 }
 
 impl Unit {
     /// A new unit of `kind` standing at the centre of `tile`, facing east,
-    /// with no order and no job; speed and radius are converted from the
-    /// kind once, here.
+    /// with no order, no job and no damage taken; speed and radius are
+    /// converted from the kind once, here.
     pub fn spawn(
         id: UnitId,
         owner: PlayerId,
@@ -311,7 +365,19 @@ impl Unit {
             post: None,
             job: None,
             seek_at: None,
+            damage_taken: 0,
+            ready_at: 0,
+            target: None,
+            intent: Intent::Plain,
         }
+    }
+
+    /// Forget any combat order: no target, [`Intent::Plain`]. Every command
+    /// that gives the unit something else to do (`Move`, `AttackMove`,
+    /// `Stop`, `Gather`, `Build`) calls it.
+    pub(crate) fn disengage(&mut self) {
+        self.target = None;
+        self.intent = Intent::Plain;
     }
 }
 
@@ -391,7 +457,9 @@ pub struct Building {
     pub kind: BuildingKindId,
     /// North-west footprint tile.
     pub tile: Tile,
-    /// Hit points (damage arrives in M4a).
+    /// Hit points: the kind's `hp` at placement, sites included, less the
+    /// damage taken. A building other than a complete Town is destroyed at
+    /// 0 or below; a complete Town stays, clamped at 0.
     pub hp: i32,
     /// Site or complete.
     pub construction: Construction,
@@ -409,6 +477,9 @@ pub struct Building {
     pub queue: Vec<QueueEntry>,
     /// Where trained units walk, if set.
     pub rally: Option<FxVec2>,
+    /// First tick at which the building may shoot again (Watchtowers and
+    /// Towns shoot from the M4a combat behaviour slice); 0 at placement.
+    pub ready_at: u32,
 }
 
 /// Why a command was rejected.
@@ -428,8 +499,6 @@ pub enum RejectReason {
     /// footprint can be walked to by the builder (for a move, defensive;
     /// pathing step 1 prevents it).
     Unreachable,
-    /// The command's handler arrives in a later milestone.
-    NotImplemented,
     /// A footprint tile is not the player's territory.
     OutsideBorders,
     /// The player cannot pay; `resource` is the first short one, by index
@@ -498,6 +567,9 @@ pub enum RejectReason {
     FinalAge,
     /// `AdvanceAge { player }` names a player other than the issuer.
     PlayerMismatch,
+    /// `Attack`: the target does not exist, is the player's own, or is a
+    /// building with no hit points left (a complete Town at 0 HP).
+    InvalidTarget,
 }
 
 /// Something the presenter or a test may want to know about a tick. Events
@@ -573,6 +645,33 @@ pub enum SimEvent {
         player: PlayerId,
         /// The age entered (index into `ages.ron`).
         age: u8,
+    },
+    /// An attack landed. Every hit of a tick is collected before any is
+    /// applied, so a unit killed in the same tick still lands its own.
+    Hit {
+        /// Who hit.
+        attacker: TargetId,
+        /// Who was hit.
+        target: TargetId,
+        /// Damage after the counter multiplier and any variance.
+        damage: i32,
+    },
+    /// A unit's damage reached its hit points; it was removed.
+    UnitDied {
+        /// The unit.
+        unit: UnitId,
+    },
+    /// A building or site reached 0 HP and was removed (no refund; its
+    /// queue is lost).
+    BuildingDestroyed {
+        /// The building.
+        building: BuildingId,
+    },
+    /// A complete Town reached 0 HP. It stays, clamped at 0; it can no
+    /// longer be attacked.
+    TownAtZeroHp {
+        /// The Town.
+        town: BuildingId,
     },
 }
 
@@ -856,21 +955,28 @@ impl Sim {
                 }
                 None => {
                     u.order = None;
+                    u.disengage();
                     self.events.push(SimEvent::PathUnreachable { unit });
                 }
             }
         }
 
-        // 5. Movement. A unit that still has a request outstanding (queued
-        //    or suspended) is not re-requested: a replacement would move it
-        //    to the back of the queue and could starve it under a saturated
+        // 5. Movement and combat. 5a: explicit attackers decide whether to
+        //    hold, chase directly, walk a path or give up (from the
+        //    start-of-tick positions). 5b: movement, with those engagements.
+        //    A unit that still has a request outstanding (queued or
+        //    suspended) is not re-requested: a replacement would move it to
+        //    the back of the queue and could starve it under a saturated
         //    budget. Its periodic timer is pushed back either way.
         self.grid.rebuild(&self.state.units);
+        let stats = combat::Stats::new(&self.state, &self.rules);
+        let plan = combat::think(&mut self.state, &self.rules, &stats, tick);
         let repath = movement::step(
             &mut self.state.units,
             &self.state.map,
             &self.grid,
             &self.rules,
+            &plan.engage,
             tick,
             &mut self.events,
         );
@@ -899,6 +1005,9 @@ impl Sim {
                 order.repath_at = tick + self.rules.repath_interval_ticks();
             }
         }
+        // 5c. Hits from the post-movement positions, then the dead and the
+        //     destroyed.
+        combat::resolve(&mut self.state, &self.rules, &stats, tick, &mut self.events);
 
         // 6. Economy and Towns: construction, training, jobs and idle
         //    seeking, income.
@@ -930,9 +1039,10 @@ impl Sim {
     }
 
     /// Order the owned subset of `units` to `target`: one spiral-offset goal
-    /// per unit, a path request each, posts cleared. Shared by `Move` and
-    /// the M2 `AttackMove` placeholder. Rejects with `NoValidUnits` when no
-    /// unit qualifies.
+    /// per unit, a path request each, posts, jobs and combat orders
+    /// cleared. Shared by `Move` and `AttackMove` (applied like `Move`
+    /// until the M4a combat behaviour slice). Rejects with `NoValidUnits`
+    /// when no unit qualifies.
     fn apply_move(&mut self, pc: &PlayerCommand, units: &[UnitId], target: FxVec2) {
         let tick = self.state.tick;
         let movers = self.owned_units(pc.player, units);
@@ -953,6 +1063,7 @@ impl Sim {
             u.post = None;
             u.job = None;
             u.seek_at = None;
+            u.disengage();
             let from = self.state.map.tile_of(u.pos);
             let to = self.state.map.tile_of(goal);
             self.state.pathing.request(PathRequest {
@@ -988,9 +1099,10 @@ impl Sim {
                 self.apply_move(&pc, units, *target);
             }
             Command::AttackMove { units, target } => {
-                // M2 placeholder: identical to Move until combat (M4a) adds
-                // target acquisition on the way. The sim must accept it so
-                // the game's A-then-click order never produces a rejection.
+                // Identical to Move until the M4a combat behaviour slice
+                // adds target acquisition on the way. The sim must accept it
+                // so the game's A-then-click order never produces a
+                // rejection.
                 self.apply_move(&pc, units, *target);
             }
             Command::Stop { units } => {
@@ -1005,6 +1117,7 @@ impl Sim {
                         u.post = None;
                         u.job = None;
                         u.seek_at = None;
+                        u.disengage();
                     }
                     self.state.pathing.cancel(unit);
                 }
@@ -1161,13 +1274,13 @@ impl Sim {
                     ),
                 }
             }
-            Command::Attack { .. } => {
-                // The handler arrives with the M4a combat slice. Until then
-                // the command is counted and advances the rng once, as in
-                // M0, so the hash keeps depending on the full command
-                // stream.
-                self.state.rng.next_u32();
-                self.reject(&pc, RejectReason::NotImplemented);
+            Command::Attack { units, target } => {
+                // Validated purely, so a rejection changes nothing and,
+                // since the M4a combat slice, draws nothing from the rng.
+                match combat::validate_attack(&self.state, &self.rules, pc.player, units, *target) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(attackers) => combat::apply_attack(&mut self.state, &attackers, *target),
+                }
             }
         }
     }

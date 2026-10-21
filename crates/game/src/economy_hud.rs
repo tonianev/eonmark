@@ -76,7 +76,6 @@ pub fn reject_key(reason: &RejectReason) -> &'static str {
         RejectReason::DebugCommandsDisabled => "debug_commands_disabled",
         RejectReason::UnknownUnitKind => "unknown_unit_kind",
         RejectReason::Unreachable => "unreachable",
-        RejectReason::NotImplemented => "not_implemented",
         RejectReason::OutsideBorders => "outside_borders",
         RejectReason::CannotAfford { .. } => "cannot_afford",
         RejectReason::TownLimitReached => "town_limit_reached",
@@ -105,6 +104,7 @@ pub fn reject_key(reason: &RejectReason) -> &'static str {
         RejectReason::NotEnoughTechs => "not_enough_techs",
         RejectReason::FinalAge => "final_age",
         RejectReason::PlayerMismatch => "player_mismatch",
+        RejectReason::InvalidTarget => "invalid_target",
     }
 }
 
@@ -368,7 +368,6 @@ mod tests {
             RejectReason::DebugCommandsDisabled,
             RejectReason::UnknownUnitKind,
             RejectReason::Unreachable,
-            RejectReason::NotImplemented,
             RejectReason::OutsideBorders,
             RejectReason::CannotAfford { resource: 0 },
             RejectReason::TownLimitReached,
@@ -397,6 +396,7 @@ mod tests {
             RejectReason::NotEnoughTechs,
             RejectReason::FinalAge,
             RejectReason::PlayerMismatch,
+            RejectReason::InvalidTarget,
         ]
     }
 

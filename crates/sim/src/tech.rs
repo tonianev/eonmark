@@ -29,7 +29,7 @@ use crate::ids::{BuildingId, BuildingKindId, PlayerId, TechId, UnitKindId};
 use crate::state::{Construction, QueueEntry, QueueItem, RejectReason, SimEvent, State};
 use crate::town;
 use rules::modifiers::{self, StatPath};
-use rules::{MAX_BORDER_RADIUS_TILES, Rules};
+use rules::{MAX_BORDER_RADIUS_TILES, Rules, UnitKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -122,6 +122,64 @@ pub(crate) fn town_radius(state: &State, rules: &Rules, p: PlayerId, tier: u8) -
     let base = i64::from(rules.town_radius_base(tier));
     let v = stat(state, rules, p, &StatPath::TownBorderRadius, base);
     u32::try_from(v.clamp(1, i64::from(MAX_BORDER_RADIUS_TILES))).expect("clamped")
+}
+
+/// Resolve a unit stat of `kind` for `p` from `base`, in the order of
+/// [`stat`]: the rows whose target is `UnitHp(sel)` (when `hp`) or
+/// `UnitDamage(sel)` (otherwise) with a selector that reaches the kind.
+/// Unclamped; the wrappers below clamp.
+fn unit_stat(
+    state: &State,
+    rules: &Rules,
+    p: PlayerId,
+    kind: &UnitKind,
+    hp: bool,
+    base: u32,
+) -> i64 {
+    let researched = state.tech.player(p).researched.iter().map(|t| t.0);
+    modifiers::resolve(
+        i64::from(base),
+        rules.modifier_rows(FACTION, researched).filter(|m| {
+            let stat = if hp {
+                matches!(m.target, StatPath::UnitHp(_))
+            } else {
+                matches!(m.target, StatPath::UnitDamage(_))
+            };
+            stat && m.target.matches(kind)
+        }),
+    )
+}
+
+/// The hit points of `p`'s units of `kind`: the kind's `hp` with the
+/// `UnitHp` rows (Arms), at least 1. Resolved every time it is read, so a
+/// tech completed mid-fight raises the hit points of living units too.
+///
+/// # Panics
+///
+/// If `kind` is not in the rules.
+pub(crate) fn unit_max_hp(state: &State, rules: &Rules, p: PlayerId, kind: UnitKindId) -> i32 {
+    let def = rules.unit_kind(kind.0).expect("validated unit kind");
+    let v = unit_stat(state, rules, p, def, true, def.hp);
+    i32::try_from(v.max(1)).expect("data-check bounds unit hp within MAX_HP")
+}
+
+/// The damage per hit of `p`'s units of `kind`, before counters and
+/// variance: the kind's attack `damage` with the `UnitDamage` rows (Arms),
+/// at least 0; `None` for a kind without an attack.
+///
+/// # Panics
+///
+/// If `kind` is not in the rules.
+pub(crate) fn unit_damage(
+    state: &State,
+    rules: &Rules,
+    p: PlayerId,
+    kind: UnitKindId,
+) -> Option<i32> {
+    let def = rules.unit_kind(kind.0).expect("validated unit kind");
+    let attack = def.attack.as_ref()?;
+    let v = unit_stat(state, rules, p, def, false, attack.damage);
+    Some(i32::try_from(v.max(0)).expect("data-check bounds unit damage within MAX_HP"))
 }
 
 /// What researching `tech` costs `p` now and how many ticks it takes: each

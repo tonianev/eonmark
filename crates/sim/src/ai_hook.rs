@@ -5,11 +5,14 @@
 //! state, draws no randomness of its own, and its commands go through the
 //! same delay queue as a human's.
 
+use crate::combat::{self, UnitStats};
 use crate::command::Command;
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, PlayerEconomy, RateInfo};
 use crate::gather;
-use crate::ids::{BuildingId, BuildingKindId, PlayerId, TechId, Tile, UnitId, UnitKindId};
+use crate::ids::{
+    BuildingId, BuildingKindId, PlayerId, TargetId, TechId, Tile, UnitId, UnitKindId,
+};
 use crate::map::Map;
 use crate::pathing::Pathing;
 use crate::state::{Building, MatchSetup, Player, RejectReason, State, Unit};
@@ -236,6 +239,39 @@ impl<'a> SimView<'a> {
     ) -> Result<Vec<i64>, RejectReason> {
         self.check_player(p)?;
         construction::validate_build_kind(self.state, self.rules, p, kind)
+    }
+
+    /// `p`'s combat stats for unit kind `kind` now: hit points with the
+    /// `UnitHp` rows and, for a kind that attacks, damage with the
+    /// `UnitDamage` rows, range, reach and cooldown (Arms raises hit points
+    /// and damage).
+    ///
+    /// # Panics
+    ///
+    /// If the player or `kind` does not exist.
+    pub fn unit_stats(&self, p: PlayerId, kind: UnitKindId) -> UnitStats {
+        combat::unit_stats(self.state, self.rules, p, kind)
+    }
+
+    /// A unit's hit points now and its maximum, `(hp, max_hp)`; `None`
+    /// when the unit does not exist (or has died).
+    pub fn unit_hp(&self, id: UnitId) -> Option<(i32, i32)> {
+        let u = self.state.units.get(&id)?;
+        let max = combat::unit_stats(self.state, self.rules, u.owner, u.kind).max_hp;
+        Some((max - u.damage_taken, max))
+    }
+
+    /// Whether `Attack { units, target }` from `p` would be accepted now,
+    /// and which units would attack (`p`'s listed units of a kind that
+    /// attacks, in id order).
+    pub fn check_attack(
+        &self,
+        p: PlayerId,
+        units: &[UnitId],
+        target: TargetId,
+    ) -> Result<Vec<UnitId>, RejectReason> {
+        self.check_player(p)?;
+        combat::validate_attack(self.state, self.rules, p, units, target)
     }
 
     /// The rules this match runs under.

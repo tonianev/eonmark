@@ -16,7 +16,7 @@ use rand_core::{Rng, SeedableRng};
 use sim::scenarios::{BENCH_CROSS_SEED, EAST, Stream, WEST};
 use sim::{
     BuildingId, BuildingKindId, Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, Rules, Sim,
-    TechId, Tile, UnitId, UnitKindId,
+    TargetId, TechId, Tile, UnitId, UnitKindId,
 };
 
 /// A point in the river (impassable) north of the central ford. `bench
@@ -217,8 +217,9 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 /// Stops for player 0, and invalid commands of every rejectable kind
 /// (unknown player, no valid units, unknown unit kind, not enough techs,
 /// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`, `Research`),
-/// a `Build` by a unit that does not exist, and everything player 1 issues
-/// after it surrenders). Returns the
+/// a `Build` by a unit that does not exist, an `Attack` on a unit that does
+/// not exist, and everything player 1 issues after it surrenders). Returns
+/// the
 /// per-tick commands and the `(player, seq)` keys the sim must reject.
 /// `movement` enables Move commands.
 pub fn random_commands(
@@ -400,6 +401,20 @@ pub fn random_commands(
                 Command::Research {
                     building: BuildingId(0),
                     tech: TechId(0),
+                },
+            ));
+            rejected.push((PlayerId(0), seq[0]));
+            seq[0] += 1;
+        } else if (61..65).contains(&bad) {
+            // InvalidTarget: UnitId(0) is never allocated, and the target
+            // is checked before the units. (Through the M4a tech slice an
+            // Attack was `NotImplemented` and drew from the rng.)
+            cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq[0],
+                Command::Attack {
+                    units: vec![UnitId(1)],
+                    target: TargetId::Unit(UnitId(0)),
                 },
             ));
             rejected.push((PlayerId(0), seq[0]));

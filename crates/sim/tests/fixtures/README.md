@@ -20,6 +20,21 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-21 at `rules_version` 15, `SIM_VERSION` 13 with
+`just rerecord` (M4a combat core: `Unit` gained the hashed
+`damage_taken`, `ready_at`, `target` and `intent`, and `Building` gained
+`ready_at`). No fixture attacks (none issues an `Attack`, and nothing
+acquires targets until the combat behaviour slice), so every unit and
+building behaves as before: a per-tick `sim-cli hash-dump --every 1` of
+each fixture as recorded at `SIM_VERSION` 12, run by that binary with its
+own `data/`, against the re-recorded fixture run by the `SIM_VERSION` 13
+binary with the current `data/`, differs in the whole hash and the
+`units` column on every tick with a unit, in the `buildings` column on
+every tick of the two economy fixtures (the only ones with buildings),
+and in no other column; re-simulating every fixture emits no `Hit`,
+`UnitDied`, `BuildingDestroyed` or `TownAtZeroHp` event. Every `.hash`
+file changes for that reason.
+
 Recorded 2026-10-21 at `rules_version` 14, `SIM_VERSION` 12 with
 `just rerecord` (M4a tech: the hashed state gained `State.tech`, every
 player's age and researched techs, which the `tech` sub-hash now covers

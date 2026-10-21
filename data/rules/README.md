@@ -46,7 +46,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 13 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 14 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -90,12 +90,13 @@ M4a's rules data (`rules_version` 13) replaced `yield_cap_table` with
 `yield_cap_base` and removed `pop_cap_per_arms_level`: the Trade rows
 (`YieldCap Set 100`, `150`, `200`) and the Arms rows (`PopCap Add 25`) in
 `techs.ron` are now the only source of the higher values, so a file that
-still has either old field fails to load naming it. The sim reads
-`yield_cap_base`, `pop_cap_base`, `town_limit_base` and the Town radii
-directly until the M4a tech slice applies the Modifier rows;
-`town_growth_age`, `damage_variance_permille`, `acquire_range_tiles` and
-`chase_regoal_tiles` are validated now and read from the M4a tech and
-combat slices.
+still has either old field fails to load naming it. Since the M4a tech
+slice (`rules_version` 14) the sim resolves `yield_cap_base`,
+`pop_cap_base`, `town_limit_base` and the Town radii through the
+faction's and the researched techs' Modifier rows and reads
+`town_growth_age`; `damage_variance_permille`, `acquire_range_tiles` and
+`chase_regoal_tiles` are validated now and read from the M4a combat
+slices.
 
 The M0 `vision` block (`unit_tiles`, `building_tiles`, `town_tiles`) was
 removed at `rules_version` 6: vision is now `vision_tiles` on every kind in
@@ -487,7 +488,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (13 to 14), update the one-line
+2. Bump `rules_version` in `rules.ron` (14 to 15), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -499,8 +500,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=14 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`
-(the repository is at 13; the hash is new because a file changed).
+`OK rules_version=15 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`
+(the repository is at 14; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture

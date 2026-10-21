@@ -20,6 +20,15 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-21 at `rules_version` 14, `SIM_VERSION` 12 with
+`just rerecord` (M4a tech: the hashed state gained `State.tech`, every
+player's age and researched techs, which the `tech` sub-hash now covers
+instead of a placeholder). No fixture researches, advances an age or
+reaches Town tier 2, so every behaviour is unchanged: a per-tick
+`sim-cli hash-dump --every 1` of each fixture, `SIM_VERSION` 11 binary
+against 12, differs in the whole hash and the `tech` column on every
+tick and in no other column. Every `.hash` file changes for that reason.
+
 Recorded 2026-10-21 at `rules_version` 13, `SIM_VERSION` 11 with
 `just rerecord` (M4a rules data: `techs.ron`, `ages.ron` and
 `factions.ron`, the five new unit kinds, the unit and shooter combat

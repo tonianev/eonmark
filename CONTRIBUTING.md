@@ -117,7 +117,7 @@ $ git status --short
 
 Only `economy_second_town` changes its final hash: it is the only fixture with a worked Croft. A test that hard-codes a number the data controls fails this walkthrough; read the value from `Rules` instead.
 
-Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, and since M3b it names the checked UI strings, so step 3 now prints a line of the form `OK rules_version=14 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`.
+Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, and since M3b it names the checked UI strings, so step 3 now prints a line of the form `OK rules_version=15 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`.
 
 ## Golden replay fixtures
 

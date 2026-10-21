@@ -61,6 +61,7 @@ Notes on the graph:
 - M4b needs both M4a (combat exists) and M3b (the command card exists).
 - M5a needs M4a and M4b because the victory overlay (a game deliverable) rides on the combat and HUD work.
 - Every "a" milestone is sim-side and testable with `cargo test -p sim` and `sim-cli` on any OS. Every "b" milestone is game-side and needs a Mac for the owner proxy screenshots.
+- Owner decision, 2026-10-21: keep this order to the first playable match (M5b) rather than cutting a thinner playable slice first. Before the first gameplay stream, an art pass pulls the M7 look items forward: CC0 glTF models through `data/visuals.ron`, the FieldExt border shader (attempted inside M3b) and a minimap. Fog, menus and audio stay in M7.
 
 ## M0: Skeleton: toolchain, workspace, CI, window on macOS, governance
 

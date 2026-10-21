@@ -16,7 +16,7 @@ Four lines, three levels each, researched at a Scriptorium. Level k of a line re
 
 | Line | Per level | Modifier rows (starting data) | Pays mainly in |
 | --- | --- | --- | --- |
-| Arms | +25 pop cap; unlocks the age's units; +10% unit stats | `pop_cap Add 25`; unit stat rows `Mul 1100`; unit kinds list the Arms level they require | Ore and Lore |
+| Arms | +25 pop cap; unlocks the age's units; +10% unit stats | `pop_cap Add 25`; unit stat rows `Mul 1100`; units are gated by age, and a unit kind may also name a tech in `requires_tech` (none does in the starting data) | Ore and Lore |
 | Statecraft | +1 Town limit; +1 border push | `town_limit Add 1`; `town_border_radius Add 1` | Lore |
 | Trade | Yield Cap 100, then 150, then 200 | `yield_cap Set 100` / `Set 150` / `Set 200` | Lore |
 | Letters | -10% research cost and time, floored | `research_cost Mul 900`; `research_time Mul 900` | Lore |
@@ -50,7 +50,7 @@ Every tech and faction effect is one row:
 Modifier { target: StatPath, op: Set | Add | Mul, value: i32 }
 ```
 
-`StatPath` is a closed enum in `crates/rules` (for example `yield_cap`, `pop_cap`, `town_limit`, `town_border_radius`, `research_cost`, `research_time`, per-kind unit stats, `watchtower_border_push`, `lumber_gather_rate`). `Mul` values are permille: 1250 means x1.25. `Add` and `Set` values are plain integers. `sim-cli data-check` rejects a float anywhere in a Modifier and an unknown StatPath.
+`StatPath` is a closed enum in `crates/rules` (`YieldCap`, `PopCap`, `TownLimit`, `TownBorderRadius`, `ResearchCost`, `ResearchTime`, `UnitHp(sel)` and `UnitDamage(sel)`, with `sel` one of `Military`, `Class(<UnitClass>)` or `Kind("<unit id>")`; gather-rate and Watchtower border paths join with the M9 factions). `Mul` values are permille: 1250 means x1.25. `Add` and `Set` values are plain integers. `sim-cli data-check` rejects a float anywhere in a Modifier and an unknown StatPath.
 
 Resolution for one StatPath, in integer math:
 
@@ -120,7 +120,7 @@ Ages are gated by the cumulative count of researched Scriptorium techs plus a re
 
 | Check | Failure |
 | --- | --- |
-| Every Modifier `target` is a known StatPath | exit 1 naming file and field |
+| Every Modifier `target` is a known StatPath | exit 1: a parse error naming the file, the position and `StatPath` or `UnitSel` |
 | `Add` and `Set` values are integers; `Mul` values are integers read as permille | a `Mul` written as `1.25` exits 1 |
 | Age gates are monotonic | exit 1 |
 | Every tech referenced by `ages.ron` exists | removing one exits 1 naming file and field |
@@ -151,9 +151,9 @@ cargo run -p sim-cli -- data-check data/
 
 ## Open tuning questions
 
-1. Should Outrider, Mangonel and Supply Wain require Arms I as well as the Masonry Age? The age list gates them by age; the Arms line says it unlocks the age's units. This doc follows the age list and keeps `requires_arms` as a data field. Decided 2026-10-21 (owner accepted the M4a plan defaults): no, the Masonry Age alone gates them. The data field is `requires_tech` on the unit kind (`None` for all three), so an Arms I gate is one data line.
+1. Should Outrider, Mangonel and Supply Wain require Arms I as well as the Masonry Age? The age list gates them by age; the Arms line says it unlocks the age's units. This doc follows the age list and keeps the Arms gate as a data field. Decided 2026-10-21 (owner accepted the M4a plan defaults): no, the Masonry Age alone gates them. The data field is `requires_tech` on the unit kind (`None` for all three), so an Arms I gate is one data line.
 2. Does level k of every line require age k? This doc says yes. Without it a Hearth player could research Trade III for a cap of 200.
-3. Letters stacking: multiplicative with floor after each row (0.729 at level 3) versus additive (-30%). Decided 2026-10-21 (owner accepted the M4a plan defaults): multiplicative, floored after each `Mul 900` row, so a base of 100 becomes 90, 81 and 72.
-4. Instant age advance versus a timed advance in `ages.ron`. Decided 2026-10-21 (owner accepted the M4a plan defaults): instant; `ages.ron` has no advance time.
+3. Letters stacking: multiplicative with floor after each row (0.729 at level 3) versus additive (-30%). Decided 2026-10-21 by the M4a plan (an implementation choice, not one of the nine owner decisions in ROADMAP.md; the owner may revisit): multiplicative, floored after each `Mul 900` row, so a base of 100 becomes 90, 81 and 72.
+4. Instant age advance versus a timed advance in `ages.ron`. Decided 2026-10-21 by the M4a plan (an implementation choice, not one of the nine owner decisions in ROADMAP.md; the owner may revisit): instant; `ages.ron` has no advance time.
 5. Tech costs and research times are unset; M4a picks them and the balance issue form asks for a play-bots table with any change.
 6. Which unit StatPaths the Arms bump touches: hit points and damage in the starting data; range and speed are candidates.

@@ -174,6 +174,48 @@ pub(crate) fn worst_case<'a>(
     Some(v)
 }
 
+/// A lower bound on `resolve(base, faction ++ s)` for every subset `s` of
+/// `techs` kept in order (the faction's rows always apply): the lowest of
+/// the faction's start (its last `Set`, else `base`) and every tech `Set`,
+/// plus every faction `Add` and every negative tech `Add`, then every
+/// faction `Mul` and every tech `Mul` below 1000, in order. Sound because
+/// `floor(v * m / 1000)` never decreases as `v` grows and a `Mul` of 1000 or
+/// more never lowers a value of 0 or more; a start at or below 0 is
+/// returned as it is (the caller only asks whether the bound is positive).
+pub(crate) fn lower_bound<'a>(
+    base: i64,
+    faction: impl Iterator<Item = &'a Modifier> + Clone,
+    techs: impl Iterator<Item = &'a Modifier> + Clone,
+) -> i64 {
+    let start = faction
+        .clone()
+        .filter(|m| m.op == ModOp::Set)
+        .last()
+        .map_or(base, |m| i64::from(m.value));
+    let start = techs
+        .clone()
+        .filter(|m| m.op == ModOp::Set)
+        .map(|m| i64::from(m.value))
+        .fold(start, i64::min);
+    let adds: i64 = faction
+        .clone()
+        .filter(|m| m.op == ModOp::Add)
+        .chain(techs.clone().filter(|m| m.op == ModOp::Add && m.value < 0))
+        .map(|m| i64::from(m.value))
+        .sum();
+    let mut v = start + adds;
+    if v <= 0 {
+        return v;
+    }
+    for m in faction
+        .filter(|m| m.op == ModOp::Mul)
+        .chain(techs.filter(|m| m.op == ModOp::Mul && m.value < 1000))
+    {
+        v = (v * i64::from(m.value)).div_euclid(PERMILLE);
+    }
+    v
+}
+
 /// Check a list of rows, `rows[j]` named `{field}[j]`: `Mul` in
 /// `1..=100000`, `Add` and `Set` within `±1000000`, and a `UnitSel::Kind`
 /// names a kind in `unit_ids`.
@@ -285,6 +327,23 @@ mod tests {
             assert!(u128::from(v.unsigned_abs()) <= bound, "{mask:b}: {v}");
         }
         assert!(worst_case(1, std::iter::repeat_n(&mul(MAX_MUL_PERMILLE), 40)).is_none());
+    }
+
+    #[test]
+    fn lower_bound_holds_for_every_subset_of_tech_rows() {
+        let faction = [add(-2), mul(1200)];
+        let techs = [mul(1100), set(40), add(-5), add(3), mul(900), mul(500)];
+        let bound = lower_bound(30, faction.iter(), techs.iter());
+        // min(30, 40) - 2 - 5 = 23, * 1.2 -> 27, * 0.9 -> 24, * 0.5 -> 12.
+        assert_eq!(bound, 12);
+        for mask in 0u32..64 {
+            let rows: Vec<&Modifier> = faction
+                .iter()
+                .chain((0..6).filter(|i| mask & (1 << i) != 0).map(|i| &techs[i]))
+                .collect();
+            let v = resolve(30, rows.iter().copied());
+            assert!(v >= bound, "{mask:b}: {v} < {bound}");
+        }
     }
 
     #[test]

@@ -129,7 +129,7 @@ The reader tolerates truncation. It decodes records with `postcard::take_from_by
 | `sim_version` | `u32` | Yes, fails fast | Hand-bumped whenever sim behaviour changes for the same inputs. Constant `sim::SIM_VERSION`. |
 | `git_sha` | `String` | Never | Informational. Comparing it would invalidate every fixture on every commit. |
 | `rules_version` | `u32` | Reported | Human label from `rules.ron`, bumped when goldens regenerate. |
-| `rules_hash` | `u64` | Yes, reports `RULES CHANGED` | xxh3 over postcard of the loaded `Rules`, covering every file `Rules::load` reads: match rules, resources and every map at M0, `units.ron` from M1, `visuals.ron` from M2 (the sim never reads it, but a replay still records which visuals were loaded), and `data/ai` once it is loaded (M5b). |
+| `rules_hash` | `u64` | Yes, reports `RULES CHANGED` | xxh3 over postcard of the loaded `Rules`, covering every file `Rules::load` reads: match rules, resources and every map at M0, `units.ron` from M1, `visuals.ron` from M2 (the sim never reads it, but a replay still records which visuals were loaded), `buildings.ron` from M3a, `techs.ron`, `ages.ron` and `factions.ron` from M4a (the counter table lives in `units.ron`), and `data/ai` once it is loaded (M5b). |
 | `map` | `String` | Loaded | Map id under `data/maps/`. |
 | `seed` | `u64` | Loaded | Seed for the `Pcg32`. |
 | `tick_rate_hz` | `u32` | Loaded | 20. |

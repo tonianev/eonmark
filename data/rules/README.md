@@ -217,7 +217,7 @@ The rest:
 Only the Yeoman has `builder: true`. The Bowman's 46 HP is deliberate:
 the Skirmisher's counter hit (10 x 2.5 = 25) kills it in two hits at every
 Arms level (46 HP grows to 50, 55 and 60, the hit to 27, 30 and 32), and 51
-to 74 HP would take three. The stats and counters are starting values that
+to 73 HP would take three. The stats and counters are starting values that
 the seeded counter tests of `docs/design/combat.md` must accept; propose a
 change as a hits-to-kill table per Arms level.
 
@@ -417,7 +417,9 @@ resource, at most its `stockpile_cap` (999 Lore), so it can be paid;
 `Kind` selector naming a unit kind. Once `ages.ron` resolves: level k > 1
 of a line follows level k-1 earlier in the file; every research lasts at
 least one tick with every `ResearchTime` row applied; the worst case of
-each cost and time stays within `u32`.
+each cost stays within `u32`, and of each `research_time_ds` within
+`u32::MAX / 100` (42949672 ds), so its tick count fits `u32` at up to
+1000 Hz.
 
 ## ages.ron
 
@@ -439,7 +441,9 @@ starts in `ages[0]`.
 | Charter Age (`charter`) | 5 | 500 Grain, 300 Lumber, 300 Lore | techs `arms_3`, `statecraft_3`, `trade_3`, `letters_3` |
 
 Level k of every line is unlocked in age k. The cheapest route to Masonry
-is Letters I and Trade I plus the age's 100 Lore, 230 Lore in all. The sim
+is Letters I (60 Lore), then Trade I at the Letters price (63), plus the
+age's 100 Lore: 223 Lore in all (230 if Trade I is queued before Letters I
+completes). The sim
 reads this file from the M4a tech slice.
 
 Validation, naming `ages[i].<field>`: 1 to 255 ages; ids unique and

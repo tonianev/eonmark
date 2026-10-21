@@ -25,7 +25,9 @@ fn copy_dir(src: &Path, dst: &Path) {
 /// A fresh copy of `data/` named after the test, with `edit` applied to the
 /// text of `file`.
 fn edited_copy(name: &str, file: &str, edit: impl FnOnce(String) -> String) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("data-check-{name}"));
+    // The process id keeps concurrent runs sharing CARGO_TARGET_TMPDIR apart.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("data-check-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     copy_dir(&repo_data(), &dir);
     let path = dir.join(file);

@@ -23,7 +23,7 @@ This document specifies combat: the eight unit kinds and their roles, the counte
 | Mangonel | siege | Masonry | Engine Yard | Beats buildings; brings Towns to 0 HP | Lumber | `units.ron` |
 | Supply Wain | support | Masonry | Engine Yard | No attack; cancels attrition within 14 tiles; immune to attrition | Lumber | `units.ron` |
 
-Classes drive other systems: infantry and cavalry adjacent to a Town at 0 HP start annexation, and every non-civilian kind counts as "defender military" (see [towns.md](towns.md)). The Scribe's trainer is the Scriptorium in the M3a data; the Outrider's is M4a starting data and an open question. The Skirmisher is already in `units.ron` from M3a by owner decision (index 2, infantry, 40 Grain, `ramp: Military`, trained at the Muster Hall, Yeoman movement values; the M3a military ramp test queues Skirmishers); M4a adds its combat stats. The 8 kinds (Yeoman, Scribe and six military kinds) and 8 building kinds are counted by `sim-cli data-check`.
+Classes drive other systems: infantry and cavalry adjacent to a Town at 0 HP start annexation, and every non-civilian kind counts as "defender military" (see [towns.md](towns.md)). The Scribe's trainer is the Scriptorium in the M3a data; the Outrider's is M4a starting data and an open question. The Skirmisher is already in `units.ron` from M3a by owner decision (index 2, infantry, 40 Grain, `ramp: Military`, trained at the Muster Hall; the M3a military ramp test queues Skirmishers). It moved at Yeoman speed in M3a; M4a gives it its own speed (`speed_tiles_per_s_x100: 220`, against the Yeoman's 180) and its combat stats. The 8 kinds (Yeoman, Scribe and six military kinds) and 8 building kinds are counted by `sim-cli data-check`.
 
 ## Counter triangle
 

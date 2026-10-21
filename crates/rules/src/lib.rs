@@ -754,7 +754,8 @@ impl Rules {
 
     /// The smallest possible hit of every attacker on every defender (each
     /// unit kind and the buildings) does at least 1 damage, under every
-    /// faction's rows and the lowest variance draw:
+    /// faction's rows with any set of researched techs (a lower bound,
+    /// `modifiers::lower_bound`) and the lowest variance draw:
     /// `floor(floor(damage * permille / 1000) * (1000 - v) / 1000) >= 1`.
     fn check_min_hits(&self, units_path: &Path, buildings_path: &Path) -> Check {
         let v = i64::from(self.damage_variance_permille);
@@ -768,11 +769,18 @@ impl Rules {
         for (f, faction) in self.factions.iter().enumerate() {
             for (i, u) in self.units.iter().enumerate() {
                 let Some(a) = &u.attack else { continue };
-                let rows = faction
-                    .modifiers
-                    .iter()
-                    .filter(|m| matches!(m.target, StatPath::UnitDamage(_)) && m.target.matches(u));
-                let raw = modifiers::resolve(i64::from(a.damage), rows).max(0);
+                let damage_row = |m: &&Modifier| {
+                    matches!(m.target, StatPath::UnitDamage(_)) && m.target.matches(u)
+                };
+                let raw = modifiers::lower_bound(
+                    i64::from(a.damage),
+                    faction.modifiers.iter().filter(damage_row),
+                    self.techs
+                        .iter()
+                        .flat_map(|t| t.modifiers.iter())
+                        .filter(damage_row),
+                )
+                .max(0);
                 for d in &defenders {
                     let permille = self.counter_permille(&u.id, d);
                     let hit = low(raw, permille);
@@ -790,7 +798,7 @@ impl Rules {
                         units_path,
                         &field,
                         format!(
-                            "{:?} hits {d:?} for {hit} (damage {raw} under factions[{f}] {:?}, counter {permille}, variance {v}); every hit must do at least 1",
+                            "{:?} hits {d:?} for {hit} (damage at least {raw} under factions[{f}] {:?} with any research, counter {permille}, variance {v}); every hit must do at least 1",
                             u.id, faction.id
                         ),
                     ));
@@ -2546,6 +2554,21 @@ mod tests {
             msg.contains("units.ron")
                 && msg.contains("counters[7].permille")
                 && msg.contains("freeholders"),
+            "{msg}"
+        );
+        // So is a tech row that shrinks it once researched (the Arms rows
+        // raise damage and never count against the bound).
+        let msg = load_error_with::<Techs>("h-tech", "rules/techs.ron", |t| {
+            t.techs[0].modifiers.push(Modifier {
+                target: StatPath::UnitDamage(UnitSel::Military),
+                op: ModOp::Mul,
+                value: 100,
+            });
+        });
+        assert!(
+            msg.contains("units.ron")
+                && msg.contains("counters[7].permille")
+                && msg.contains("with any research"),
             "{msg}"
         );
         // And a shooter whose hit vanishes at the lowest variance draw:

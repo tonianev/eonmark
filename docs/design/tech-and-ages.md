@@ -6,7 +6,7 @@ This document specifies research and age advancement: the 12 Scriptorium techs i
 | --- | --- |
 | Milestone | M4a (sim), M4b (research panel and age indicator) |
 | Labels | `area:sim`, `area:rules` |
-| Rules files | `data/rules/techs.ron` (12 techs as Modifier lists, Harrying I/II), `data/rules/ages.ron` (3 ages, gates, unlock lists), `data/rules/rules.ron` (base values the Modifiers act on), `data/rules/factions.ron` (faction Modifier lists; Freeholders has none) |
+| Rules files | `data/rules/techs.ron` (12 techs as Modifier lists; Harrying I/II join in M5a), `data/rules/ages.ron` (3 ages, gates, unlock lists), `data/rules/rules.ron` (base values the Modifiers act on), `data/rules/factions.ron` (faction Modifier lists; Freeholders has none) |
 | Sim module | `crates/sim/src/tech.rs` |
 | Sub-hash | `tech` |
 
@@ -36,7 +36,7 @@ Tech costs and research times are not fixed by the design; they are set in `tech
 
 ### Arms and unit unlocks
 
-The design says Arms "unlocks the age's units" and also lists Skirmisher, Shieldbearer and Bowman as available in the starting age. This doc resolves it as data: every unit kind in `units.ron` has an optional `requires_arms` level. In the starting data the Hearth kinds require none, and the Masonry kinds (Outrider, Mangonel, Supply Wain) require the Masonry Age. Whether they should also require Arms I is open question 1. The +10% stat bump applies to the unit StatPaths named by the Arms rows (hit points and damage in the starting data). One stat bump per age: Arms III is the Charter Age bump.
+The design says Arms "unlocks the age's units" and also lists Skirmisher, Shieldbearer and Bowman as available in the starting age. This doc resolves it as data: `ages.ron` unlocks every unit kind in exactly one age, and every unit kind in `units.ron` has an optional `requires_tech` naming a tech it also needs (M4a; it replaces the `requires_arms` level first proposed here). In the starting data no kind sets it: the Hearth kinds are available from the start, and the Masonry kinds (Outrider, Mangonel, Supply Wain) require the Masonry Age. Whether they should also require Arms I was open question 1. The +10% stat bump applies to the unit StatPaths named by the Arms rows (hit points and damage in the starting data). One stat bump per age: Arms III is the Charter Age bump.
 
 ### Age requirement per level
 
@@ -151,9 +151,9 @@ cargo run -p sim-cli -- data-check data/
 
 ## Open tuning questions
 
-1. Should Outrider, Mangonel and Supply Wain require Arms I as well as the Masonry Age? The age list gates them by age; the Arms line says it unlocks the age's units. This doc follows the age list and keeps `requires_arms` as a data field.
+1. Should Outrider, Mangonel and Supply Wain require Arms I as well as the Masonry Age? The age list gates them by age; the Arms line says it unlocks the age's units. This doc follows the age list and keeps `requires_arms` as a data field. Decided 2026-10-21 (owner accepted the M4a plan defaults): no, the Masonry Age alone gates them. The data field is `requires_tech` on the unit kind (`None` for all three), so an Arms I gate is one data line.
 2. Does level k of every line require age k? This doc says yes. Without it a Hearth player could research Trade III for a cap of 200.
-3. Letters stacking: multiplicative with floor after each row (0.729 at level 3) versus additive (-30%).
-4. Instant age advance versus a timed advance in `ages.ron`.
+3. Letters stacking: multiplicative with floor after each row (0.729 at level 3) versus additive (-30%). Decided 2026-10-21 (owner accepted the M4a plan defaults): multiplicative, floored after each `Mul 900` row, so a base of 100 becomes 90, 81 and 72.
+4. Instant age advance versus a timed advance in `ages.ron`. Decided 2026-10-21 (owner accepted the M4a plan defaults): instant; `ages.ron` has no advance time.
 5. Tech costs and research times are unset; M4a picks them and the balance issue form asks for a play-bots table with any change.
 6. Which unit StatPaths the Arms bump touches: hit points and damage in the starting data; range and speed are candidates.

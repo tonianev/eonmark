@@ -6,7 +6,7 @@ This document specifies Eonmark's economy: the four resources, where they come f
 | --- | --- |
 | Milestone | M3a (sim), M3b (HUD readout) |
 | Labels | `area:sim`, `area:rules`, `kind:balance` for tuning |
-| Rules files | `data/rules/rules.ron` (Yield Cap table, pop cap, building and military ramp params, `train_queue_max`, `idle_seek_delay_ds`, `idle_seek_retry_ds`, `standard_start`, late-game knobs), `data/rules/resources.ron`, `data/rules/buildings.ron` (costs, base yields, gather rates, slots, Croft limit `max_per_town`), `data/rules/units.ron` (Yeoman, Scribe, Skirmisher: cost, ramp, pop, training time, trainer) |
+| Rules files | `data/rules/rules.ron` (Yield Cap base `yield_cap_base`, pop cap base `pop_cap_base`, building and military ramp params, `train_queue_max`, `idle_seek_delay_ds`, `idle_seek_retry_ds`, `standard_start`, late-game knobs), `data/rules/resources.ron`, `data/rules/buildings.ron` (costs, base yields, gather rates, slots, Croft limit `max_per_town`), `data/rules/units.ron` (every unit kind's cost, ramp, pop, training time, trainer), `data/rules/techs.ron` (the Trade and Arms rows that raise the Yield Cap and the pop cap, M4a) |
 | Sim module | `crates/sim/src/economy.rs`, `crates/sim/src/gather.rs`, `crates/sim/src/training.rs` |
 | Sub-hash | `economy` |
 
@@ -37,7 +37,7 @@ Slot counts for Lumber Yards and Ore Pits are fixed at placement from the tiles 
 
 ## Yield Cap
 
-The Yield Cap is a per-resource ceiling on income rate, not on the stockpile. Income above the cap is discarded and the HUD readout for that resource turns amber (M3b). The cap is raised by the Trade tech line through `yield_cap Set` Modifier rows (see [tech-and-ages.md](tech-and-ages.md)).
+The Yield Cap is a per-resource ceiling on income rate, not on the stockpile. Income above the cap is discarded and the HUD readout for that resource turns amber (M3b). The cap is raised by the Trade tech line through `yield_cap Set` Modifier rows (see [tech-and-ages.md](tech-and-ages.md)). Both are data: the level-0 cap is `yield_cap_base: 70` in `rules.ron`, and the rows are `(target: YieldCap, op: Set, value: 100)`, `150` and `200` in `techs.ron` (M4a; the sim applies them from the M4a tech slice).
 
 | Trade level | Yield Cap per resource per 30 s |
 | --- | --- |
@@ -139,6 +139,8 @@ The 6th queued Skirmisher is capped at 2.25x base. The design fixes the cap and 
 ```text
 pop_cap = 25 + 25 * arms_level
 ```
+
+Both numbers are data: the base is `pop_cap_base: 25` in `rules.ron`, and each Arms level adds 25 through its `(target: PopCap, op: Add, value: 25)` row in `techs.ron` (M4a; the sim applies the rows from the M4a tech slice).
 
 | Arms level | Pop cap |
 | --- | --- |

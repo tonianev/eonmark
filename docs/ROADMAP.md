@@ -233,6 +233,10 @@ Research 12 techs whose effects are permille Modifier rows, advance through thre
 - Tests: age gating, Letters discount, Modifier stacking order, seeded counter triangle.
 - `docs/design/tech-and-ages.md`, `docs/design/combat.md`.
 
+### Notes
+
+- Owner decision, 2026-10-21: the M4a implementation plan's defaults are accepted for all nine of its open questions. (1) The Masonry Age gates Town tier 2 (`town_growth_age: Some("masonry")` in `rules.ron`). (2) Outrider, Mangonel and Supply Wain need the Masonry Age but not Arms I (`requires_tech: None`; one data line to change). (3) Acquisition takes enemy units before buildings (the Mangonel the reverse), by `(dist_sq, id)` within each, and switches to an enemy in weapon range. (4) A complete Town at 0 HP stays, is not targeted and does not shoot; every site at 0 HP, Town sites included, is destroyed. (5) Research shares the building's training queue, and its cost and time are fixed when it is queued. (6) `AdvanceAge` naming another player is rejected with `PlayerMismatch`; acquisition range is one global `acquire_range_tiles` (6). (7) An unknown `StatPath` is a parse error naming the file, the span and the enum. (8) The proposed tech costs and times, unit stats and counter values are the starting data, tuned in the counters slice. (9) Harrying I and II wait for M5a (with a `counts_toward_age: false` flag), so M4a ships exactly 12 techs.
+
 ### Acceptance
 
 - [ ] `cargo test -p sim tech`: Masonry Age unlocks only after 2 techs plus 250 Grain + 100 Lore; Charter Age after 5 techs plus 500 Grain + 300 Lumber + 300 Lore; each Letters level reduces the next research cost by 10% floored; Modifier stacking Set -> Add -> Mul produces the documented values; a faction row `yield_cap Mul 1250` yields cap 87 at Trade level 0.

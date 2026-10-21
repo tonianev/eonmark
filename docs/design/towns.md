@@ -181,7 +181,7 @@ cargo run -p game --features dev -- --scenario capture_seat
 1. Town HP after a flip: the design is silent. Options are keeping 0 HP (the defender can immediately contest it back) or restoring a data-defined fraction. M5a must pick and put the value in `rules.ron`.
 2. Does a Town at 0 HP keep shooting? Does Town HP regenerate?
 3. Exact territory tie at tick 54000: lowest `PlayerId`, or a `Draw` outcome variant.
-4. Does the Masonry Age gate tier-2 radius growth, or does the age list only mean that tier 2 is usually reached in Masonry?
+4. Does the Masonry Age gate tier-2 radius growth, or does the age list only mean that tier 2 is usually reached in Masonry? Decided 2026-10-21 (owner accepted the M4a plan defaults): it gates it. `town_growth_age: Some("masonry")` in `rules.ron` names the age, the sim applies it from the M4a tech slice, and `None` removes the gate with no Rust change.
 5. Should Muster Halls and Engine Yards transfer on a flip? This doc treats every kind except Watchtower as civilian for transfer purposes.
 6. Queued training at a flipped Town: cancelled with or without refund to the old owner.
 7. Is 60 s the right timer against a Hard bot that attacks before minute 12? M6 play-bots decide.

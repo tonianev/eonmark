@@ -7,8 +7,9 @@
 // The field texture holds one texel per sim tile, row-major from the
 // north-west: R the owner code (0 neutral, else player index + 1), G the
 // owning layer's strength, B fog, A supply. Only R is read today; fog (M7)
-// and supply hatching (M5a) read the other channels. `territory` is a line
-// by line port of `crate::field::territory_at`, whose unit tests pin it.
+// and supply hatching (M5a) read the other channels. `territory` has a line
+// by line CPU copy, `territory_at` in the tests of `field.rs`, which pin its
+// look; change both together.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,

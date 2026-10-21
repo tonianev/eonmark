@@ -202,6 +202,7 @@ pub fn run(cli: &Cli) -> AppExit {
         camera::CameraPlugin,
         ground::GroundPlugin,
         crate::field::FieldPlugin,
+        crate::render_watchdog::RenderWatchdogPlugin,
         PresentPlugin,
         crate::buildings::BuildingsPlugin,
         crate::economy_hud::EconomyHudPlugin,

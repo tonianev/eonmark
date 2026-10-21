@@ -51,7 +51,7 @@ One `StandardMaterial` per kind and team, shared by every instance of that kind.
 | `reflectance` | 0.2 |
 | `metallic` | 0.0 |
 | `emissive` | black; never used for gameplay signalling |
-| Alpha | opaque, except the territory overlay and HUD panels |
+| Alpha | opaque, except HUD panels; territory is drawn inside the opaque ground material by `FieldExt`, not as a separate overlay |
 
 ## Lighting and post-processing
 
@@ -89,7 +89,7 @@ Motion is procedural (bob, swing, scale pulse), not animation clips, in v0.1.
 |---|---|
 | Owned-land tint | about 12% team colour over the ground |
 | Border | a 1-tile soft isoline where ownership changes |
-| Neutral or tied tiles | no tint |
+| Neutral or tied tiles | no tint, except within half a tile of owned land, where the owner's tint fades from about half of the 12% at the edge to nothing at the tile centre, under the border line |
 | Fog, explored | ground and buildings darkened to 0.45 |
 | Fog, unexplored | 0.0 (hidden) |
 | Supply coverage | subtle hatching from the same field texture (M5a) |

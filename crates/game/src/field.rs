@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn owned_land_is_tinted_and_neutral_land_is_not() {
+    fn owned_land_is_tinted_and_neutral_land_only_beside_it() {
         let owners = two_owners();
         let blue = palette::team_color(0).to_linear().to_vec4().truncate();
         let (tint, line) = territory_at(&owners, N, N, Vec2::new(8.5, 8.5));
@@ -292,6 +292,13 @@ mod tests {
         assert!(close(line.w, 0.0), "no line at a tile centre inside");
         let (tint, line) = territory_at(&owners, N, N, Vec2::new(24.5, 24.5));
         assert_eq!((tint, line), (Vec4::ZERO, Vec4::ZERO), "neutral");
+        // Neutral tile (3, 8) beside player 0's west edge: untinted at its
+        // centre, the owner's tint fading in under the line toward the edge
+        // (docs/ART_STYLE.md, "Neutral or tied tiles").
+        let centre = territory_at(&owners, N, N, Vec2::new(3.5, 8.5)).0;
+        assert!(close(centre.w, 0.0), "{centre}");
+        let near = territory_at(&owners, N, N, Vec2::new(3.75, 8.5)).0;
+        assert!(near.w > 0.0 && near.w < 0.5, "fades in: {near}");
     }
 
     #[test]

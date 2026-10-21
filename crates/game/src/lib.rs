@@ -46,5 +46,6 @@ pub mod orders;
 pub mod palette;
 pub mod placement;
 pub mod present;
+pub mod render_watchdog;
 pub mod selection;
 pub mod sim_driver;

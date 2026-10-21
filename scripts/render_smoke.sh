@@ -5,15 +5,22 @@
 # Bevy compiles WGSL only when it builds a pipeline. A shader that fails to
 # compile is logged (`ERROR bevy_render::render_resource::pipeline_cache:
 # failed to process shader`) while the game runs on without that mesh and
-# exits 0, so no build, lint or unit test catches it. This does:
+# exits 0, so no build, lint or unit test catches it; a shader whose
+# `#import` names a missing module is retried silently, and the game's
+# `render_watchdog` logs an ERROR for any pipeline still not ready 20 s
+# after it started waiting. This run checks:
 #   1. the game exits 0;
-#   2. a PNG captured once the sim reaches a tick exists, so frames were
-#      rendered with every pipeline the walkthrough's scene needs;
-#   3. the log has no ERROR line.
+#   2. a PNG captured once the sim reaches a tick exists (the window
+#      presented frames up to that tick; it says nothing about pipelines);
+#   3. the log has no ERROR line, which covers both shader cases above.
+# The game runs in background mode, as every automated windowed check does
+# (docs/IMPLEMENTER_NOTES.md rule 25).
 #
-# Needs xvfb (xvfb-run) and mesa-vulkan-drivers (lavapipe); CI's game-linux
-# job installs both. Usage: scripts/render_smoke.sh <eonmark binary> [out-dir]
-# (out-dir keeps the PNG, the log and the replay; default a temp dir).
+# Needs xvfb (xvfb-run), mesa-vulkan-drivers (lavapipe) and the X libraries
+# winit loads at run time (libxkbcommon-x11-0, libx11-xcb1, libxcursor1,
+# libxi6, libxrandr2); CI's game-linux job installs them. Usage:
+# scripts/render_smoke.sh <eonmark binary> [out-dir] (out-dir keeps the PNG,
+# the log and the replay; default a temp dir).
 set -euo pipefail
 
 bin="${1:?usage: scripts/render_smoke.sh <eonmark binary> [out-dir]}"
@@ -32,6 +39,16 @@ if ! command -v xvfb-run >/dev/null; then
   echo "error: xvfb-run not found (apt-get install xvfb)" >&2
   exit 1
 fi
+# winit opens these with dlopen and panics when one is missing. The list is
+# read once: `ldconfig -p | grep -q` can fail under pipefail on SIGPIPE.
+libs=$("$(command -v ldconfig || echo /sbin/ldconfig)" -p)
+for lib in libxkbcommon-x11.so.0:libxkbcommon-x11-0 libX11-xcb.so.1:libx11-xcb1 \
+  libXcursor.so.1:libxcursor1 libXi.so.6:libxi6 libXrandr.so.2:libxrandr2; do
+  if ! grep -qF "${lib%%:*}" <<<"$libs"; then
+    echo "error: ${lib%%:*} not found (apt-get install ${lib##*:})" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$out"
 png="$out/render_smoke.png"
@@ -40,7 +57,7 @@ rm -f "$png"
 
 status=0
 xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd" \
-  "$bin" --scenario economy_walkthrough --camera 38,64,60 \
+  "$bin" --background --scenario economy_walkthrough --camera 38,64,60 \
   --exit-after-seconds "$seconds" --screenshot-at "$tick:$png" \
   --replay-dir "$out" >"$log" 2>&1 || status=$?
 

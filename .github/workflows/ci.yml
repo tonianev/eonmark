@@ -213,7 +213,10 @@ jobs:
       - name: Install Rust toolchain (rust-toolchain.toml)
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          cache-shared-key: game-linux
+          # Bumped when the job started building the binary (render smoke):
+          # rust-cache saves only under a new key, so the old clippy-only
+          # cache would leave every run building the game cold.
+          cache-shared-key: game-linux-build
           cache-on-failure: true
           rustflags: ""
           build-warnings: warn

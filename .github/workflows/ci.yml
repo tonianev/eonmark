@@ -221,6 +221,23 @@ jobs:
       - name: clippy (game, Linux)
         run: cargo clippy -p game --all-targets --locked --profile ci -- -D warnings
 
+      # Bevy compiles WGSL only when it builds a pipeline, and a shader that
+      # fails is logged while the game runs on and exits 0; this renders the
+      # walkthrough on lavapipe and fails on any ERROR line. The screenshot
+      # is uploaded for review.
+      - name: Render smoke test (Xvfb, lavapipe)
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers
+          cargo build -p game --locked --profile ci
+          scripts/render_smoke.sh target/ci/eonmark "$RUNNER_TEMP/render-smoke"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: render-smoke
+          path: ${{ runner.temp }}/render-smoke/
+          if-no-files-found: warn
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04

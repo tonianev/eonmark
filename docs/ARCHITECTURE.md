@@ -129,7 +129,8 @@ The only Bevy crate and the `eonmark` binary. Bevy ECS is used here for presenta
 | `camera.rs` | Pitch-locked perspective RTS camera: WASD and arrow pan, edge scroll, trackpad `Pixel` pan, wheel `Line` zoom, `PinchGesture` zoom; `RtsCamera` marker carries `MeshPickingCamera` | M0 (pan, zoom, pinch), M2 (done) |
 | `selection.rs` | `MeshPickingPlugin` with `require_markers: true`, `Pickable` on units and buildings; click, shift add, double-click same kind on screen, screen-space drag box, ctrl+1..9 groups; `Selection` resource (units, or one own building since M3b, outlined on the ground); retained-gizmo rings and move markers as separate entities keyed by `UnitId` | M2 (done), M3b (buildings) |
 | `orders.rs` | Ray-plane ground hit (`Camera::viewport_to_world`, y = 0) to `Move` (shift queues), `Stop` (S), `AttackMove` placeholder (A then click); since M3b a contextual right click: `Build` on an own site (resume), `Gather` on an own gather building, `SetRally` with a building selected; `OrderMode::Place` for placement; ignores world clicks while `PointerOverUi` | M2 (done), M3b (context, placement mode) |
-| `ground.rs` | Grid mesh with vertex colors from the map's terrain (grass, forest floor, rock, water); territory drawn into the same vertex colors (owned tiles tinted 12% toward the team colour, a 1-tile line on the inside of every border), rewritten when the field's owner grid changes; then the `FieldExt` extended material and field texture upload | M0 (plane), M3b (terrain and territory done; shader planned) |
+| `ground.rs` | Grid mesh with vertex colors from the map's terrain (grass, forest floor, rock, water), render world only; drawn with `field.rs`'s `GroundMaterial` | M0 (plane), M3b (terrain) |
+| `field.rs` | `GroundMaterial` = `ExtendedMaterial<StandardMaterial, FieldExt>`: the field texture (one RGBA8 texel per tile: R owner, G strength, B fog, A supply) and `field.wgsl` (embedded with `embedded_asset!`), which tints owned land 12% toward the team colour and draws the soft 1-tile border isoline before lighting; `sync_field` rewrites the texture after a stepped tick when the territory sources change. `scripts/render_smoke.sh` (CI game-linux) fails on a shader that does not compile | M3b (territory), M5a (supply), M7 (fog) |
 | `buildings.rs` | `BuildingEntities: HashMap<BuildingId, Entity>` mirror synced after each tick (`sync_buildings`): one shared unit cube scaled to the footprint, a team-coloured material, a site in scaffold colour rising with its progress; buildings are `Pickable` | M3b |
 | `command_card.rs` | The bottom bar's command card and selection panel: Build buttons for selected builders (ramped cost, greyed with the reason when unaffordable or at the town limit, a click enters placement), Train buttons for a selected complete building (`SimView::check_train` decides, the tooltip is the rejection's message), Cancel for a selected site; the panel names the selection (unit counts, or the building with progress, tier, workers and queue) | M3b |
 | `placement.rs` | `OrderMode::Place`: a translucent ghost of the footprint under the cursor, green or red by `SimView::check_build` (cached per tile, builder and tick), the reason on the message line, a footprint outline on the ground; a left click issues `Build` with the nearest idle selected builder | M3b |
@@ -240,6 +241,9 @@ one rendered frame in crates/game
                     spawn one Entity per new UnitId (mesh + material per kind and team,
                     Pickable::default()), despawn missing ids, Interp::advance for the rest;
                     UnitEntities: HashMap<UnitId, Entity> lives here, on the render side
+   buildings.rs sync_buildings, field.rs sync_field (after SimSystems::Step, M3b)
+                    building entities likewise; the field texture rewritten when the
+                    territory sources changed (fog and supply join it in M7 and M5a)
    after 8 ticks in one frame: discard_overstep, the remainder is dropped as time dilation
           |
           v
@@ -247,7 +251,6 @@ one rendered frame in crates/game
    present.rs sync_transforms   Transform = lerp(prev, curr, Time<Fixed>::overstep_fraction());
                                 yaw derived in f32 from the sim's facing vector
    selection.rs                 ring entities follow their unit's interpolated Transform
-   (M3b+) sync_field_texture    upload territory, fog and supply into the 128x128 field texture
    hud.rs                       (M3b+) read SimView for stockpiles, rates, cap state, population
           |
           v

@@ -201,6 +201,7 @@ pub fn run(cli: &Cli) -> AppExit {
     app.add_plugins((
         camera::CameraPlugin,
         ground::GroundPlugin,
+        crate::field::FieldPlugin,
         PresentPlugin,
         crate::buildings::BuildingsPlugin,
         crate::economy_hud::EconomyHudPlugin,

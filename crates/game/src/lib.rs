@@ -34,6 +34,7 @@ pub mod command_card;
 #[cfg(feature = "dev")]
 pub mod dev_tools;
 pub mod economy_hud;
+pub mod field;
 pub mod frame_stats;
 pub mod ground;
 pub mod headless;

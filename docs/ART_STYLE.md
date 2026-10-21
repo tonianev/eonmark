@@ -94,7 +94,7 @@ Motion is procedural (bob, swing, scale pulse), not animation clips, in v0.1.
 | Fog, unexplored | 0.0 (hidden) |
 | Supply coverage | subtle hatching from the same field texture (M5a) |
 
-M3b ships the border as a vertex-coloured overlay mesh first and upgrades to the `FieldExt` extended material sampling a 128x128 RGBA8 field texture (R owner, G strength, B fog, A supply). The shader is mandatory by M7 because fog rides the same texture.
+The ground's material is the `FieldExt` extended material (`crates/game/src/field.rs`, shader `field.wgsl` embedded in the binary) reading an RGBA8 field texture with one texel per tile, 128x128 on the current maps (R owner, G strength, B fog, A supply). Each owner's membership is interpolated between tile centres with smoothstep weights; the tint follows it and the border is the isoline where it crosses one half, fading to nothing at the tile centres on either side, so the line follows the buildable tiles with rounded corners. M3b drew a vertex-coloured version first and replaced it within the milestone. The shader is mandatory by M7 because fog rides the same texture.
 
 ## HUD
 

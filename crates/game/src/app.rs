@@ -142,6 +142,13 @@ pub fn run(cli: &Cli) -> AppExit {
         let (_, stream) = scenarios::units200_auto(&rules);
         (scenarios::EAST, spawn_total(&stream))
     });
+    let strings = match rules::strings::Strings::load(cli.resolve_data_dir(), "en") {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("eonmark: cannot load UI strings: {err}");
+            return AppExit::error();
+        }
+    };
     let (handle, input) = match build_match(cli, rules) {
         Ok(pair) => pair,
         Err(message) => {
@@ -182,6 +189,10 @@ pub fn run(cli: &Cli) -> AppExit {
         app.add_plugins(background::BackgroundPlugin);
     }
     app.insert_resource(ClearColor(palette::SKY));
+    app.insert_resource(crate::economy_hud::UiStrings(strings));
+    if let Some(start) = cli.camera {
+        app.insert_resource(camera::StartFraming(start));
+    }
     app.add_plugins(
         SimPlugin::new(handle, input)
             .recording(Some(replay_path))
@@ -191,6 +202,8 @@ pub fn run(cli: &Cli) -> AppExit {
         camera::CameraPlugin,
         ground::GroundPlugin,
         PresentPlugin,
+        crate::buildings::BuildingsPlugin,
+        crate::economy_hud::EconomyHudPlugin,
         SelectionPlugin,
         OrdersPlugin,
         HudPlugin { hud_click_check },

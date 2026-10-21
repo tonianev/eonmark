@@ -37,6 +37,9 @@ Options:
                                close, the path the red close button takes (bevy_window
                                despawns it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
+  --camera <X>,<Y>,<ZOOM>      Start the camera over sim tile (X, Y) at ZOOM metres
+                               (15 to 60) instead of jumping to the first units
+                               (screenshots, stream framing).
   --background                 Automated runs: open the window unfocused, below other
                                windows, in the top-left corner of the primary monitor,
                                and (macOS) hand focus back to the app that had it. Also
@@ -76,6 +79,43 @@ impl HeadlessRun {
     }
 }
 
+/// Where `--camera` starts the camera: over sim tile `(x, y)` (fractional
+/// tiles allowed) at `zoom` metres from the ground.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraStart {
+    /// Sim tile x.
+    pub x: f32,
+    /// Sim tile y (world z).
+    pub y: f32,
+    /// Distance from the focus, metres.
+    pub zoom: f32,
+}
+
+impl CameraStart {
+    /// Parse `<x>,<y>,<zoom>`: three finite numbers, `x` and `y` inside the
+    /// 128-tile map, `zoom` within the camera's range.
+    pub fn parse(value: &str) -> Result<CameraStart, String> {
+        let parts: Vec<f32> = value
+            .split(',')
+            .map(|p| p.trim().parse::<f32>().map_err(|e| format!("`{p}`: {e}")))
+            .collect::<Result<_, _>>()?;
+        let [x, y, zoom] = parts[..] else {
+            return Err(format!("expected <x>,<y>,<zoom>, got `{value}`"));
+        };
+        if !(0.0..=128.0).contains(&x) || !(0.0..=128.0).contains(&y) {
+            return Err(format!("({x}, {y}) is outside the 128-tile map"));
+        }
+        if !(crate::camera::ZOOM_MIN..=crate::camera::ZOOM_MAX).contains(&zoom) {
+            return Err(format!(
+                "zoom {zoom} is outside {}..={}",
+                crate::camera::ZOOM_MIN,
+                crate::camera::ZOOM_MAX
+            ));
+        }
+        Ok(CameraStart { x, y, zoom })
+    }
+}
+
 /// Parsed flags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cli {
@@ -109,6 +149,8 @@ pub struct Cli {
     /// (`crate::background`). [`Cli::background_mode`] also honours
     /// `EONMARK_BACKGROUND`.
     pub background: bool,
+    /// `--camera <x>,<y>,<zoom>`.
+    pub camera: Option<CameraStart>,
 }
 
 impl Default for Cli {
@@ -126,12 +168,15 @@ impl Default for Cli {
             quit_via_menu_after_seconds: None,
             close_window_after_seconds: None,
             background: false,
+            camera: None,
         }
     }
 }
 
-/// Outcome of parsing: run the game, or print usage.
+/// Outcome of parsing: run the game, or print usage. Built once at start-up,
+/// so the size of the `Run` variant does not matter.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Parsed {
     /// Run with these flags.
     Run(Cli),
@@ -196,6 +241,11 @@ impl Cli {
                     cli.close_window_after_seconds = Some(secs);
                 }
                 "--background" => cli.background = true,
+                "--camera" => {
+                    let value = args.next().ok_or_else(|| format!("{arg}: missing value"))?;
+                    cli.camera =
+                        Some(CameraStart::parse(&value).map_err(|e| format!("{arg}: {e}"))?);
+                }
                 other => return Err(format!("unknown argument `{other}`")),
             }
         }
@@ -205,6 +255,9 @@ impl Cli {
             }
             if cli.screenshot.is_some() {
                 return Err("--screenshot needs a window; drop --headless-run".into());
+            }
+            if cli.camera.is_some() {
+                return Err("--camera needs a window; drop --headless-run".into());
             }
             if cli.quit_via_menu_after_seconds.is_some() {
                 return Err(
@@ -303,6 +356,29 @@ mod tests {
     }
 
     #[test]
+    fn camera_takes_a_tile_and_a_zoom_inside_the_map() {
+        let Ok(Parsed::Run(cli)) = parse(&["--camera", "24,64,60"]) else {
+            panic!("--camera parses");
+        };
+        assert_eq!(
+            cli.camera,
+            Some(CameraStart {
+                x: 24.0,
+                y: 64.0,
+                zoom: 60.0
+            })
+        );
+        assert!(parse(&["--camera", "24,64"]).is_err(), "three values");
+        assert!(parse(&["--camera", "24,200,40"]).is_err(), "inside the map");
+        assert!(parse(&["--camera", "24,64,5"]).is_err(), "zoom range");
+        assert!(parse(&["--camera", "a,64,40"]).is_err(), "numbers");
+        assert!(
+            parse(&["--headless-run", "10", "--camera", "24,64,40"]).is_err(),
+            "needs a window"
+        );
+    }
+
+    #[test]
     fn defaults_when_no_args() {
         assert_eq!(parse(&[]), Ok(Parsed::Run(Cli::default())));
         assert_eq!(Cli::default().hash_every(), 20);
@@ -341,6 +417,7 @@ mod tests {
                 quit_via_menu_after_seconds: None,
                 close_window_after_seconds: None,
                 background: false,
+                camera: None,
             })
         );
         let Parsed::Run(cli) = parsed else {

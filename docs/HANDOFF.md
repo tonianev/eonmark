@@ -17,8 +17,8 @@ in a game that runs and a command that proves it.
 ## State of the repository
 
 The repository was planned and scaffolded on 2026-10-05 with AI assistance.
-M0, M1 and M2 are merged. M3a is implemented on PR #26 (all six slices,
-training last) and awaits merge; M3b is next. A milestone is done when every
+M0, M1, M2 and M3a are merged (M3a as PR #26). M3b, the game side of the
+economy, is in progress. A milestone is done when every
 acceptance checkbox in `docs/ROADMAP.md` is ticked with pasted command
 output in a merged PR.
 

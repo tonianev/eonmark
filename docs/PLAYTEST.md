@@ -92,6 +92,8 @@ Captured on 2026-10-06 from the M2 integration build with `--screenshot` (dev bu
 | [screenshots/m2-selection.png](screenshots/m2-selection.png) | `cargo run -p game --features dev -- --scenario units200_auto --exit-after-seconds 6 --screenshot m2-selection.png` | `selection: 200` on stdout; every unit carries a thin flat ring on the ground (separate entities, see the inspector); the group is under way east after the tick-20 scripted Move |
 | [screenshots/m2-hud.png](screenshots/m2-hud.png) | `cargo run -p game --features dev -- --scenario hud_click --exit-after-seconds 3 --screenshot m2-hud.png` | `hud_click: ok` on stdout; 20 units still selected after the synthetic clicks on the bottom bar and on the Stop button; the HUD bars anchored top and bottom |
 
+`--camera <x>,<y>,<zoom>` frames a shot: it starts the camera over sim tile (x, y) at zoom metres (15 to 60) and skips the jump to the first units. `--camera 36,64,60` shows the whole west start with its border. Since M3b the windowed game also runs on Linux under Xvfb with the lavapipe software Vulkan driver, slowly but faithfully enough for screenshots: `xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json target/ci/eonmark --camera 36,64,60 --exit-after-seconds 14 --screenshot shot.png` (the `ci` profile binary takes `--screenshot` too; build it with `cargo build -p game --profile ci`).
+
 ## Match log (M6)
 
 Play against the Standard bot from New Game to the game-over screen. One row per match. Keep the replay file; its name is the seed and timestamp.

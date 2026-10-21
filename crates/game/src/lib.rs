@@ -27,10 +27,12 @@
 
 pub mod app;
 pub mod background;
+pub mod buildings;
 pub mod camera;
 pub mod cli;
 #[cfg(feature = "dev")]
 pub mod dev_tools;
+pub mod economy_hud;
 pub mod frame_stats;
 pub mod ground;
 pub mod headless;

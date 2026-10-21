@@ -156,6 +156,7 @@ jobs:
           cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/group_spiral.eonreplay | tee verify-group-spiral.txt
           cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/snapshot_restore.eonreplay | tee verify-snapshot-restore.txt
           cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/economy_second_town.eonreplay | tee verify-economy-second-town.txt
+          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/economy_walkthrough.eonreplay | tee verify-economy-walkthrough.txt
 
       - name: engine boundary (no bevy/glam/wgpu/winit in engine-free crates)
         run: |

@@ -419,6 +419,51 @@ mod tests {
         assert_eq!(reject_text(&s, &r, &reason), "Not enough Ore");
     }
 
+    struct NoAi;
+
+    impl sim::AiController for NoAi {
+        fn think(&mut self, _: sim::PlayerId, _: &sim::SimView<'_>) -> Vec<sim::Command> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn the_walkthroughs_grain_readout_turns_amber_at_its_beat_and_not_before() {
+        use sim::scenarios::{ECONOMY_WALKTHROUGH_AMBER_TICK, commands_at, economy_walkthrough};
+        let s = strings();
+        let rules = rules();
+        let grain = rules
+            .resources
+            .resources
+            .iter()
+            .position(|x| x.id == "grain")
+            .unwrap();
+        let (setup, stream) = economy_walkthrough(&rules);
+        let mut sim = sim::Sim::new(setup, rules, Box::new(NoAi));
+        let mut first_amber = None;
+        for t in 0..ECONOMY_WALKTHROUGH_AMBER_TICK {
+            sim.step(commands_at(&stream, t));
+            if first_amber.is_none() && at_cap(&sim.view().income(LOCAL_PLAYER)[grain]) {
+                first_amber = Some(t);
+            }
+        }
+        let first = first_amber.expect("Grain reaches the Yield Cap by the amber beat");
+        assert!(
+            first + 100 > ECONOMY_WALKTHROUGH_AMBER_TICK,
+            "amber only near its beat, not from tick {first}"
+        );
+        let view = sim.view();
+        let rate = &view.income(LOCAL_PLAYER)[grain];
+        let text = resource_text(
+            &s,
+            sim.rules(),
+            grain,
+            view.economy(LOCAL_PLAYER).stock[grain],
+            rate,
+        );
+        assert!(text.ends_with(", capped at 70"), "{text}");
+    }
+
     #[test]
     fn readouts_show_stock_rate_and_the_lore_cap() {
         let (s, r) = (strings(), rules());

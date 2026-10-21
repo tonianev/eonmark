@@ -85,8 +85,8 @@ Keys the design fixes are given as such. Keys marked "proposed" are not fixed by
 | Attack-move | A, then left click a point (`orders::OrderMode::AttackMove`; Esc or a right click cancels). M2 ships it as a placeholder: the sim applies `Command::AttackMove` exactly like `Move` until combat lands in M4a | M2 (placeholder), M4a (real) |
 | Stop | S (`orders.rs`; also the Stop button on the bottom bar) | M2 |
 | Set rally point | right click with a training building selected | M3b |
-| Infinite queue toggle | button on the command card; key proposed Q | M3b |
-| Select next idle Yeoman | key proposed period (.) | M3b |
+| Infinite queue toggle | button on the command card; key proposed Q | M4b (moved from M3b: it needs a repeat flag on the sim's training queue, a `Command` and hash change) |
+| Select next idle Yeoman | period (.): the next idle builder by id, wrapping, and the camera centres on it (`selection::select_idle_builder`; idle as the sim's idle seeking reads it: no job, no order) | M3b |
 | Pause | Space | M6 |
 | Game speed x1 / x2 / x4 | proposed minus and equals to step down and up | M6 |
 | Clear selection, cancel attack-move | Esc (`selection::clear_selection_on_escape`, `orders::order_mode_keys`) | M2 |

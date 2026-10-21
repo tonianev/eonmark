@@ -35,6 +35,26 @@ Run `cargo run -p game --features dev -- --scenario units200` from `main` (200 Y
 
 Every windowed session records a replay. The directory is `~/Library/Application Support/com.tonianev.Eonmark/replays/` unless `--replay-dir <dir>` was passed, and the file is `<yyyymmdd-hhmmss>-<seed>.eonreplay` (UTC wall clock, then the match seed). The exact path is the `replay: <path>` line on stdout at startup, so a run started from a terminal tells you which file to verify.
 
+## Economy controls checklist (M3b)
+
+Run `cargo run -p game --features dev` from `main` (the standard start: a Seat, five Yeomen, 150 Grain and 150 Lumber, against the Passive bot). Sign rows as in the M2 table. The walkthrough proxy is `--scenario economy_walkthrough` with the `--screenshot-at` beats under [Screenshots](#screenshots-m2).
+
+| Control | Expected | Proxy | Pass/Fail | Date | Commit | Signed | Notes |
+|---|---|---|---|---|---|---|---|
+| Select Yeomen | The bottom bar shows a Build button per building kind with its cost; unaffordable ones are greyed and their tooltip names the missing resource | `command_card` unit tests | | | | | |
+| Click Croft, hover outside the border | A red ghost and red footprint outline; the message line says "Outside your borders"; a click sends nothing | `economy_walkthrough` tick 20 screenshot; sim `m3b.rs` | | | | | |
+| Hover inside the border, click | The ghost turns green; the click places the site and the nearest selected Yeoman not already building walks over and builds it; the mode ends (Shift keeps it) | owner | | | | | |
+| Right-click an own unfinished site with Yeomen selected | The nearest selected Yeoman resumes building it | owner | | | | | |
+| Right-click an own Croft, Lumber Yard or Ore Pit with Yeomen selected | They go and work it | owner | | | | | |
+| Click the Seat | The panel reads "Town / Seat, tier 1"; a Train Yeoman button with its cost | `command_card` unit tests | | | | | |
+| Click Train twice | Two Yeomen queue (the panel shows progress); Grain drops by the ramped cost | owner | | | | | |
+| Right-click the ground with the Seat selected | Sets the rally point; trained Yeomen walk there | owner | | | | | |
+| Found a second Town | The tinted territory and its soft border line grow around it; "Town complete" on the message line | `economy_walkthrough` tick 1400 screenshot | | | | | |
+| Grain income above the Yield Cap | The Grain readout turns amber with ", capped at 70" | `economy_hud` walkthrough test; tick 2100 screenshot | | | | | |
+| At 25 / 25 pop | Train is greyed; its tooltip says "Population cap reached" | `command_card` walkthrough test; tick 2262 screenshot | | | | | |
+| Period (.) | Selects the next idle Yeoman, cycling by id, and centres the camera on it | `selection` unit test | | | | | |
+| Esc in placement mode | Leaves the mode, keeps the selection | owner | | | | | |
+
 ## Cmd-Q (M2)
 
 What the menu item does. `crates/game/src/macos_menu.rs` replaces winit's default application menu with a muda menu whose Quit item is a custom `MenuItem` (id `quit`, label `Quit Eonmark`, accelerator Cmd+Q). Activating it only emits a `MenuEvent`; the `drain_menu_events` system reads it on the AppKit main thread and writes `AppExit::Success`. On that same frame `finish_recorder_on_exit` (in `Last`) records a final hash checkpoint, sends `Finish` to the replay writer thread and joins it, so the file ends with the `EONRDONE` trailer and `sim-cli verify` prints `OK` without a `warning:`. The red close button takes the same `AppExit` route (`bevy_window::exit_on_all_closed`, also in `Last`).

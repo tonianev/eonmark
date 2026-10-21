@@ -365,6 +365,40 @@ pub fn rebuild_card(
     });
 }
 
+/// A button's state now (enabled, and the tooltip: the rejection's message
+/// when disabled, else what it does and costs) and its cost line.
+pub fn card_state(
+    view: &SimView<'_>,
+    rules: &Rules,
+    strings: &UiStrings,
+    action: CardAction,
+) -> (CardState, String) {
+    let (name, cost, verdict) = evaluate(view, rules, action);
+    let cost_line = match action {
+        CardAction::CancelSite(_) => String::new(),
+        _ => cost_text(rules, &cost),
+    };
+    let tooltip = match (&verdict, action) {
+        (Err(reason), _) => reject_text(strings, rules, reason),
+        (Ok(()), CardAction::Build(_)) => format!(
+            "{}. {}",
+            fill(strings.hud("tooltip.place"), &[("building", &name)]),
+            fill(strings.hud("tooltip.cost"), &[("cost", &cost_line)])
+        ),
+        (Ok(()), CardAction::Train(..)) => format!(
+            "{}: {}",
+            fill(strings.hud("button.train"), &[("unit", &name)]),
+            fill(strings.hud("tooltip.cost"), &[("cost", &cost_line)])
+        ),
+        (Ok(()), CardAction::CancelSite(_)) => strings.hud("tooltip.cancel_site").to_string(),
+    };
+    let state = CardState {
+        enabled: verdict.is_ok(),
+        tooltip,
+    };
+    (state, cost_line)
+}
+
 /// Every frame: each button's verdict, tooltip and cost line.
 pub fn update_card_states(
     sim: NonSend<SimHandle>,
@@ -381,29 +415,7 @@ pub fn update_card_states(
     }
     let rules = sim.rules();
     for (button, mut state, children) in &mut buttons {
-        let (name, cost, verdict) = evaluate(&view, rules, button.0);
-        let cost_line = match button.0 {
-            CardAction::CancelSite(_) => String::new(),
-            _ => cost_text(rules, &cost),
-        };
-        let tooltip = match (&verdict, button.0) {
-            (Err(reason), _) => reject_text(&strings, rules, reason),
-            (Ok(()), CardAction::Build(_)) => format!(
-                "{}. {}",
-                fill(strings.hud("tooltip.place"), &[("building", &name)]),
-                fill(strings.hud("tooltip.cost"), &[("cost", &cost_line)])
-            ),
-            (Ok(()), CardAction::Train(..)) => format!(
-                "{}: {}",
-                fill(strings.hud("button.train"), &[("unit", &name)]),
-                fill(strings.hud("tooltip.cost"), &[("cost", &cost_line)])
-            ),
-            (Ok(()), CardAction::CancelSite(_)) => strings.hud("tooltip.cancel_site").to_string(),
-        };
-        let want = CardState {
-            enabled: verdict.is_ok(),
-            tooltip,
-        };
+        let (want, cost_line) = card_state(&view, rules, &strings, button.0);
         if *state != want {
             *state = want;
         }
@@ -700,6 +712,35 @@ mod tests {
             selection_text(&view, rules, &strings(), &selection),
             "Yeoman x5"
         );
+    }
+
+    #[test]
+    fn at_the_walkthroughs_pop_cap_train_is_disabled_and_says_why() {
+        use sim::scenarios::{ECONOMY_WALKTHROUGH_POPCAP_TICK, commands_at, economy_walkthrough};
+        let rules = rules();
+        let (setup, stream) = economy_walkthrough(&rules);
+        let mut sim = sim::Sim::new(setup, rules, Box::new(NoAi));
+        for t in 0..ECONOMY_WALKTHROUGH_POPCAP_TICK {
+            sim.step(commands_at(&stream, t));
+        }
+        let (view, rules) = (sim.view(), sim.rules());
+        assert_eq!(view.pop(LOCAL_PLAYER), (25, 25));
+        let mut selection = Selection::default();
+        selection.set_building(BuildingId(1));
+        let actions = card_actions(&view, rules, &selection);
+        assert!(
+            matches!(actions.as_slice(), [CardAction::Train(BuildingId(1), _)]),
+            "{actions:?}"
+        );
+        let (state, cost) = card_state(&view, rules, &strings(), actions[0]);
+        assert_eq!(
+            state,
+            CardState {
+                enabled: false,
+                tooltip: "Population cap reached".into(),
+            }
+        );
+        assert!(cost.ends_with("Grain"), "the cost still shows: {cost}");
     }
 
     #[test]

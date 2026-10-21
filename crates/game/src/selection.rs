@@ -259,6 +259,7 @@ impl Plugin for SelectionPlugin {
                 (
                     update_drag_box,
                     control_groups,
+                    select_idle_builder,
                     clear_selection_on_escape,
                     expire_move_markers,
                 )
@@ -608,6 +609,56 @@ pub fn control_groups(keys: Res<ButtonInput<KeyCode>>, mut selection: ResMut<Sel
     }
 }
 
+/// The local player's next idle builder after `after` by id, wrapping to
+/// the first: a unit of a builder kind with no job and no order (holding a
+/// post counts as idle, as in the sim's idle seeking).
+pub fn next_idle_builder(
+    view: &SimView<'_>,
+    rules: &rules::Rules,
+    after: Option<UnitId>,
+) -> Option<UnitId> {
+    let idle: Vec<UnitId> = view
+        .units()
+        .filter(|u| {
+            u.owner == LOCAL_PLAYER
+                && u.job.is_none()
+                && u.order.is_none()
+                && rules.unit_kind(u.kind.0).is_some_and(|k| k.builder)
+        })
+        .map(|u| u.id)
+        .collect();
+    after
+        .and_then(|a| idle.iter().find(|&&id| id > a))
+        .or_else(|| idle.first())
+        .copied()
+}
+
+/// Period selects the next idle builder (`next_idle_builder`, cycling from
+/// the one selected last) and centres the camera on it.
+pub fn select_idle_builder(
+    keys: Res<ButtonInput<KeyCode>>,
+    sim: NonSend<SimHandle>,
+    mut selection: ResMut<Selection>,
+    mut cameras: Query<&mut RtsCamera>,
+    mut last: Local<Option<UnitId>>,
+) {
+    if !keys.just_pressed(KeyCode::Period) {
+        return;
+    }
+    let view = sim.view();
+    let Some(id) = next_idle_builder(&view, sim.rules(), *last) else {
+        return;
+    };
+    *last = Some(id);
+    selection.set([id]);
+    if let Some(u) = view.unit(id) {
+        let at = world_from_sim(u.pos, 0.0);
+        for mut cam in &mut cameras {
+            cam.focus = Vec3::new(at.x, 0.0, at.z);
+        }
+    }
+}
+
 /// Esc clears the selection (the pause menu takes Esc over from M6).
 pub fn clear_selection_on_escape(
     keys: Res<ButtonInput<KeyCode>>,
@@ -857,6 +908,46 @@ mod tests {
         assert!(!s.groups[0].contains(&UnitId(9)));
         assert_eq!(Selection::digit_of(KeyCode::Digit7), Some(7));
         assert_eq!(Selection::digit_of(KeyCode::KeyA), None);
+    }
+
+    #[test]
+    fn period_cycles_idle_builders_by_id_and_skips_busy_ones() {
+        struct NoAi;
+        impl sim::AiController for NoAi {
+            fn think(&mut self, _: sim::PlayerId, _: &SimView<'_>) -> Vec<sim::Command> {
+                Vec::new()
+            }
+        }
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let rules = rules::Rules::load(&data).expect("rules load");
+        let mut setup = sim::MatchSetup::scenario(&rules, 1);
+        setup.start = sim::StartKind::Standard;
+        let mut sim = sim::Sim::new(setup, rules, Box::new(NoAi));
+        // The standard start's Yeomen are UnitId(1..=5), all idle at tick 0.
+        let next = |sim: &sim::Sim, after: Option<u32>| {
+            next_idle_builder(&sim.view(), sim.rules(), after.map(UnitId)).map(|u| u.0)
+        };
+        assert_eq!(next(&sim, None), Some(1));
+        assert_eq!(next(&sim, Some(1)), Some(2));
+        assert_eq!(next(&sim, Some(5)), Some(1), "wraps");
+        // Order Yeoman 1 to move: it is skipped while the order runs.
+        let to = sim.view().unit(UnitId(1)).unwrap().pos;
+        let mv = sim::PlayerCommand {
+            player: LOCAL_PLAYER,
+            seq: 0,
+            cmd: sim::Command::Move {
+                units: vec![UnitId(1)],
+                target: sim::FxVec2::new(to.x + sim::Fx::from_int(20), to.y),
+                queue: false,
+            },
+        };
+        sim.step(&[mv]);
+        for _ in 0..4 {
+            sim.step(&[]);
+        }
+        assert!(sim.view().unit(UnitId(1)).unwrap().order.is_some());
+        assert_eq!(next(&sim, None), Some(2));
+        assert_eq!(next(&sim, Some(5)), Some(2), "wraps past the busy one");
     }
 
     #[test]

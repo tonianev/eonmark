@@ -292,6 +292,9 @@ mod tests {
         assert_eq!(resolve(100, &[mul(900)]), 90);
         assert_eq!(resolve(100, &[mul(900), mul(900)]), 81);
         assert_eq!(resolve(100, &[mul(900), mul(900), mul(900)]), 72);
+        // A floor after each row (150 -> 135 -> 121 -> 108), not one floor
+        // over the product (150 * 0.729 = 109.35 -> 109).
+        assert_eq!(resolve(150, &[mul(900), mul(900), mul(900)]), 108);
         assert_eq!(resolve(2, &[add(1)]), 3);
         assert_eq!(resolve(70, &[add(10), mul(1250)]), 100);
         assert_eq!(resolve(70, &[set(100), add(10)]), 110);

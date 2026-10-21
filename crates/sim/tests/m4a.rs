@@ -498,8 +498,10 @@ fn tech_age_gates_match_the_design_numbers() {
 
 /// Acceptance 1, third clause: each Letters level cuts the next research's
 /// cost (and time) by 10%, floored after each row. The probe is Arms I,
-/// whose 75 Lore makes the floor visible (67.5 -> 67); a real `Research`
-/// at Letters III deducts exactly the quote and queues its time.
+/// whose 75 Lore makes the floor visible (67.5 -> 67); Trade I and Arms II
+/// show that the floor follows each row rather than one floor over 0.729
+/// at the end; a real `Research` at Letters III deducts exactly the quote
+/// and queues its time.
 #[test]
 fn tech_each_letters_level_cuts_the_next_research_cost_by_ten_percent_floored() {
     let rules = load_rules();
@@ -524,11 +526,15 @@ fn tech_each_letters_level_cuts_the_next_research_cost_by_ten_percent_floored() 
     let arms = tech(&rules, "arms_1");
     let probe = rules.tech(arms.0).unwrap();
     assert_ne!(probe.cost["lore"] % 10, 0, "the floor must be visible");
+    // `research_quote` prices a tech whatever its age and predecessor.
+    let others = [tech(&rules, "trade_1"), tech(&rules, "arms_2")];
     let mut m = M::new(rules.clone(), 4);
     let mut quotes = vec![m.view().research_quote(P0, arms)];
+    let mut other_quotes = vec![others.map(|t| m.view().research_quote(P0, t))];
     for id in letters {
         m.ok(vec![debug_research(tech(&rules, id))]);
         quotes.push(m.view().research_quote(P0, arms));
+        other_quotes.push(others.map(|t| m.view().research_quote(P0, t)));
     }
     let column = |r: usize| quotes.iter().map(|(c, _)| c[r]).collect::<Vec<i64>>();
     assert_eq!(column(lore), [75, 67, 60, 54]);
@@ -548,6 +554,45 @@ fn tech_each_letters_level_cuts_the_next_research_cost_by_ten_percent_floored() 
             "letters {level}: arms_1 costs {} Lore + {} Ore, {t} ticks",
             cost[lore], cost[ore]
         );
+    }
+    // Arms I cannot tell a floor after each row from one floor over the
+    // product at the end: 75, 50 and 300 times 0.729 (54.675, 36.45,
+    // 218.7) floor to 54, 36 and 218 as well. Trade I and Arms II can: one
+    // floor over 0.729 would end at 51 Lore (70 * 0.729 = 51.03), 109 Lore
+    // (150 * 0.729 = 109.35) and 328 ds (450 * 0.729 = 328.05).
+    let base = |t: TechId, r: &str| i64::from(rules.tech(t.0).unwrap().cost[r]);
+    assert_eq!(base(others[0], "lore") * 729 / 1000, 51, "one floor");
+    assert_eq!(base(others[1], "lore") * 729 / 1000, 109, "one floor");
+    let trade_lore: Vec<i64> = other_quotes.iter().map(|q| q[0].0[lore]).collect();
+    assert_eq!(
+        trade_lore,
+        [70, 63, 56, 50],
+        "Trade I, floored after each row"
+    );
+    let arms_2: Vec<(i64, i64, u32)> = other_quotes
+        .iter()
+        .map(|q| (q[1].0[lore], q[1].0[ore], q[1].1))
+        .collect();
+    let want: Vec<(i64, i64, u32)> = [
+        (150, 100, 450),
+        (135, 90, 405),
+        (121, 81, 364),
+        (108, 72, 327),
+    ]
+    .map(|(l, o, ds)| (l, o, rules.ticks_from_ds(ds)))
+    .into();
+    assert_eq!(arms_2, want, "Arms II: 450 -> 405 -> 364 -> 327 ds");
+    for (level, (trade_lore, (lore_2, ore_2, t))) in trade_lore.iter().zip(&arms_2).enumerate() {
+        eprintln!(
+            "letters {level}: trade_1 costs {trade_lore} Lore; arms_2 costs {lore_2} Lore + {ore_2} Ore, {t} ticks"
+        );
+    }
+    for w in other_quotes.windows(2) {
+        for (prev, next) in w[0].iter().zip(&w[1]) {
+            for r in 0..4 {
+                assert_eq!(next.0[r], prev.0[r] * 900 / 1000, "floor(prev * 0.9)");
+            }
+        }
     }
     // A real Research at Letters III deducts exactly the quote.
     let setup = || {
@@ -606,6 +651,9 @@ fn tech_modifier_stacking_set_add_mul_produces_the_documented_values() {
     assert_eq!(resolve(100, &[mul(900)]), 90);
     assert_eq!(resolve(100, &[mul(900), mul(900)]), 81);
     assert_eq!(resolve(100, &[mul(900), mul(900), mul(900)]), 72);
+    // A floor after each row: 150 -> 135 -> 121 -> 108; one floor over the
+    // product would give 109 (150 * 0.729 = 109.35).
+    assert_eq!(resolve(150, &[mul(900), mul(900), mul(900)]), 108);
     assert_eq!(resolve(2, &[add(1)]), 3);
     assert_eq!(resolve(70, &[add(10), mul(1250)]), 100);
     assert_eq!(resolve(70, &[set(100), add(10)]), 110);
@@ -984,8 +1032,12 @@ fn tech_advance_age_rejections_change_nothing() {
 }
 
 /// Level k of a line needs level k-1 researched and age k (the data puts
-/// level k in age k-1 counting from 0): every tech, at every age, with and
-/// without its predecessor.
+/// level k in age k-1 counting from 0): every tech at every age, with all
+/// four level-1 techs researched and with or without Letters II (so level
+/// 2 with its predecessor, Letters III with and without its predecessor,
+/// the other level-3 techs without it); then level 2 is rejected in the
+/// Hearth Age and accepted in Masonry, and level 3 with its predecessor is
+/// rejected in Masonry and accepted in Charter, by applying the command.
 #[test]
 fn tech_level_k_needs_level_k_minus_1_and_age_k() {
     let rules = load_rules();
@@ -994,11 +1046,12 @@ fn tech_level_k_needs_level_k_minus_1_and_age_k() {
         assert_eq!(rules.age_of_tech(i), t.level - 1, "{}", t.id);
         assert_eq!(rules.tech_predecessor(i).is_some(), t.level > 1, "{}", t.id);
     }
-    // A lab in each age; the Charter Age needs a fifth tech.
-    let at_age = |age: u8| {
+    // A lab in each age, with Letters II or without it (`DebugResearch`
+    // skips the age check); the Charter Age needs a fifth tech.
+    let at_age = |age: u8, letters_2: bool| {
         let mut m = lab(&rules, 10);
         let mut ids = vec!["arms_1", "statecraft_1", "trade_1", "letters_1"];
-        if age == 2 {
+        if letters_2 {
             ids.push("letters_2");
         }
         let mut cmds: Vec<Command> = ids
@@ -1009,8 +1062,9 @@ fn tech_level_k_needs_level_k_minus_1_and_age_k() {
         m.ok(cmds);
         m
     };
-    for age in 0..3u8 {
-        let m = at_age(age);
+    let variants = [(0, false), (0, true), (1, false), (1, true), (2, true)];
+    for (age, letters_2) in variants {
+        let m = at_age(age, letters_2);
         assert_eq!(m.view().age(P0), age);
         for (i, t) in rules.techs.iter().enumerate() {
             let id = TechId(u16::try_from(i).unwrap());
@@ -1028,17 +1082,34 @@ fn tech_level_k_needs_level_k_minus_1_and_age_k() {
             } else {
                 Ok(())
             };
-            assert_eq!(got, want, "{} at age {age}", t.id);
+            assert_eq!(got, want, "{} at age {age}, {letters_2}", t.id);
+        }
+        // Letters III with its predecessor still waits for the Charter Age.
+        let letters_3 = m
+            .view()
+            .check_research(P0, BuildingId(1), tech(&rules, "letters_3"));
+        if letters_2 && age < 2 {
+            assert_eq!(letters_3, Err(RejectReason::AgeRequired), "age {age}");
         }
     }
     // The checks are what apply does: level 2 is rejected in Hearth and
-    // accepted once in Masonry.
-    let letters_2 = tech(&rules, "letters_2");
-    let mut m = at_age(0);
+    // accepted once in Masonry; level 3 with its predecessor is rejected in
+    // Masonry (changing nothing) and accepted in Charter.
+    let (letters_2, letters_3) = (tech(&rules, "letters_2"), tech(&rules, "letters_3"));
+    let mut m = at_age(0, false);
     let events = m.run(vec![research(1, letters_2)]);
     assert_eq!(rejections(&events), [RejectReason::AgeRequired]);
-    let mut m = at_age(1);
+    let mut m = at_age(1, false);
     m.ok(vec![research(1, letters_2)]);
+    rejected_without_change(
+        "level 3 in the Masonry Age",
+        &|| at_age(1, true),
+        0,
+        research(1, letters_3),
+        RejectReason::AgeRequired,
+    );
+    let mut m = at_age(2, true);
+    m.ok(vec![research(1, letters_3)]);
 }
 
 /// Trade I, II and III set the Yield Cap to 100, 150 and 200 for every
@@ -1064,10 +1135,10 @@ fn tech_trade_sets_the_yield_cap_100_150_200() {
     assert_eq!(caps(&m)[res(&rules, "lore")], None);
 }
 
-/// Statecraft I adds 1 to the town limit and 1 tile to the radius of
-/// every own Town at once (a field change for each), not to another
-/// player's; a Town completed afterwards projects the pushed radius; the
-/// field always equals a full recompute.
+/// Statecraft I, II and III each add 1 to the town limit and 1 tile to the
+/// radius of every own Town at once (a field change for each), not to
+/// another player's; a Town completed afterwards projects the pushed
+/// radius; the field always equals a full recompute.
 #[test]
 fn tech_statecraft_raises_the_town_limit_and_pushes_every_own_border() {
     let rules = load_rules();
@@ -1086,6 +1157,7 @@ fn tech_statecraft_raises_the_town_limit_and_pushes_every_own_border() {
     assert_eq!(m.view().towns(P0), (2, 2));
     let third_town = |m: &M| m.view().check_build(P0, UnitId(1), town, Tile::new(14, 26));
     assert_eq!(third_town(&m), Err(RejectReason::TownLimitReached));
+    assert_eq!(m.view().check_build_kind(P0, town), third_town(&m));
     let events = m.ok(vec![debug_research(tech(&rules, "statecraft_1"))]);
     assert_eq!(
         events
@@ -1106,6 +1178,7 @@ fn tech_statecraft_raises_the_town_limit_and_pushes_every_own_border() {
     assert_eq!(radius(&m, 1), 21);
     assert_eq!(m.view().towns(P0), (2, 3));
     assert!(third_town(&m).is_ok(), "{:?}", third_town(&m));
+    assert_eq!(m.view().check_build_kind(P0, town), third_town(&m));
     assert_eq!(m.view().territory(), &m.view().territory().recomputed());
     m.ok(vec![place(town, 14, 38, true)]);
     assert_eq!(
@@ -1119,6 +1192,22 @@ fn tech_statecraft_raises_the_town_limit_and_pushes_every_own_border() {
         (r1 + 2, r1 + 2, r1 + 2, r1)
     );
     assert_eq!(m.view().towns(P0), (3, 4));
+    assert_eq!(m.view().territory(), &m.view().territory().recomputed());
+    let events = m.ok(vec![debug_research(tech(&rules, "statecraft_3"))]);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| **e == SimEvent::TerritoryChanged)
+            .count(),
+        3,
+        "one change per own Town"
+    );
+    assert_eq!(
+        (radius(&m, 1), radius(&m, 2), radius(&m, 4), radius(&m, 3)),
+        (r1 + 3, r1 + 3, r1 + 3, r1)
+    );
+    assert_eq!(radius(&m, 1), 23);
+    assert_eq!(m.view().towns(P0), (3, 5));
     assert_eq!(m.view().territory(), &m.view().territory().recomputed());
 }
 
@@ -1248,6 +1337,9 @@ fn tech_masonry_gates_engine_yard_outrider_and_town_tier_two() {
     let seat_radius = |m: &M| m.view().territory().sources()[&BuildingId(1)].radius;
     let m = setup();
     assert_eq!((seat_tier(&m), seat_radius(&m)), (1, r1), "Hearth: tier 1");
+    let yard_at = |m: &M| m.view().check_build(P0, UnitId(1), yard, Tile::new(19, 67));
+    assert_eq!(yard_at(&m), Err(RejectReason::AgeRequired));
+    assert_eq!(m.view().check_build_kind(P0, yard), yard_at(&m));
     rejected_without_change(
         "an Engine Yard in the Hearth Age",
         &setup,
@@ -1290,6 +1382,8 @@ fn tech_masonry_gates_engine_yard_outrider_and_town_tier_two() {
     assert!(events.contains(&SimEvent::TerritoryChanged));
     assert_eq!((seat_tier(&m), seat_radius(&m)), (2, r2));
     assert_eq!(m.view().territory(), &m.view().territory().recomputed());
+    assert!(yard_at(&m).is_ok(), "{:?}", yard_at(&m));
+    assert_eq!(m.view().check_build_kind(P0, yard), yard_at(&m));
     m.ok(vec![
         Command::Build {
             unit: UnitId(1),
@@ -1316,15 +1410,30 @@ fn tech_masonry_gates_engine_yard_outrider_and_town_tier_two() {
 }
 
 /// Cancelling research entries, the head with progress and one behind it,
-/// refunds exactly what each paid: the state ends equal to a control that
-/// never queued them.
+/// refunds exactly what each paid when it was queued, not the cheaper
+/// quote after a later Letters level, with Lore under its cap so nothing
+/// is clamped: the state ends equal to a control that never queued them.
+/// At the Lore cap a refund leaves the stockpile at the cap, as for a unit.
 #[test]
 fn tech_research_cancel_refunds_exactly_what_it_paid() {
     let rules = load_rules();
     let (arms, trade) = (tech(&rules, "arms_1"), tech(&rules, "trade_1"));
+    let lore = res(&rules, "lore");
+    let cap = i64::from(rules.resources.resources[lore].stockpile_cap.unwrap());
     let setup = || {
-        let mut m = lab(&rules, 16);
-        m.ok(vec![debug_research(tech(&rules, "letters_1"))]);
+        let mut m = M::new(rules.clone(), 16);
+        m.ok(vec![
+            place(
+                bkind(&rules, "scriptorium"),
+                SCRIPTORIUM_A.0,
+                SCRIPTORIUM_A.1,
+                true,
+            ),
+            grant(res(&rules, "ore"), 2000),
+            // Well under Lore's stockpile_cap (999): the cap must not be
+            // able to hide a wrong Lore refund.
+            grant(lore, 400),
+        ]);
         m
     };
     let mut a = setup();
@@ -1337,23 +1446,24 @@ fn tech_research_cancel_refunds_exactly_what_it_paid() {
     a.ok(vec![research(1, arms), research(1, trade)]);
     b.run(vec![noop(), noop()]);
     let queue = &a.view().building(BuildingId(1)).unwrap().queue;
-    assert_eq!(queue[0].paid, quotes.0.0);
-    assert_eq!(queue[1].paid, quotes.1.0);
+    let paid = [queue[0].paid.clone(), queue[1].paid.clone()];
+    assert_eq!(paid, [quotes.0.0.clone(), quotes.1.0.clone()]);
     let spent: Vec<i64> = b
         .stock(P0)
         .iter()
         .zip(a.stock(P0))
         .map(|(b, a)| b - a)
         .collect();
-    let both: Vec<i64> = quotes
-        .0
-        .0
-        .iter()
-        .zip(&quotes.1.0)
-        .map(|(x, y)| x + y)
-        .collect();
+    let both: Vec<i64> = paid[0].iter().zip(&paid[1]).map(|(x, y)| x + y).collect();
     assert_eq!(spent, both);
     assert!(before.iter().zip(&both).all(|(s, c)| s >= c));
+    // Letters I after queueing: the quotes drop (75 Lore + 50 Ore to 67 +
+    // 45, 70 Lore to 63); what the entries paid must not.
+    let letters = tech(&rules, "letters_1");
+    a.ok(vec![debug_research(letters)]);
+    b.ok(vec![debug_research(letters)]);
+    assert_ne!(a.view().research_quote(P0, arms).0, paid[0]);
+    assert_ne!(a.view().research_quote(P0, trade).0, paid[1]);
     a.step(100);
     b.step(100);
     assert!(a.view().building(BuildingId(1)).unwrap().queue[0].progress > 100);
@@ -1361,6 +1471,7 @@ fn tech_research_cancel_refunds_exactly_what_it_paid() {
         building: BuildingId(1),
         slot,
     };
+    let (a_pre, b_pre) = (a.stock(P0), b.stock(P0));
     let events = a.ok(vec![cancel(1), cancel(0)]);
     b.run(vec![noop(), noop()]);
     assert!(events.contains(&SimEvent::TrainingCancelled {
@@ -1372,9 +1483,47 @@ fn tech_research_cancel_refunds_exactly_what_it_paid() {
         slot: 0
     }));
     assert!(a.view().building(BuildingId(1)).unwrap().queue.is_empty());
-    assert_eq!(a.stock(P0), b.stock(P0), "exactly the paid amounts back");
+    assert!(
+        a.stock(P0)[lore] < cap && b.stock(P0)[lore] < cap,
+        "the cap would hide a wrong Lore refund"
+    );
+    // What came back is exactly what both entries paid, plus the income
+    // both sims earned in the cancel's ticks.
+    let delta = |now: Vec<i64>, pre: &[i64]| -> Vec<i64> {
+        now.iter().zip(pre).map(|(x, y)| x - y).collect()
+    };
+    let income = delta(b.stock(P0), &b_pre);
+    let want: Vec<i64> = both.iter().zip(&income).map(|(p, i)| p + i).collect();
+    assert_eq!(
+        delta(a.stock(P0), &a_pre),
+        want,
+        "exactly the queue-time paid amounts back"
+    );
+    assert_eq!(a.stock(P0), b.stock(P0));
     assert_eq!(a.sim.sub_hashes(), b.sim.sub_hashes());
-    assert!(a.view().researched(P0).len() == 1, "nothing completed");
+    assert_eq!(
+        a.view().researched(P0).len(),
+        1,
+        "only the debug Letters I: nothing completed"
+    );
+    // At the cap: the stockpile stays at the cap, not cap + paid.
+    let mut a = lab(&rules, 16);
+    let mut b = lab(&rules, 16);
+    a.ok(vec![research(1, trade)]);
+    b.run(vec![noop()]);
+    let paid = a.view().building(BuildingId(1)).unwrap().queue[0].paid[lore];
+    a.ok(vec![grant(lore, u32::try_from(paid).unwrap())]);
+    b.ok(vec![grant(lore, u32::try_from(paid).unwrap())]);
+    assert_eq!((a.stock(P0)[lore], b.stock(P0)[lore]), (cap, cap));
+    let events = a.ok(vec![cancel(0)]);
+    b.run(vec![noop()]);
+    assert!(events.contains(&SimEvent::TrainingCancelled {
+        building: BuildingId(1),
+        slot: 0
+    }));
+    assert_eq!(a.stock(P0)[lore], cap, "clamped, not {}", cap + paid);
+    assert_eq!(a.stock(P0), b.stock(P0));
+    assert_eq!(a.sim.sub_hashes(), b.sim.sub_hashes());
 }
 
 /// Research time is fixed when the entry is queued: Letters researched
@@ -1513,15 +1662,25 @@ fn tech_debug_research_rejects_a_queued_tech() {
         },
         RejectReason::UnknownPlayer,
     );
-    // Debug commands off (a skirmish): rejected.
-    let setup = MatchSetup::skirmish(&rules, 19);
-    let mut sim = Sim::new(setup, rules.clone(), Box::new(NoAi));
-    let events = apply(
-        &mut sim,
-        vec![PlayerCommand::new(P0, 0, debug_research(letters))],
+    // Debug commands off (a skirmish): rejected, changing nothing.
+    let skirmish = || M {
+        sim: Sim::new(
+            MatchSetup::skirmish(&rules, 19),
+            rules.clone(),
+            Box::new(NoAi),
+        ),
+        seq: [0; 2],
+    };
+    rejected_without_change(
+        "debug commands off",
+        &skirmish,
+        0,
+        debug_research(letters),
+        RejectReason::DebugCommandsDisabled,
     );
-    assert_eq!(rejections(&events), [RejectReason::DebugCommandsDisabled]);
-    assert!(sim.view().researched(P0).is_empty());
+    let mut m = skirmish();
+    m.run(vec![debug_research(letters)]);
+    assert!(m.view().researched(P0).is_empty());
     // The queued one completes exactly once, at its host.
     let mut m = queued();
     let (_, ticks) = m.view().research_quote(P0, letters);
@@ -1542,9 +1701,13 @@ fn tech_debug_research_rejects_a_queued_tech() {
     assert_eq!(m.stock(P0), vec![0; 4]);
 }
 
-/// Snapshot with research half done, restore into a fresh sim and keep
-/// going through an `AdvanceAge`, further research and a cancel: every
-/// later tick hashes the same as the uninterrupted run.
+/// Snapshot, restore into a fresh sim and keep going: every later tick
+/// hashes the same as the uninterrupted run, every sub-hash included. The
+/// first restore has research half done and no tech complete, and goes
+/// through an `AdvanceAge`, further research and a queue `Cancel`. The
+/// second comes after the `AdvanceAge`, with Letters I and Trade I
+/// researched and Arms I in flight, before the `Research` of Letters II,
+/// which needs the restored age, the restored Letters I and its price.
 #[test]
 fn tech_restore_mid_research_matches_uninterrupted() {
     let rules = load_rules();
@@ -1597,34 +1760,82 @@ fn tech_restore_mid_research_matches_uninterrupted() {
             .map(|(_, c)| c.clone())
             .unwrap_or_default()
     };
-    let mut a = M::new(rules.clone(), 20).sim;
-    for tick in 0..300 {
-        a.step(&at(tick));
+    let letters_2 = t("letters_2");
+    for snap in [300u32, 680] {
+        let mut a = M::new(rules.clone(), 20).sim;
+        for tick in 0..snap {
+            a.step(&at(tick));
+        }
+        a.drain_events();
+        let q = &a.view().building(BuildingId(1)).unwrap().queue;
+        if snap == 300 {
+            assert!(q[0].progress > 100 && q.len() == 2, "research half done");
+            assert!(a.view().researched(P0).is_empty());
+        } else {
+            // The AdvanceAge applied during tick 652.
+            assert!(q[0].progress > 100 && q.len() == 1, "Arms I in flight");
+            assert_eq!(a.view().age(P0), 1);
+            assert_eq!(
+                a.view().researched(P0),
+                &std::collections::BTreeSet::from([t("letters_1"), t("trade_1")])
+            );
+            assert!(
+                a.view()
+                    .check_research(P0, BuildingId(2), letters_2)
+                    .is_ok()
+            );
+        }
+        let mut b = M::new(rules.clone(), 20).sim;
+        b.restore(&a.snapshot()).unwrap();
+        assert_eq!(a.hash(), b.hash());
+        assert_eq!(a.sub_hashes(), b.sub_hashes());
+        for p in [P0, P1] {
+            assert_eq!(b.view().age(p), a.view().age(p), "restore at {snap}");
+            assert_eq!(
+                b.view().researched(p),
+                a.view().researched(p),
+                "restore at {snap}"
+            );
+            assert_eq!(
+                b.view().research_quote(p, letters_2),
+                a.view().research_quote(p, letters_2),
+                "restore at {snap}: the Letters price"
+            );
+            assert_eq!(
+                b.view().check_research(p, BuildingId(2), letters_2),
+                a.view().check_research(p, BuildingId(2), letters_2),
+                "restore at {snap}"
+            );
+        }
+        let mut advanced = false;
+        for tick in snap..1500 {
+            let cmds = at(tick);
+            a.step(&cmds);
+            b.step(&cmds);
+            assert_eq!(a.hash(), b.hash(), "restore at {snap}, tick {tick}");
+            assert_eq!(
+                a.sub_hashes(),
+                b.sub_hashes(),
+                "restore at {snap}, tick {tick}"
+            );
+            advanced |= a
+                .drain_events()
+                .contains(&SimEvent::AgeAdvanced { player: P0, age: 1 });
+            b.drain_events();
+        }
+        assert_eq!(
+            advanced,
+            snap == 300,
+            "the stream advances an age after the first restore only"
+        );
+        let done: Vec<TechId> = a.view().researched(P0).iter().copied().collect();
+        assert_eq!(
+            done,
+            [t("arms_1"), t("trade_1"), t("letters_1"), letters_2],
+            "statecraft_1 was cancelled"
+        );
+        assert_eq!(b.view().researched(P0), a.view().researched(P0));
     }
-    let q = &a.view().building(BuildingId(1)).unwrap().queue;
-    assert!(q[0].progress > 100 && q.len() == 2, "research half done");
-    let mut b = M::new(rules.clone(), 20).sim;
-    b.restore(&a.snapshot()).unwrap();
-    assert_eq!(a.hash(), b.hash());
-    let mut advanced = false;
-    for tick in 300..1500 {
-        let cmds = at(tick);
-        a.step(&cmds);
-        b.step(&cmds);
-        assert_eq!(a.hash(), b.hash(), "tick {tick}");
-        assert_eq!(a.sub_hashes(), b.sub_hashes(), "tick {tick}");
-        advanced |= a
-            .drain_events()
-            .contains(&SimEvent::AgeAdvanced { player: P0, age: 1 });
-        b.drain_events();
-    }
-    assert!(advanced, "the stream advanced an age after the restore");
-    let done: Vec<TechId> = a.view().researched(P0).iter().copied().collect();
-    assert_eq!(
-        done,
-        [t("arms_1"), t("trade_1"), t("letters_1"), t("letters_2")],
-        "statecraft_1 was cancelled"
-    );
 }
 
 /// `SimView::check_research` and `check_advance_age` return exactly what

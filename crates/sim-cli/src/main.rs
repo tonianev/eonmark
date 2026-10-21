@@ -1145,6 +1145,15 @@ mod tests {
             .filter(|r| matches!(r, sim::replay::Record::Hash(_)))
             .count();
         assert_eq!(hashes, 90);
+        // Nothing in the stream draws from the rng: its sub-hash never moves.
+        let rng: std::collections::BTreeSet<u64> = recs
+            .iter()
+            .filter_map(|r| match r {
+                sim::replay::Record::Hash(h) => Some(h.sub.rng),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rng.len(), 1, "the selftest stream draws nothing");
         // A different seed changes the final hash.
         let out3 = temp("selftest_seed2.eonreplay");
         let (final_hash3, _) =

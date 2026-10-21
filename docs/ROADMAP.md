@@ -214,7 +214,7 @@ The player can see borders, place buildings inside them with a green/red ghost, 
 
 ### Good first issues
 
-- Add hover states and tooltips to command-card buttons (platform:macos, help wanted).
+- Add hover states and tooltips to command-card buttons (platform:macos, help wanted). Shipped inside M3b itself (`command_card.rs`); filed instead: #32 draw the selected building's rally point, #33 make the `hud_click` check pass under lavapipe and run it in the render smoke test, #34 check every UI strings language against `en.ron`'s keys in data-check.
 
 ### Estimate
 

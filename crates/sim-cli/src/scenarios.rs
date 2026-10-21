@@ -44,9 +44,9 @@ pub enum Scenario {
     /// ticks rejected with `NotEnoughTechs`, an unknown unit kind on tick
     /// 100, an unknown player on tick 200): no Move, so it exercises the
     /// delay queue and rejections without pathing. Since the M4a tech
-    /// slice nothing in the stream draws from the RNG (only `Attack` does,
-    /// until the combat slice), so the `rng` sub-hash keeps its seeded
-    /// value for the whole run. 400 ticks.
+    /// slice nothing in the stream draws from the RNG (and since the M4a
+    /// combat core slice no rejected command does), so the `rng` sub-hash
+    /// keeps its seeded value for the whole run. 400 ticks.
     Selftest,
     /// `units` Yeomen crossing west to east in a band of groups, each to its
     /// mirrored goal, through all three fords ([`sim::scenarios::bench_cross`],

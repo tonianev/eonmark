@@ -173,8 +173,10 @@ loop (a `Build` by a kind without it is rejected with `NotABuilder`), and
 training (`rules_version` 10) reads `cost`, `ramp`, `pop`, `train_time_ds`
 and `trainer`. So far `class` is checked only by the validator (no
 `Military` ramp on a `Civilian`), and `vision_tiles` is read in M7. The
-combat fields and the counter table are validated now and read from the
-M4a combat slices.
+combat fields and the counter table are validated, and the sim reads `hp`,
+the `attack` damage, range and cooldown and the counter table since the
+M4a combat core slice (`rules_version` 15); `prefer` is read from the
+combat behaviour slice, with target acquisition.
 
 | Field | Meaning |
 |-------|---------|
@@ -288,7 +290,11 @@ Watchtower only through `DebugPlaceBuilding` until a `Build` of one is
 tested). Gathering (`rules_version` 9) reads the rest of `gather`:
 `resource`, `worker` (which unit kind may take the slots and seeks them
 when idle) and `rate_per_worker` (credited per worked slot). `vision_tiles`
-is read in M7, `attack` from the M4a combat slices.
+is read in M7, `attack` from the M4a combat behaviour slice (the Watchtower
+and Town shooters). `hp` is a building's and a site's hit points from
+placement; since the M4a combat core slice it takes damage, and every
+building or site at 0 HP is destroyed except a complete Town, which stays
+at 0.
 
 | Field | Meaning |
 |-------|---------|

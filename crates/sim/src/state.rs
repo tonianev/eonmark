@@ -1276,7 +1276,7 @@ impl Sim {
             }
             Command::Attack { units, target } => {
                 // Validated purely, so a rejection changes nothing and,
-                // since the M4a combat slice, draws nothing from the rng.
+                // since the M4a combat core slice, draws nothing from the rng.
                 match combat::validate_attack(&self.state, &self.rules, pc.player, units, *target) {
                     Err(reason) => self.reject(&pc, reason),
                     Ok(attackers) => combat::apply_attack(&mut self.state, &attackers, *target),

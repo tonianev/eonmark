@@ -14,6 +14,9 @@
 //! and file order, keeps the rows of the one stat and passes them to
 //! [`rules::modifiers::resolve`] (the last `Set`, then every `Add`, then
 //! each `Mul` floored). The wrappers clamp the result to the stat's range.
+//! Unit hit points and damage (`unit_max_hp`, `unit_damage`) take the rows
+//! whose `UnitHp` or `UnitDamage` selector reaches the kind; combat reads
+//! them every tick, so Arms raises living units too.
 //!
 //! `Research` cost and time are fixed when the entry is queued (the Letters
 //! rows researched by then apply; later ones speed only later research),

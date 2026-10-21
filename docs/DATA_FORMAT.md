@@ -35,7 +35,7 @@ v = v + sum(Add)
 for each Mul row m, in collection order:  v = floor(v * m / 1000)
 ```
 
-Collection order is the faction's rows, then each researched tech in `TechId` order with its rows in file order. Flooring after each row is what makes Letters stack as 0.9, 0.81, 0.729 of the base, each floored: 100 becomes 90, 81, 72.
+Collection order is the faction's rows, then each researched tech in `TechId` order with its rows in file order. Flooring after each row is what makes Letters stack as 0.9, 0.81, 0.729 of the base, each floored: 100 becomes 90, 81, 72, and 150 becomes 135, 121, 108 (one floor over 0.729 would give 109).
 
 | Base | Set | Add | Mul (permille) | Result | Note |
 |---|---|---|---|---|---|
@@ -79,7 +79,7 @@ Cross-reference checks run after parsing. Implemented as of M3a: every cost, yie
 cargo run -p sim-cli -- data-check data/
 ```
 
-Exit code 0 prints one line such as `OK rules_version=13 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it, M2 `visuals.ron`, M3a `buildings.ron`, M4a `techs.ron`, `ages.ron` and `factions.ron`; the M3b UI strings are checked but not hashed). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
+Exit code 0 prints one line such as `OK rules_version=14 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en` (the hash changes whenever any loaded file changes; M1 added `units.ron` to it, M2 `visuals.ron`, M3a `buildings.ron`, M4a `techs.ron`, `ages.ron` and `factions.ron`; the M3b UI strings are checked but not hashed). Exit code 1 prints one line starting with `error:` in one of three shapes, from `rules::Error`:
 
 | Variant | Format | Example cause |
 |---|---|---|

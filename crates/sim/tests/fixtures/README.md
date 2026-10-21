@@ -25,9 +25,13 @@ Recorded 2026-10-21 at `rules_version` 14, `SIM_VERSION` 12 with
 player's age and researched techs, which the `tech` sub-hash now covers
 instead of a placeholder). No fixture researches, advances an age or
 reaches Town tier 2, so every behaviour is unchanged: a per-tick
-`sim-cli hash-dump --every 1` of each fixture, `SIM_VERSION` 11 binary
-against 12, differs in the whole hash and the `tech` column on every
-tick and in no other column. Every `.hash` file changes for that reason.
+`sim-cli hash-dump --every 1` of each fixture as recorded at
+`SIM_VERSION` 11, run by that binary with its own `data/`, against the
+re-recorded fixture run by the `SIM_VERSION` 12 binary with the current
+`data/`, differs in the whole hash and the `tech` column on every tick
+and in no other column. (Neither binary reads the other's recording: it
+reports `SIM VERSION MISMATCH`.) Every `.hash` file changes for that
+reason.
 
 Recorded 2026-10-21 at `rules_version` 13, `SIM_VERSION` 11 with
 `just rerecord` (M4a rules data: `techs.ron`, `ages.ron` and

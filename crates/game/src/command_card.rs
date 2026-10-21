@@ -566,13 +566,23 @@ pub fn selection_text(
                         .iter()
                         .enumerate()
                         .map(|(i, e)| {
-                            let QueueItem::Unit(k) = e.item;
-                            let unit = rules.unit_kind(k.0).expect("queued kinds are in the rules");
+                            let (name, total) = match e.item {
+                                QueueItem::Unit(k) => {
+                                    let unit = rules
+                                        .unit_kind(k.0)
+                                        .expect("queued kinds are in the rules");
+                                    (unit.name.as_str(), rules.train_time_ticks(unit))
+                                }
+                                QueueItem::Research { tech, ticks } => {
+                                    let tech =
+                                        rules.tech(tech.0).expect("queued techs are in the rules");
+                                    (tech.name.as_str(), ticks)
+                                }
+                            };
                             if i == 0 {
-                                let total = rules.train_time_ticks(unit).max(1);
-                                format!("{} {}%", unit.name, e.progress * 100 / total)
+                                format!("{name} {}%", e.progress * 100 / total.max(1))
                             } else {
-                                unit.name.clone()
+                                name.to_string()
                             }
                         })
                         .collect();
@@ -712,6 +722,47 @@ mod tests {
             selection_text(&view, rules, &strings(), &selection),
             "Yeoman x5"
         );
+    }
+
+    #[test]
+    fn a_queued_research_shows_its_tech_name_and_progress() {
+        let mut sim = standard();
+        let rules = sim.rules().clone();
+        let lore = u8::try_from(rules.resource_index("lore").unwrap()).unwrap();
+        let letters = sim::TechId(rules.tech_by_id("letters_1").unwrap().0);
+        let p = LOCAL_PLAYER;
+        let cmds = [
+            Command::DebugPlaceBuilding {
+                owner: p,
+                kind: kind(&rules, "scriptorium"),
+                tile: sim::Tile::new(28, 67),
+                complete: true,
+            },
+            Command::DebugGrant {
+                owner: p,
+                resource: lore,
+                amount: 100,
+            },
+            Command::Research {
+                building: BuildingId(3),
+                tech: letters,
+            },
+        ];
+        let cmds: Vec<_> = (0..)
+            .zip(cmds)
+            .map(|(seq, c)| sim::PlayerCommand::new(p, seq, c))
+            .collect();
+        sim.step(&cmds);
+        let (_, ticks) = sim.view().research_quote(p, letters);
+        // Applied during tick 2 (the command delay), which also gives the
+        // head its first tick; then half the research time.
+        for _ in 0..2 + ticks / 2 - 1 {
+            sim.step(&[]);
+        }
+        let mut selection = Selection::default();
+        selection.set_building(BuildingId(3));
+        let text = selection_text(&sim.view(), &rules, &strings(), &selection);
+        assert_eq!(text.lines().last(), Some("Queue: Letters I 50%"), "{text}");
     }
 
     #[test]

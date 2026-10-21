@@ -77,16 +77,18 @@ pub enum Command {
         /// Unit kind.
         kind: UnitKindId,
     },
-    /// Queue a tech at a Scriptorium or Watchtower.
+    /// Queue a tech at a building of its `host` kind (every M4a tech is
+    /// researched at a Scriptorium). Cost and time are fixed when queued.
     Research {
         /// Research building.
         building: BuildingId,
-        /// Tech.
+        /// Tech (index into `techs.ron`).
         tech: TechId,
     },
-    /// Advance to the next age.
+    /// Advance to the next age at once.
     AdvanceAge {
-        /// Player advancing.
+        /// Player advancing; must be the issuing player
+        /// (`RejectReason::PlayerMismatch` otherwise).
         player: PlayerId,
     },
     /// Set a building's rally point.
@@ -137,6 +139,16 @@ pub enum Command {
         resource: u8,
         /// Amount added.
         amount: u32,
+    },
+    /// Complete `tech` for `owner` at once, skipping its host, cost, time,
+    /// prerequisite and age (M4a). Rejected when the tech is researched or
+    /// queued already, so a tech never completes twice. Gated like
+    /// `DebugSpawn`.
+    DebugResearch {
+        /// Receiving player.
+        owner: PlayerId,
+        /// Tech (index into `techs.ron`).
+        tech: TechId,
     },
 }
 

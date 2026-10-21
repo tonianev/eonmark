@@ -25,8 +25,9 @@
 //! | [`economy`] | `Economy` stockpiles and accumulators, `RateInfo`, exact income, jobs step, cost helpers |
 //! | [`construction`] | footprints, `Build` validation, sites, construction, site cancel |
 //! | [`gather`] | `Gather`, slots and stand tiles, worked-slot income, idle workers seeking work |
-//! | [`town`] | standard start, town count and limit, attribution to the nearest Town, tier growth |
-//! | [`training`] | `Train`, queue `Cancel`, `SetRally`, pop, the unit cost ramps, the training step |
+//! | [`town`] | standard start, town count and limit, attribution to the nearest Town, tier and radius refresh |
+//! | [`training`] | `Train`, queue `Cancel`, `SetRally`, pop, the unit cost ramps, the training and research step |
+//! | [`tech`] | `TechState` (ages, researched techs), Modifier-resolved player stats, `Research`, `AdvanceAge`, `DebugResearch` |
 //! | [`ai_hook`] | `AiController`, `SimView` |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
@@ -46,6 +47,7 @@ pub mod pathing;
 pub mod replay;
 pub mod scenarios;
 pub mod state;
+pub mod tech;
 pub mod territory;
 pub mod town;
 pub mod training;
@@ -67,4 +69,5 @@ pub use state::{
     QueueItem, RejectReason, SIM_VERSION, Sim, SimEvent, SnapshotError, StartKind, SubHashes,
     TownState, Unit,
 };
+pub use tech::{PlayerTech, TechState};
 pub use territory::{InvalidTerritoryField, Source, SourceOwner, TerritoryField};

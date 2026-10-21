@@ -13,7 +13,8 @@
 //!
 //! Raw income is the base yield of every complete building (a Town's Grain
 //! and Lumber, a Scriptorium's Lore) plus the rate of every worked slot
-//! (`gather`). The Yield Cap applies per resource to resources with
+//! (`gather`). The Yield Cap (`yield_cap_base` with the player's `YieldCap`
+//! rows, `tech::yield_cap`) applies per resource to resources with
 //! `yield_capped`; Lore is exempt and stops at its `stockpile_cap` instead.
 
 use crate::construction::{at_work, building_rect};
@@ -78,13 +79,6 @@ pub struct RateInfo {
     pub credited: u32,
 }
 
-/// The Yield Cap for a player. The `YieldCap` Modifier rows (Trade) are
-/// applied from the M4a tech slice; until then every player has
-/// `yield_cap_base`.
-pub(crate) fn yield_cap(rules: &Rules, _p: PlayerId) -> u32 {
-    rules.yield_cap_base
-}
-
 /// The player's income per resource this tick, `resources.ron` order.
 pub(crate) fn rates(state: &State, rules: &Rules, p: PlayerId) -> Vec<RateInfo> {
     let n = rules.resources.resources.len();
@@ -100,7 +94,7 @@ pub(crate) fn rates(state: &State, rules: &Rules, p: PlayerId) -> Vec<RateInfo> 
         }
     }
     gather::worked_income(state, rules, p, &mut raw);
-    let cap = yield_cap(rules, p);
+    let cap = crate::tech::yield_cap(state, rules, p);
     rules
         .resources
         .resources

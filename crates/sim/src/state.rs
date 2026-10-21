@@ -19,9 +19,10 @@
 //!    - 6a construction: sites whose builder is at work gain progress; a
 //!      finished site completes (a Town or Watchtower adds its border, its
 //!      Town may grow a tier) and its builder may take a slot there;
-//!    - 6b training: every complete building's queue head gains a tick; a
-//!      finished unit appears beside the building and walks to its rally
-//!      point or takes a slot there;
+//!    - 6b training and research: every complete building's queue head
+//!      gains a tick; a finished unit appears beside the building and walks
+//!      to its rally point or takes a slot there, a finished tech applies
+//!      its rows and re-derives the owner's Towns;
 //!    - 6c jobs: a job whose target is gone, or whose worker stopped
 //!      somewhere it cannot work, is dropped; then idle workers past their
 //!      timer take the nearest free slot;
@@ -35,10 +36,11 @@ use crate::construction::{self, BuildPlan};
 use crate::economy::{self, Economy};
 use crate::fx::{Fx, FxVec2};
 use crate::gather;
-use crate::ids::{BuildingId, BuildingKindId, IdGen, PlayerId, Tile, UnitId, UnitKindId};
+use crate::ids::{BuildingId, BuildingKindId, IdGen, PlayerId, TechId, Tile, UnitId, UnitKindId};
 use crate::map::Map;
 use crate::movement::{self, SpatialGrid};
 use crate::pathing::{PathRequest, Pathing};
+use crate::tech::{self, TechState};
 use crate::territory::TerritoryField;
 use crate::town;
 use crate::training;
@@ -98,7 +100,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// own tile is passable (a rally on a building names no side), and with
 /// every ring tile blocked the candidates are every component, not just the
 /// first passable spiral tile's.
-pub const SIM_VERSION: u32 = 11;
+///
+/// 12: M4a tech. New hashed state `State.tech` (ages and researched
+/// techs, sub-hash `tech`). `Research` and `AdvanceAge` have real handlers
+/// and no longer draw from the RNG; a research entry
+/// (`QueueItem::Research`) fixes its cost and time when it is queued and
+/// completes in step 6b. The yield cap, pop cap, town limit and Town
+/// radius are resolved from the faction's and the researched techs'
+/// Modifier rows; a Town's radius is re-derived on research, age advance
+/// and completion; tier 2 needs `town_growth_age` (the Masonry Age).
+/// `Train` and `Build` check the age (and `Train` the kind's
+/// `requires_tech`). `DebugResearch` is appended to `Command`.
+pub const SIM_VERSION: u32 = 12;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,7 +353,8 @@ pub struct TownState {
     pub tier: u8,
 }
 
-/// One entry of a training (later also research) queue.
+/// One entry of a building's queue: a unit in training or a tech in
+/// research.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueEntry {
     /// What is being made.
@@ -351,11 +365,19 @@ pub struct QueueEntry {
     pub progress: u32,
 }
 
-/// Something a building can queue. Research joins in M4a.
+/// Something a building can queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueueItem {
     /// A unit of this kind.
     Unit(UnitKindId),
+    /// A tech, researched at its host (M4a).
+    Research {
+        /// The tech.
+        tech: TechId,
+        /// Research time in ticks, fixed when queued (the Letters rows
+        /// researched by then apply).
+        ticks: u32,
+    },
 }
 
 /// A building or a construction site.
@@ -383,7 +405,7 @@ pub struct Building {
     pub town_state: Option<TownState>,
     /// Worker slots, fixed at placement (0 for non-gatherers).
     pub slots: u8,
-    /// Training queue, head first.
+    /// Training and research queue, head first.
     pub queue: Vec<QueueEntry>,
     /// Where trained units walk, if set.
     pub rally: Option<FxVec2>,
@@ -538,11 +560,25 @@ pub enum SimEvent {
         /// Its new tier (1 or 2).
         tier: u8,
     },
+    /// A player completed a tech (research or `DebugResearch`).
+    ResearchCompleted {
+        /// The player.
+        player: PlayerId,
+        /// The tech.
+        tech: TechId,
+    },
+    /// A player entered the next age.
+    AgeAdvanced {
+        /// The player.
+        player: PlayerId,
+        /// The age entered (index into `ages.ron`).
+        age: u8,
+    },
 }
 
 /// Per-subsystem hashes for localising a divergence. Field order is the
-/// comparison order of [`SubHashes::first_difference`]. Subsystems that do
-/// not exist yet hash an empty placeholder so the layout is stable.
+/// comparison order of [`SubHashes::first_difference`]. Every field of
+/// the hashed state belongs to exactly one of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SubHashes {
     /// `BTreeMap<UnitId, Unit>`.
@@ -553,7 +589,8 @@ pub struct SubHashes {
     pub economy: u64,
     /// Territory field.
     pub territory: u64,
-    /// Researched techs and ages (M4a); placeholder.
+    /// Every player's age and researched techs ([`TechState`]); research
+    /// entries live in `buildings`.
     pub tech: u64,
     /// Path request queue and the active search (not the cache).
     pub pathing: u64,
@@ -627,11 +664,9 @@ pub(crate) struct State {
     pub(crate) economy: Economy,
     /// Border strength per owner and the owner of every tile.
     pub(crate) territory: TerritoryField,
+    /// Every player's age and researched techs.
+    pub(crate) tech: TechState,
 }
-
-/// Placeholder hashed for subsystems that do not exist yet.
-#[derive(Serialize)]
-struct Empty;
 
 /// A snapshot could not be decoded into match state.
 #[derive(Debug)]
@@ -707,6 +742,7 @@ impl Sim {
         let player_count = u8::try_from(players.len()).expect("at most 255 players");
         let territory = TerritoryField::new(map.width(), map.height(), player_count);
         let economy = Economy::new(players.len(), rules.resources.resources.len());
+        let tech = TechState::new(players.len());
         let mut state = State {
             tick: 0,
             seed: setup.seed,
@@ -721,6 +757,7 @@ impl Sim {
             pathing: Pathing::new(rules.path_cache_entries, true),
             economy,
             territory,
+            tech,
         };
         if setup.start == StartKind::Standard {
             assert!(
@@ -1078,10 +1115,57 @@ impl Sim {
                     Ok(()) => training::set_rally(&mut self.state, *building, *target),
                 }
             }
-            Command::Attack { .. } | Command::Research { .. } | Command::AdvanceAge { .. } => {
-                // Handlers arrive in M4a. Until then the command is counted
-                // and advances the rng once, as in M0, so the hash keeps
-                // depending on the full command stream.
+            Command::Research { building, tech } => {
+                match tech::validate_research(&self.state, &self.rules, pc.player, *building, *tech)
+                {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok((cost, ticks)) => tech::enqueue_research(
+                        &mut self.state,
+                        pc.player,
+                        *building,
+                        *tech,
+                        cost,
+                        ticks,
+                    ),
+                }
+            }
+            Command::AdvanceAge { player } => {
+                match tech::validate_advance(&self.state, &self.rules, pc.player, *player) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(cost) => tech::advance(
+                        &mut self.state,
+                        &self.rules,
+                        pc.player,
+                        &cost,
+                        &mut self.events,
+                    ),
+                }
+            }
+            Command::DebugResearch { owner, tech } => {
+                if !self.setup.debug_commands {
+                    self.reject(&pc, RejectReason::DebugCommandsDisabled);
+                    return;
+                }
+                if !self.state.players.iter().any(|p| p.id == *owner) {
+                    self.reject(&pc, RejectReason::UnknownPlayer);
+                    return;
+                }
+                match tech::validate_debug_research(&self.state, &self.rules, *owner, *tech) {
+                    Err(reason) => self.reject(&pc, reason),
+                    Ok(()) => tech::complete(
+                        &mut self.state,
+                        &self.rules,
+                        *owner,
+                        *tech,
+                        &mut self.events,
+                    ),
+                }
+            }
+            Command::Attack { .. } => {
+                // The handler arrives with the M4a combat slice. Until then
+                // the command is counted and advances the rng once, as in
+                // M0, so the hash keeps depending on the full command
+                // stream.
                 self.state.rng.next_u32();
                 self.reject(&pc, RejectReason::NotImplemented);
             }
@@ -1224,7 +1308,7 @@ impl Sim {
             buildings: crate::hash::hash_value(&s.buildings),
             economy: crate::hash::hash_value(&s.economy),
             territory: crate::hash::hash_value(&s.territory),
-            tech: crate::hash::hash_value(&Empty),
+            tech: crate::hash::hash_value(&s.tech),
             pathing: crate::hash::hash_value(&(&s.pathing.queue, &s.pathing.active)),
             rng: crate::hash::hash_value(&s.rng),
             map: crate::hash::hash_value(&s.map),

@@ -23,6 +23,7 @@ use crate::pathing::PathRequest;
 use crate::state::{
     Building, Construction, Job, MoveOrder, RejectReason, SimEvent, State, TownState, Unit,
 };
+use crate::tech;
 use crate::territory::{Source, SourceOwner};
 use crate::town;
 use rules::{BuildingKind, MapDef, Rules, Slots};
@@ -216,21 +217,23 @@ pub(crate) enum BuildPlan {
 /// 2. the kind exists (`UnknownBuildingKind`);
 /// 3. the unit's kind can build (`NotABuilder`);
 /// 4. an own site of this kind at `nw` is resumed ([`BuildPlan::Resume`]),
-///    when the unit can reach a tile beside it (as in check 12);
-/// 5. the footprint is on the map (`SiteOutOfBounds`);
-/// 6. every footprint tile is `p`'s territory (`OutsideBorders`);
-/// 7. every footprint tile is passable (`SiteBlocked`);
-/// 8. no unit of any player stands on it (`SiteOccupied`);
-/// 9. a Town keeps `p` within the town limit, sites included
-///    (`TownLimitReached`);
-/// 10. a kind with `max_per_town` has a Town to belong to and room under
+///    when the unit can reach a tile beside it (as in check 13), whatever
+///    the age;
+/// 5. `p` has reached the age that unlocks the kind (`AgeRequired`);
+/// 6. the footprint is on the map (`SiteOutOfBounds`);
+/// 7. every footprint tile is `p`'s territory (`OutsideBorders`);
+/// 8. every footprint tile is passable (`SiteBlocked`);
+/// 9. no unit of any player stands on it (`SiteOccupied`);
+/// 10. a Town keeps `p` within the town limit with its `TownLimit` rows,
+///     sites included (`TownLimitReached`);
+/// 11. a kind with `max_per_town` has a Town to belong to and room under
 ///     its limit there, sites included (`PerTownLimitReached`);
-/// 11. an `Adjacent` gatherer has at least one resource tile beside it
+/// 12. an `Adjacent` gatherer has at least one resource tile beside it
 ///     (`NoAdjacentResource`);
-/// 12. the builder can walk to a tile of the ring around the footprint,
+/// 13. the builder can walk to a tile of the ring around the footprint,
 ///     with the footprint already blocked: `SiteBlocked` when no ring tile
 ///     is passable, `Unreachable` when none is reachable;
-/// 13. `p` can pay the ramped cost (`CannotAfford`, first short resource).
+/// 14. `p` can pay the ramped cost (`CannotAfford`, first short resource).
 pub(crate) fn validate_build(
     state: &State,
     rules: &Rules,
@@ -265,6 +268,9 @@ pub(crate) fn validate_build(
         builder_stand(map, rect, u.pos)?;
         return Ok(BuildPlan::Resume { site: site.id });
     }
+    if !tech::age_allows_building(state, rules, p, kind_id) {
+        return Err(RejectReason::AgeRequired);
+    }
     let rect =
         footprint(kind, nw, map.width(), map.height()).ok_or(RejectReason::SiteOutOfBounds)?;
     if !rect.tiles().all(|t| state.territory.is_buildable(p, t)) {
@@ -282,7 +288,7 @@ pub(crate) fn validate_build(
     }
     let town = if kind.town {
         let towns = town::town_count(state, rules, p);
-        if towns >= rules.town_limit_base {
+        if towns >= tech::town_limit(state, rules, p) {
             return Err(RejectReason::TownLimitReached);
         }
         None
@@ -500,8 +506,9 @@ pub(crate) fn step(state: &mut State, rules: &Rules, tick: u32, events: &mut Vec
 }
 
 /// Finish building `id`: a Town gets its town state and projects its
-/// tier-1 border, a kind with a border radius projects that, and the Town
-/// the building is attributed to may grow a tier. Emits
+/// tier-1 border (with the owner's `TownBorderRadius` rows), a kind with a
+/// border radius projects that, and the Town the building is attributed to
+/// is re-derived ([`town::refresh`]) and may grow a tier. Emits
 /// `BuildingCompleted` (and `TerritoryChanged` when a border moved).
 pub(crate) fn complete(
     state: &mut State,
@@ -514,16 +521,18 @@ pub(crate) fn complete(
     let kind = building_kind(rules, b.kind);
     let owner = b.owner;
     let centre = centre_tile(kind, b.tile);
-    let radius = if kind.town {
+    if kind.town {
         b.town_state.get_or_insert(TownState {
             seat: false,
             tier: 1,
         });
-        Some(rules.town_radius_base(1))
+    }
+    let attributed = b.town;
+    let radius = if kind.town {
+        Some(tech::town_radius(state, rules, owner, 1))
     } else {
         kind.border_radius_tiles
     };
-    let attributed = b.town;
     events.push(SimEvent::BuildingCompleted { building: id });
     if let Some(r) = radius {
         state.territory.add_source(
@@ -537,7 +546,7 @@ pub(crate) fn complete(
         events.push(SimEvent::TerritoryChanged);
     }
     if let Some(t) = attributed {
-        town::recompute_tier(state, rules, t, events);
+        town::refresh(state, rules, t, events);
     }
 }
 

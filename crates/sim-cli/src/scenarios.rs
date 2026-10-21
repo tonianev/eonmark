@@ -16,7 +16,7 @@ use rand_core::{Rng, SeedableRng};
 use sim::scenarios::{BENCH_CROSS_SEED, EAST, Stream, WEST};
 use sim::{
     BuildingId, BuildingKindId, Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, Rules, Sim,
-    Tile, UnitId, UnitKindId,
+    TechId, Tile, UnitId, UnitKindId,
 };
 
 /// A point in the river (impassable) north of the central ford. `bench
@@ -151,10 +151,11 @@ pub fn spawn(owner: u8, seq: u32, at: FxVec2, count: u16) -> PlayerCommand {
     )
 }
 
-/// Spawns for both players on tick 0, a not-yet-implemented command every 7
-/// ticks (counted and rejected, advancing the rng), a Stop every 50 ticks,
-/// an unknown unit kind on tick 100 and an unknown player on tick 200.
-/// No Move, so the stream never touches pathing or movement.
+/// Spawns for both players on tick 0, an `AdvanceAge` every 7 ticks
+/// (counted and rejected with `NotEnoughTechs`, drawing nothing from the
+/// rng), a Stop every 50 ticks, an unknown unit kind on tick 100 and an
+/// unknown player on tick 200. No Move, so the stream never touches
+/// pathing or movement.
 fn selftest(tick: u32) -> Vec<PlayerCommand> {
     let mut out = Vec::new();
     match tick {
@@ -182,9 +183,11 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
         _ => {}
     }
     if tick % 7 == 3 {
-        // `AdvanceAge` stays unimplemented until M4a. (`AttackMove` was used
-        // here through M1; since M2 the sim applies it like `Move`, which
-        // would break this stream's no-movement promise.)
+        // Neither player has researched a tech, so `AdvanceAge` is rejected
+        // with `NotEnoughTechs` (since the M4a tech slice; before it the
+        // command was `NotImplemented` and drew from the rng). `AttackMove`
+        // was used here through M1; since M2 the sim applies it like `Move`,
+        // which would break this stream's no-movement promise.
         let player = u8::try_from(tick % 2).expect("0 or 1");
         out.push(PlayerCommand::new(
             PlayerId(player),
@@ -208,10 +211,10 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 
 /// A seeded random command stream for `fuzz`: valid spawns, Moves and
 /// Stops for player 0, and invalid commands of every rejectable kind
-/// (unknown player, no valid units, unknown unit kind, not implemented,
-/// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`), a `Build`
-/// by a unit that does not exist, and everything player 1 issues after it
-/// surrenders). Returns the
+/// (unknown player, no valid units, unknown unit kind, not enough techs,
+/// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`, `Research`),
+/// a `Build` by a unit that does not exist, and everything player 1 issues
+/// after it surrenders). Returns the
 /// per-tick commands and the `(player, seq)` keys the sim must reject.
 /// `movement` enables Move commands.
 pub fn random_commands(
@@ -304,9 +307,9 @@ pub fn random_commands(
             rejected.push((PlayerId(0), seq[0]));
             seq[0] += 1;
         } else if bad < 36 {
-            // NotImplemented (counted, advances the rng). `AdvanceAge` is
-            // unimplemented until M4a; `AttackMove` no longer qualifies
-            // since M2 applies it like `Move`.
+            // NotEnoughTechs: player 0 owns no building, so it never
+            // researches anything. (Through M3b this was `NotImplemented`,
+            // which drew from the rng.)
             cmds.push(PlayerCommand::new(
                 PlayerId(0),
                 seq[0],
@@ -381,6 +384,18 @@ pub fn random_commands(
                     unit: UnitId(0),
                     kind: BuildingKindId(0),
                     tile: Tile::new(0, 0),
+                },
+            ));
+            rejected.push((PlayerId(0), seq[0]));
+            seq[0] += 1;
+        } else if (57..61).contains(&bad) {
+            // UnknownBuilding: a Research at BuildingId(0).
+            cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq[0],
+                Command::Research {
+                    building: BuildingId(0),
+                    tech: TechId(0),
                 },
             ));
             rejected.push((PlayerId(0), seq[0]));

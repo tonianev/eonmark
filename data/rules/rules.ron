@@ -3,8 +3,8 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  // 13: M4a rules data (techs, ages, factions, eight unit kinds, counters, shooter stats).
-  rules_version: 13,
+  // 14: M4a tech (Research, AdvanceAge, State.tech hashed; SIM_VERSION 12).
+  rules_version: 14,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

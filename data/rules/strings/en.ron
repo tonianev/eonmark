@@ -62,7 +62,7 @@
     "info.seat": "Seat, tier {count}",
     "info.town": "Town, tier {count}",
     "info.workers": "Workers {count} / {cap}",
-    "info.queue": "Training: {name}",
+    "info.queue": "Queue: {name}",
     "notice.placed": "{building} placed",
     "notice.completed": "{building} complete",
   },

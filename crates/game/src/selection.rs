@@ -27,8 +27,9 @@ use bevy::picking::pointer::{PointerButton, PointerId};
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::window::PrimaryWindow;
-use sim::{SimView, UnitId};
+use sim::{BuildingId, SimView, UnitId};
 
+use crate::buildings::BuildingRef;
 use crate::camera::RtsCamera;
 use crate::hud::{PointerOverUi, WorldInputSet};
 use crate::orders::OrderMode;
@@ -56,12 +57,16 @@ pub const RING_RESOLUTION: u32 = 48;
 /// Ring and marker line width, pixels (thin and calm, `docs/ART_STYLE.md`).
 pub const RING_LINE_WIDTH_PX: f32 = 1.5;
 
-/// The selected units and the nine control groups. Render-side state: the
-/// sim knows nothing about selection.
+/// The selected units or building, and the nine control groups.
+/// Render-side state: the sim knows nothing about selection. Units and a
+/// building are never selected together: selecting either clears the
+/// other.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     /// Currently selected units, in id order.
     pub units: BTreeSet<UnitId>,
+    /// The selected building (M3b), when no unit is selected.
+    pub building: Option<BuildingId>,
     /// Control groups 1..=9 at indices 0..=8.
     pub groups: [BTreeSet<UnitId>; 9],
 }
@@ -70,15 +75,24 @@ impl Selection {
     /// Replace the selection.
     pub fn set(&mut self, units: impl IntoIterator<Item = UnitId>) {
         self.units = units.into_iter().collect();
+        self.building = None;
+    }
+
+    /// Select one building alone.
+    pub fn set_building(&mut self, building: BuildingId) {
+        self.units.clear();
+        self.building = Some(building);
     }
 
     /// Deselect everything.
     pub fn clear(&mut self) {
         self.units.clear();
+        self.building = None;
     }
 
     /// Shift-click: add if absent, remove if present.
     pub fn toggle(&mut self, unit: UnitId) {
+        self.building = None;
         if !self.units.remove(&unit) {
             self.units.insert(unit);
         }
@@ -86,6 +100,7 @@ impl Selection {
 
     /// Add without removing.
     pub fn extend(&mut self, units: impl IntoIterator<Item = UnitId>) {
+        self.building = None;
         self.units.extend(units);
     }
 
@@ -114,9 +129,17 @@ impl Selection {
         match Self::slot(digit) {
             Some(slot) if !self.groups[slot].is_empty() => {
                 self.units = self.groups[slot].clone();
+                self.building = None;
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Drop a selected building that no longer exists.
+    pub fn prune_building(&mut self, exists: impl Fn(BuildingId) -> bool) {
+        if self.building.is_some_and(|b| !exists(b)) {
+            self.building = None;
         }
     }
 
@@ -229,6 +252,8 @@ impl Plugin for SelectionPlugin {
             .add_systems(Startup, (create_ring_assets, spawn_drag_box_node))
             .add_systems(PostStartup, mark_picking_camera)
             .add_observer(on_unit_click)
+            .add_observer(on_building_click)
+            .add_systems(Update, draw_building_selection)
             .add_systems(
                 Update,
                 (
@@ -238,6 +263,7 @@ impl Plugin for SelectionPlugin {
                     expire_move_markers,
                 )
                     .chain()
+                    .before(crate::orders::order_mode_keys)
                     .in_set(WorldInputSet),
             )
             .add_systems(Update, draw_drag_box.after(WorldInputSet))
@@ -381,6 +407,68 @@ pub fn on_unit_click(
     }
 }
 
+/// Primary click on one of the local player's buildings selects it alone
+/// (`Selection::set_building`). The same gates as [`on_unit_click`]: not
+/// over the HUD, `Normal` mode, not the end of a box drag. Another
+/// player's building is not selectable yet.
+pub fn on_building_click(
+    click: On<Pointer<Click>>,
+    buildings: Query<&BuildingRef>,
+    mut selection: ResMut<Selection>,
+    over_ui: Res<PointerOverUi>,
+    sim: NonSend<SimHandle>,
+    drag: Res<DragBox>,
+    mode: Res<OrderMode>,
+) {
+    let Ok(building) = buildings.get(click.event().entity) else {
+        return;
+    };
+    if click.event().event.button != PointerButton::Primary
+        || over_ui.0
+        || *mode != OrderMode::Normal
+        || drag.0.is_some_and(|d| !d.is_click())
+    {
+        return;
+    }
+    let view = sim.view();
+    if view
+        .building(building.0)
+        .is_some_and(|b| b.owner == LOCAL_PLAYER)
+    {
+        selection.set_building(building.0);
+    }
+}
+
+/// Outline the selected building's footprint on the ground, a little
+/// outside it, in the selection-ring colour.
+pub fn draw_building_selection(
+    selection: Res<Selection>,
+    sim: NonSend<SimHandle>,
+    mut gizmos: Gizmos,
+) {
+    let Some(id) = selection.building else {
+        return;
+    };
+    let view = sim.view();
+    let Some(b) = view.building(id) else {
+        return;
+    };
+    let Some(kind) = sim.rules().building_kind(b.kind.0) else {
+        return;
+    };
+    let (w, h) = (kind.width_tiles as f32, kind.height_tiles as f32);
+    let centre = Vec3::new(
+        f32::from(b.tile.x) + w * 0.5 - crate::ground::HALF_EXTENT,
+        RING_Y,
+        f32::from(b.tile.y) + h * 0.5 - crate::ground::HALF_EXTENT,
+    );
+    gizmos.rect(
+        Isometry3d::new(centre, flat_on_ground()),
+        Vec2::new(w + 0.6, h + 0.6),
+        palette::SELECTION_RING,
+    );
+}
+
 /// Left button: on press (not over UI, in `Normal` mode) start a
 /// [`DragRect`] at the cursor; while held, update `current`; on release, if
 /// `!is_click()`, select the units whose sim position projects inside the
@@ -396,7 +484,7 @@ pub fn update_drag_box(
     over_ui: Res<PointerOverUi>,
     mode: Res<OrderMode>,
     hover: Res<HoverMap>,
-    units: Query<(), With<UnitRef>>,
+    units: Query<(), Or<(With<UnitRef>, With<BuildingRef>)>>,
     mut drag: ResMut<DragBox>,
     mut selection: ResMut<Selection>,
     sim: NonSend<SimHandle>,
@@ -523,20 +611,27 @@ pub fn control_groups(keys: Res<ButtonInput<KeyCode>>, mut selection: ResMut<Sel
 /// Esc clears the selection (the pause menu takes Esc over from M6).
 pub fn clear_selection_on_escape(
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<OrderMode>,
     mut selection: ResMut<Selection>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
+    // In attack-move or placement mode Esc only leaves the mode
+    // (`orders::order_mode_keys`, which runs after this).
+    if keys.just_pressed(KeyCode::Escape) && *mode == OrderMode::Normal {
         selection.clear();
     }
 }
 
 /// Drop ids that left the sim from the selection and groups.
 pub fn prune_dead(sim: NonSend<SimHandle>, mut selection: ResMut<Selection>) {
-    if selection.is_empty() && selection.groups.iter().all(BTreeSet::is_empty) {
+    if selection.is_empty()
+        && selection.building.is_none()
+        && selection.groups.iter().all(BTreeSet::is_empty)
+    {
         return;
     }
     let view = sim.view();
     selection.prune(|id| view.unit(id).is_some());
+    selection.prune_building(|id| view.building(id).is_some());
 }
 
 /// One ring entity per selected unit: spawn `(SelectionRing(id), Gizmo {

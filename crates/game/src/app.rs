@@ -204,6 +204,8 @@ pub fn run(cli: &Cli) -> AppExit {
         PresentPlugin,
         crate::buildings::BuildingsPlugin,
         crate::economy_hud::EconomyHudPlugin,
+        crate::command_card::CommandCardPlugin,
+        crate::placement::PlacementPlugin,
         SelectionPlugin,
         OrdersPlugin,
         HudPlugin { hud_click_check },

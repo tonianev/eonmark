@@ -28,6 +28,9 @@ Options:
   --hash-every-tick            Record a hash checkpoint every tick instead of every 20.
   --screenshot <PATH>          Dev builds: save a PNG of the window about one second
                                before --exit-after-seconds fires.
+  --screenshot-at <TICK>:<PATH>
+                               Save a PNG of the window once the sim has reached TICK
+                               (repeatable; scripted scenarios' beats, M3b proxies).
   --quit-via-menu-after-seconds <S>
                                Dev builds, macOS: after S seconds feed the `Quit Eonmark`
                                menu id through the same path a real Cmd-Q takes
@@ -151,6 +154,8 @@ pub struct Cli {
     pub background: bool,
     /// `--camera <x>,<y>,<zoom>`.
     pub camera: Option<CameraStart>,
+    /// `--screenshot-at <tick>:<path>`, in the order given.
+    pub screenshot_at: Vec<(u32, PathBuf)>,
 }
 
 impl Default for Cli {
@@ -169,6 +174,7 @@ impl Default for Cli {
             close_window_after_seconds: None,
             background: false,
             camera: None,
+            screenshot_at: Vec::new(),
         }
     }
 }
@@ -241,6 +247,19 @@ impl Cli {
                     cli.close_window_after_seconds = Some(secs);
                 }
                 "--background" => cli.background = true,
+                "--screenshot-at" => {
+                    let value = args.next().ok_or_else(|| format!("{arg}: missing value"))?;
+                    let (tick, path) = value
+                        .split_once(':')
+                        .ok_or_else(|| format!("{arg}: expected <tick>:<path>, got `{value}`"))?;
+                    let tick: u32 = tick
+                        .parse()
+                        .map_err(|e| format!("{arg}: tick `{tick}`: {e}"))?;
+                    if path.is_empty() {
+                        return Err(format!("{arg}: missing path after `{tick}:`"));
+                    }
+                    cli.screenshot_at.push((tick, PathBuf::from(path)));
+                }
                 "--camera" => {
                     let value = args.next().ok_or_else(|| format!("{arg}: missing value"))?;
                     cli.camera =
@@ -258,6 +277,9 @@ impl Cli {
             }
             if cli.camera.is_some() {
                 return Err("--camera needs a window; drop --headless-run".into());
+            }
+            if !cli.screenshot_at.is_empty() {
+                return Err("--screenshot-at needs a window; drop --headless-run".into());
             }
             if cli.quit_via_menu_after_seconds.is_some() {
                 return Err(
@@ -379,6 +401,28 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_at_takes_tick_path_pairs_in_order() {
+        let Ok(Parsed::Run(cli)) = parse(&[
+            "--screenshot-at",
+            "20:/tmp/a.png",
+            "--screenshot-at",
+            "2100:/tmp/b.png",
+        ]) else {
+            panic!("--screenshot-at parses");
+        };
+        assert_eq!(
+            cli.screenshot_at,
+            vec![
+                (20, PathBuf::from("/tmp/a.png")),
+                (2100, PathBuf::from("/tmp/b.png"))
+            ]
+        );
+        assert!(parse(&["--screenshot-at", "x:/tmp/a.png"]).is_err());
+        assert!(parse(&["--screenshot-at", "/tmp/a.png"]).is_err());
+        assert!(parse(&["--screenshot-at", "20:"]).is_err());
+    }
+
+    #[test]
     fn defaults_when_no_args() {
         assert_eq!(parse(&[]), Ok(Parsed::Run(Cli::default())));
         assert_eq!(Cli::default().hash_every(), 20);
@@ -418,6 +462,7 @@ mod tests {
                 close_window_after_seconds: None,
                 background: false,
                 camera: None,
+                screenshot_at: Vec::new(),
             })
         );
         let Parsed::Run(cli) = parsed else {

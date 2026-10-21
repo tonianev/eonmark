@@ -94,6 +94,8 @@ Captured on 2026-10-06 from the M2 integration build with `--screenshot` (dev bu
 
 `--camera <x>,<y>,<zoom>` frames a shot: it starts the camera over sim tile (x, y) at zoom metres (15 to 60) and skips the jump to the first units. `--camera 36,64,60` shows the whole west start with its border. Since M3b the windowed game also runs on Linux under Xvfb with the lavapipe software Vulkan driver, slowly but faithfully enough for screenshots: `xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json target/ci/eonmark --camera 36,64,60 --exit-after-seconds 14 --screenshot shot.png` (the `ci` profile binary takes `--screenshot` too; build it with `cargo build -p game --profile ci`).
 
+`--screenshot-at <TICK>:<PATH>` (repeatable) captures the window once the sim reaches a tick instead of after a wall-clock delay, so a scripted scenario's beats land in the picture however slowly the renderer runs. The M3b walkthrough: `target/ci/eonmark --scenario economy_walkthrough --camera 38,64,60 --exit-after-seconds 145 --screenshot-at 20:outside.png --screenshot-at 1400:expanded.png --screenshot-at 2100:amber.png --screenshot-at 2262:popcap.png` shows "Outside your borders" on the message line, the border grown around the second Town with "Town complete", the Grain readout in amber with "capped at 70", and Pop 25 / 25 with "Population cap reached" (`--exit-after-seconds` must outlast tick 2262 at the renderer's speed; 145 s is enough under lavapipe).
+
 ## Match log (M6)
 
 Play against the Standard bot from New Game to the game-over screen. One row per match. Keep the replay file; its name is the seed and timestamp.

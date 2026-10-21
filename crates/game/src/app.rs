@@ -261,6 +261,10 @@ pub fn run(cli: &Cli) -> AppExit {
     } else if cli.screenshot.is_some() {
         eprintln!("eonmark: --screenshot needs --exit-after-seconds to know when to capture");
     }
+    if !cli.screenshot_at.is_empty() {
+        app.insert_resource(TickScreenshots(cli.screenshot_at.clone()))
+            .add_systems(Update, take_tick_screenshots);
+    }
 
     app.run()
 }
@@ -333,6 +337,36 @@ fn limit_frame_rate(limiter: Res<FrameLimiter>, mut deadline: Local<Option<Insta
         }
     }
     *deadline = Some(next_deadline(*deadline, Instant::now(), period));
+}
+
+/// `--screenshot-at`: captures still to take, as `(tick, path)`.
+#[derive(Resource, Debug, Default)]
+struct TickScreenshots(Vec<(u32, std::path::PathBuf)>);
+
+/// Capture the primary window for every `--screenshot-at` whose tick the
+/// sim has reached (the PNG lands a frame or two later).
+fn take_tick_screenshots(
+    sim: NonSend<crate::sim_driver::SimHandle>,
+    mut shots: ResMut<TickScreenshots>,
+    mut commands: Commands,
+) {
+    if shots.0.is_empty() {
+        return;
+    }
+    let tick = sim.tick();
+    shots.0.retain(|(at, path)| {
+        if tick < *at {
+            return true;
+        }
+        info!(
+            "screenshot: tick {tick} reached {at}, capturing to {}",
+            path.display()
+        );
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path.clone()));
+        false
+    });
 }
 
 /// Capture the primary window once `at_secs` has passed, exactly once

@@ -1,11 +1,20 @@
 //! M4a acceptance tests. The tech slice: research, ages, the Modifier
 //! resolver and what the resolved stats change, in tests named `tech_` so
 //! that `cargo test -p sim tech` selects them (the filter matches test
-//! paths, not integration-test file names). The combat core: hit points,
-//! the explicit `Attack`, simultaneous hits, death and destruction, in
-//! tests named `combat_` (`cargo test -p sim combat`), plus the Arms hit
-//! point and damage rows (`tech_arms_*`, `tech_every_arms_*`) and the
-//! seeded random streams over both (`m4a_*`).
+//! paths, not integration-test file names). The combat core and behaviour:
+//! hit points, the explicit `Attack`, simultaneous hits, death and
+//! destruction, target acquisition by guards and attack-movers, the
+//! Watchtower and Town shooters, in tests named `combat_` (`cargo test -p
+//! sim combat`), plus the Arms hit point and damage rows (`tech_arms_*`,
+//! `tech_every_arms_*`), the counter triangle over 20 seeds (`counters_*`,
+//! acceptance 2) and the seeded random streams over tech and combat
+//! (`m4a_*`).
+//!
+//! Since the combat behaviour slice an idle armed unit fights any enemy in
+//! its reach on its own, so the tests that measure an explicit `Attack`
+//! spawn the attacker in the tick its order applies (P0's commands apply
+//! before P1's, so its target already exists), or keep the sides out of
+//! each other's reach.
 //!
 //! Most tests run on `MatchSetup::scenario`, an empty start: with no
 //! building there is no income, so stockpiles are exact through
@@ -2013,7 +2022,7 @@ fn deaths(events: &[SimEvent]) -> Vec<UnitId> {
     events
         .iter()
         .filter_map(|e| match e {
-            SimEvent::UnitDied { unit } => Some(*unit),
+            SimEvent::UnitDied { unit, .. } => Some(*unit),
             _ => None,
         })
         .collect()
@@ -2023,7 +2032,7 @@ fn destroyed(events: &[SimEvent]) -> Vec<BuildingId> {
     events
         .iter()
         .filter_map(|e| match e {
-            SimEvent::BuildingDestroyed { building } => Some(*building),
+            SimEvent::BuildingDestroyed { building, .. } => Some(*building),
             _ => None,
         })
         .collect()
@@ -2090,10 +2099,26 @@ fn hits_by(events: &[(u32, SimEvent)], attacker: TargetId) -> Vec<(u32, i32)> {
         .collect()
 }
 
+/// `(tick, damage)` of every hit by `attacker` on `target` among tagged
+/// events.
+fn hits_on(events: &[(u32, SimEvent)], attacker: TargetId, target: TargetId) -> Vec<(u32, i32)> {
+    events
+        .iter()
+        .filter_map(|(t, e)| match e {
+            SimEvent::Hit {
+                attacker: a,
+                target: d,
+                damage,
+            } if (*a, *d) == (attacker, target) => Some((*t, *damage)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The tick a unit died in, among tagged events.
 fn died_at(events: &[(u32, SimEvent)], unit: u32) -> Option<u32> {
     events.iter().find_map(|(t, e)| match e {
-        SimEvent::UnitDied { unit: u } if *u == UnitId(unit) => Some(*t),
+        SimEvent::UnitDied { unit: u, .. } if *u == UnitId(unit) => Some(*t),
         _ => None,
     })
 }
@@ -2149,9 +2174,10 @@ fn combat_damage_is_raw_times_counter_floored_every_cooldown() {
     let damages = |h: &[(u32, i32)]| h.iter().map(|h| i64::from(h.1)).collect::<Vec<_>>();
     let ticks = |h: &[(u32, i32)]| h.iter().map(|h| h.0).collect::<Vec<_>>();
 
-    // P0's Skirmisher is UnitId(1), P1's Bowman UnitId(2), a tile apart;
-    // P1's complete Croft is BuildingId(1).
-    m.ok(vec![spawn(skirm, 10, 30, 1)]);
+    // P1's Bowman is UnitId(1) and its complete Croft BuildingId(1); P0's
+    // Skirmisher UnitId(2) is spawned a tile from the Bowman in the tick its
+    // `Attack` applies, so it fights under that order from its first tick.
+    // (Idle armed units acquire enemies in reach: the Bowman shoots back.)
     m.run_as(
         1,
         vec![
@@ -2159,43 +2185,56 @@ fn combat_damage_is_raw_times_counter_floored_every_cooldown() {
             place_for(P1, bkind(&rules, "croft"), 14, 26, true),
         ],
     );
-    let events = m.issue_tagged(vec![attack(&[1], unit_t(2))], vec![], 60);
-    let on_bow = hits_by(&events, unit_t(1));
+    let events = m.issue_tagged(
+        vec![spawn(skirm, 10, 30, 1), attack(&[2], unit_t(1))],
+        vec![],
+        60,
+    );
+    let on_bow = hits_on(&events, unit_t(2), unit_t(1));
     assert_eq!(damages(&on_bow), [vs_bow; 2], "46 hp: two hits");
     assert_eq!(gaps(&ticks(&on_bow)), [cd_skirm]);
     assert_eq!(
-        died_at(&events, 2),
+        died_at(&events, 1),
         Some(on_bow[1].0),
         "dies at the second hit"
     );
-    let u = m.unit(1).unwrap();
+    // The order ended; idle again, the Skirmisher guards and takes the
+    // enemy Croft in its reach.
+    let u = m.unit(2).unwrap();
     assert_eq!(
         (u.target, u.intent),
-        (None, Intent::Plain),
+        (Some(building_t(1)), Intent::Plain),
         "the order ended"
     );
+    let guarded = hits_on(&events, unit_t(2), building_t(1));
 
-    let events = m.issue_tagged(vec![attack(&[1], building_t(1))], vec![], 140);
-    let on_croft = hits_by(&events, unit_t(1));
+    let events = m.issue_tagged(vec![attack(&[2], building_t(1))], vec![], 140);
+    let on_croft = hits_on(&events, unit_t(2), building_t(1));
     assert!(on_croft.len() >= 5, "{on_croft:?}");
     assert!(damages(&on_croft).iter().all(|d| *d == vs_building));
     assert!(gaps(&ticks(&on_croft)).iter().all(|g| *g == cd_skirm));
-    let n = i32::try_from(on_croft.len()).unwrap();
+    assert_eq!(hits_by(&events, unit_t(2)), on_croft, "only on the Croft");
+    let n = i32::try_from(guarded.len() + on_croft.len()).unwrap();
+    assert!(damages(&guarded).iter().all(|d| *d == vs_building));
     assert_eq!(
         m.view().building(BuildingId(1)).unwrap().hp,
         300 - 2 * n,
         "a building loses exactly what hit it"
     );
 
-    // P0's Shieldbearer (UnitId(3)) on P1's Yeoman (UnitId(4)): 13 a hit,
+    // P0's Shieldbearer (UnitId(4)) on P1's Yeoman (UnitId(3)): 13 a hit,
     // 40 hp, so the fourth hit kills, 24 ticks apart.
-    m.ok(vec![stop(&[1]), spawn(shield, 10, 36, 1)]);
+    m.ok(vec![stop(&[2])]);
     m.run_as(1, vec![spawn_for(P1, yeoman, 11, 36, 1)]);
-    let events = m.issue_tagged(vec![attack(&[3], unit_t(4))], vec![], 120);
-    let on_yeoman = hits_by(&events, unit_t(3));
+    let events = m.issue_tagged(
+        vec![spawn(shield, 10, 36, 1), attack(&[4], unit_t(3))],
+        vec![],
+        120,
+    );
+    let on_yeoman = hits_by(&events, unit_t(4));
     assert_eq!(damages(&on_yeoman), [vs_yeoman; 4]);
     assert_eq!(gaps(&ticks(&on_yeoman)), [cd_shield; 3]);
-    assert_eq!(died_at(&events, 4), Some(on_yeoman[3].0));
+    assert_eq!(died_at(&events, 3), Some(on_yeoman[3].0));
     eprintln!(
         "damage: skirmisher (Arms I) on bowman {vs_bow} x2 every {cd_skirm} ticks, on a croft {vs_building}; shieldbearer (Arms I) on yeoman {vs_yeoman} x4 every {cd_shield} ticks"
     );
@@ -2204,27 +2243,35 @@ fn combat_damage_is_raw_times_counter_floored_every_cooldown() {
 /// Two equal Skirmishers attack each other: every hit of a tick is collected
 /// from the post-movement positions before any is applied, so both land
 /// their eighth hit and die in the same tick, whichever has the lower id.
+/// Three ways in: P0's unit spawned first (the lower id) and P1's beside it
+/// a few ticks later, or the other way round, the two acquiring each other
+/// the moment the second appears; and P1's unit first with both ordered to
+/// `Attack` in the tick P0's appears (P0's commands apply first, so its
+/// order on P1's unit is valid only that way round).
 #[test]
 fn combat_hits_resolve_simultaneously_without_id_bias() {
     let rules = load_rules();
     let skirm = ukind(&rules, "skirmisher");
     let mut outcomes = Vec::new();
-    for p0_first in [true, false] {
+    for (p0_first, explicit) in [(true, false), (false, false), (false, true)] {
         let mut m = M::new(rules.clone(), 31);
         // The first spawn is UnitId(1), the second UnitId(2).
         let (p0_id, p1_id) = if p0_first { (1, 2) } else { (2, 1) };
-        if p0_first {
+        let events = if p0_first {
             m.ok(vec![spawn(skirm, 10, 30, 1)]);
-            m.run_as(1, vec![spawn_for(P1, skirm, 11, 30, 1)]);
+            m.issue_tagged(vec![], vec![spawn_for(P1, skirm, 11, 30, 1)], 200)
         } else {
             m.run_as(1, vec![spawn_for(P1, skirm, 11, 30, 1)]);
-            m.ok(vec![spawn(skirm, 10, 30, 1)]);
-        }
-        let events = m.issue_tagged(
-            vec![attack(&[p0_id], unit_t(p1_id))],
-            vec![attack(&[p1_id], unit_t(p0_id))],
-            200,
-        );
+            let (p0, p1) = if explicit {
+                (
+                    vec![spawn(skirm, 10, 30, 1), attack(&[p0_id], unit_t(p1_id))],
+                    vec![attack(&[p1_id], unit_t(p0_id))],
+                )
+            } else {
+                (vec![spawn(skirm, 10, 30, 1)], vec![])
+            };
+            m.issue_tagged(p0, p1, 200)
+        };
         let a = hits_by(&events, unit_t(p0_id));
         let b = hits_by(&events, unit_t(p1_id));
         assert_eq!(a.len(), 8, "80 hp at 10 a hit");
@@ -2235,11 +2282,17 @@ fn combat_hits_resolve_simultaneously_without_id_bias() {
         // The tick, relative to the first hit, does not depend on the ids.
         outcomes.push((a[7].0 - a[0].0, a.len()));
     }
-    assert_eq!(outcomes[0], outcomes[1], "no first strike for the lower id");
+    assert!(
+        outcomes.windows(2).all(|w| w[0] == w[1]),
+        "no first strike for the lower id: {outcomes:?}"
+    );
 }
 
-/// With `damage_variance_permille` 0 (the shipped value) a fight draws
-/// nothing: the `rng` sub-hash is the same on every tick of it.
+/// With `damage_variance_permille` 0 (the shipped value) hits draw
+/// nothing: the `rng` sub-hash is the same on every tick of this fight.
+/// (The only draw default combat makes is an exact tie when a unit
+/// acquires a target or a shooter aims, which this fight never meets:
+/// `combat_acquires_the_nearest_enemy_and_breaks_exact_ties_with_the_rng`.)
 #[test]
 fn combat_zero_variance_draws_no_randomness() {
     let rules = load_rules();
@@ -2302,17 +2355,27 @@ fn combat_variance_is_seeded_and_reproducible() {
 
 /// P1's complete Town at `TOWN` brought to 0 HP by 17 Mangonels (120 a hit
 /// on buildings, 2040 against 2000 HP) in one volley: P0's Mangonels are
-/// `UnitId(1..=17)`, the Town `BuildingId(1)`.
+/// `UnitId(1..=17)`, the Town `BuildingId(1)`. The Mangonels are spawned in
+/// the tick their `Attack` applies (idle, they would take the Town on their
+/// own); the Town shoots one of them in the same tick, its hit landing with
+/// theirs.
 fn town_at_zero(rules: &Rules, seed: u64) -> M {
     let mut m = M::new(rules.clone(), seed);
     m.run_as(
         1,
         vec![place_for(P1, bkind(rules, "town"), TOWN.0, TOWN.1, true)],
     );
-    m.ok(vec![spawn(ukind(rules, "mangonel"), 15, 31, 17)]);
     let ids: Vec<u32> = (1..=17).collect();
-    let events = m.ok(vec![attack(&ids, building_t(1))]);
-    assert_eq!(hits(&events).len(), 17, "one volley");
+    let events = m.ok(vec![
+        spawn(ukind(rules, "mangonel"), 15, 31, 17),
+        attack(&ids, building_t(1)),
+    ]);
+    let volley: Vec<_> = hits(&events)
+        .into_iter()
+        .filter(|(a, _, _)| matches!(a, TargetId::Unit(_)))
+        .collect();
+    assert_eq!(volley.len(), 17, "one volley");
+    assert_eq!(hits(&events).len(), 18, "and one shot from the Town");
     assert!(events.contains(&SimEvent::TownAtZeroHp {
         town: BuildingId(1)
     }));
@@ -2434,34 +2497,86 @@ fn combat_attack_rejections_change_nothing() {
 }
 
 /// `Stop` clears the target and the order: no hit follows. `Move` does the
-/// same.
+/// same. Two Skirmishers walking a path chase toward a Shieldbearer 20
+/// tiles off are stopped and moved away: no enemy is within their reach,
+/// so nothing more happens. In reach, the explicit order still ends, but a
+/// stopped unit is idle, so it guards: it takes the nearest enemy again
+/// (with `Intent::Plain`), while a moved one never engages on its way.
 #[test]
 fn combat_stop_clears_the_target() {
     let rules = load_rules();
     let (skirm, shield) = (ukind(&rules, "skirmisher"), ukind(&rules, "shieldbearer"));
+    let mv = |units: &[u32], to: (i32, i32)| Command::Move {
+        units: units.iter().map(|&u| UnitId(u)).collect(),
+        target: FxVec2::from_ints(to.0, to.1),
+        queue: false,
+    };
+
+    // Out of reach: P1's Shieldbearer is UnitId(1), 20 tiles east of P0's
+    // Skirmishers 2 and 3.
     let mut m = M::new(rules.clone(), 34);
-    // P0's Skirmishers either side of P1's Shieldbearer.
-    m.ok(vec![spawn(skirm, 10, 30, 1), spawn(skirm, 12, 30, 1)]);
-    m.run_as(1, vec![spawn_for(P1, shield, 11, 30, 1)]);
-    let events = m.issue_tagged(vec![attack(&[1, 2], unit_t(3))], vec![], 30);
-    assert!(!hits_by(&events, unit_t(1)).is_empty());
-    assert!(!hits_by(&events, unit_t(2)).is_empty());
-    m.ok(vec![
-        stop(&[1]),
-        Command::Move {
-            units: vec![UnitId(2)],
-            target: FxVec2::from_ints(4, 36),
-            queue: false,
-        },
-    ]);
-    for id in [1, 2] {
+    m.run_as(1, vec![spawn_for(P1, shield, 30, 30, 1)]);
+    m.issue_tagged(
+        vec![spawn(skirm, 10, 30, 2), attack(&[2, 3], unit_t(1))],
+        vec![],
+        20,
+    );
+    for id in [2, 3] {
+        let u = m.unit(id).unwrap();
+        assert!(
+            u.intent == Intent::Attack && u.order.is_some(),
+            "unit {id} walks a path chase: {u:?}"
+        );
+    }
+    m.ok(vec![stop(&[2]), mv(&[3], (4, 36))]);
+    for id in [2, 3] {
         let u = m.unit(id).unwrap();
         assert_eq!((u.target, u.intent), (None, Intent::Plain), "unit {id}");
     }
-    assert!(m.unit(1).unwrap().order.is_none());
-    let later = m.step(200);
+    assert!(m.unit(2).unwrap().order.is_none());
+    assert!(!m.view().pathing().has_request(UnitId(2)));
+    let later = m.step(300);
     assert!(hits(&later).is_empty(), "{later:?}");
-    assert!(m.hp(3).is_some_and(|(hp, max)| hp < max && hp > 0));
+    assert_eq!(m.hp(1), Some((130, 130)), "never hit");
+
+    // In reach: P1's Shieldbearer UnitId(1) between P0's Skirmishers 2 and
+    // 3, which attack it from the tick they appear.
+    let mut m = M::new(rules.clone(), 34);
+    m.run_as(1, vec![spawn_for(P1, shield, 11, 30, 1)]);
+    let events = m.issue_tagged(
+        vec![
+            spawn(skirm, 10, 30, 1),
+            spawn(skirm, 12, 30, 1),
+            attack(&[2, 3], unit_t(1)),
+        ],
+        vec![],
+        30,
+    );
+    assert!(!hits_by(&events, unit_t(2)).is_empty());
+    assert!(!hits_by(&events, unit_t(3)).is_empty());
+    m.ok(vec![stop(&[2]), mv(&[3], (4, 36))]);
+    let (stopped, moved) = (m.unit(2).unwrap(), m.unit(3).unwrap());
+    assert_eq!((moved.target, moved.intent), (None, Intent::Plain), "moved");
+    assert!(moved.order.is_some());
+    assert_eq!(
+        (stopped.intent, stopped.order.is_none()),
+        (Intent::Plain, true),
+        "the explicit order ended"
+    );
+    assert_eq!(
+        stopped.target,
+        Some(unit_t(1)),
+        "idle, it guards: the Shieldbearer in its reach again"
+    );
+    let later = m.step_tagged(100);
+    assert!(
+        hits_by(&later, unit_t(3)).is_empty(),
+        "a Move never engages"
+    );
+    assert!(
+        !hits_by(&later, unit_t(2)).is_empty(),
+        "the guard fights on"
+    );
 }
 
 /// What one unit did over a run, sampled after every tick.
@@ -2695,20 +2810,23 @@ const RING: [(i16, i16); 8] = [
     (-1, 0),
 ];
 
-/// P1's complete Watchtower on the tile `d` away from `(20, 30)`.
+/// A Watchtower site of P0's on the tile `d` away from `(20, 30)`: it
+/// blocks its tile like a complete tower, but a site does not shoot (a
+/// complete P1 tower would shoot the attackers) and an own building is no
+/// target for P0's units when they guard after giving up.
 fn ring_tower(rules: &Rules, d: (i16, i16)) -> Command {
     place_for(
-        P1,
+        P0,
         bkind(rules, "watchtower"),
         20u16.wrapping_add_signed(d.0),
         30u16.wrapping_add_signed(d.1),
-        true,
+        false,
     )
 }
 
 /// Every attacker of a group decides alike whether a target can be
 /// reached, so none is left behind: six Skirmishers ordered onto a Yeoman
-/// ringed by eight Watchtowers all give up in the tick the order applies,
+/// ringed by eight Watchtower sites all give up in the tick the order applies,
 /// with no path and no request (on one path each they would all walk to
 /// the one corrected goal tile beside the wall, which not all of them can
 /// come within the arrive radius of, and the rest would jostle there for
@@ -2736,9 +2854,8 @@ fn combat_group_attack_on_an_unreachable_target_gives_up() {
     // Walled off from the start.
     let mut m = M::new(rules.clone(), 37);
     m.ok(vec![spawn(skirm, 10, 30, 6)]); // UnitId(1..=6)
-    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)]; // UnitId(7)
-    walls.extend(RING.iter().map(|&d| ring_tower(&rules, d)));
-    m.run_as(1, walls);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 20, 30, 1)]); // UnitId(7)
+    m.ok(RING.iter().map(|&d| ring_tower(&rules, d)).collect());
     m.issue_tagged(vec![attack(&group, unit_t(7))], vec![], 0);
     assert!(given_up(&m), "in the tick the order applied");
     assert!(m.view().pathing().is_idle(), "no path asked for");
@@ -2747,9 +2864,8 @@ fn combat_group_attack_on_an_unreachable_target_gives_up() {
     // The ring closes behind the target while the group walks to its gap.
     let mut m = M::new(rules.clone(), 37);
     m.ok(vec![spawn(skirm, 10, 30, 6)]);
-    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)];
-    walls.extend(RING[..7].iter().map(|&d| ring_tower(&rules, d)));
-    m.run_as(1, walls);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 20, 30, 1)]);
+    m.ok(RING[..7].iter().map(|&d| ring_tower(&rules, d)).collect());
     m.issue_tagged(vec![attack(&group, unit_t(7))], vec![], 20);
     for id in group {
         let u = m.unit(id).unwrap();
@@ -2758,24 +2874,23 @@ fn combat_group_attack_on_an_unreachable_target_gives_up() {
             "unit {id} walks toward the gap: {u:?}"
         );
     }
-    m.run_as(1, vec![ring_tower(&rules, RING[7])]);
+    m.ok(vec![ring_tower(&rules, RING[7])]);
     assert!(given_up(&m), "in the tick the ring closed");
     quiet(&mut m);
 }
 
 /// A Bowman shoots over a wall: three ordered onto the Yeoman ringed by
-/// eight Watchtowers walk a path toward the nearest tile they can reach,
-/// which is in range of it, and kill it from beyond the wall instead of
-/// giving up.
+/// eight Watchtower sites walk a path toward the nearest tile they can
+/// reach, which is in range of it, and kill it from beyond the wall
+/// instead of giving up.
 #[test]
 fn combat_ranged_attack_on_a_walled_off_target_shoots_over_the_wall() {
     let rules = load_rules();
     let (bow, yeoman) = (ukind(&rules, "bowman"), ukind(&rules, "yeoman"));
     let mut m = M::new(rules.clone(), 37);
     m.ok(vec![spawn(bow, 4, 30, 3)]); // UnitId(1..=3), 15 tiles off
-    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)]; // UnitId(4)
-    walls.extend(RING.iter().map(|&d| ring_tower(&rules, d)));
-    m.run_as(1, walls);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 20, 30, 1)]); // UnitId(4)
+    m.ok(RING.iter().map(|&d| ring_tower(&rules, d)).collect());
     m.ok(vec![attack(&[1, 2, 3], unit_t(4))]);
     let (t, events) = trace(&mut m, 1, 400);
     assert!(died_at(&events, 4).is_some(), "shot over the wall: {t:?}");
@@ -2978,16 +3093,40 @@ fn combat_watchtower_destroyed_frees_footprint_border_and_tier() {
     };
     assert_eq!(seat(&m).0, 2, "grown");
     assert!(m.view().territory().sources().contains_key(&tower));
-    // Five P1 Mangonels: 5 x 120 against 500 HP. P0's Yeomen are
-    // UnitId(1..=5), P1's UnitId(6..=10), the Mangonels UnitId(11..=15).
+    // Five P1 Mangonels: 5 x 120 against 500 HP, spawned in the tick their
+    // `Attack` applies (idle, they would take P0's buildings on their
+    // own). P0's Yeomen are UnitId(1..=5), P1's UnitId(6..=10), the
+    // Mangonels UnitId(11..=15). The tower shoots one of them in that tick.
     let first = u32::try_from(m.view().unit_count()).unwrap() + 1;
-    m.run_as(1, vec![spawn_for(P1, ukind(&rules, "mangonel"), 35, 53, 5)]);
     let ids: Vec<u32> = (first..first + 5).collect();
-    assert!(ids.iter().all(|id| m.unit(*id).unwrap().owner == P1));
     let generation = m.view().map().cost_grid_generation();
     assert!(!m.view().map().passable(Tile::new(31, 58)));
-    let events = m.run_as(1, vec![attack(&ids, TargetId::Building(tower))]);
-    assert_eq!(hits(&events).len(), 5);
+    let events = m.run_as(
+        1,
+        vec![
+            spawn_for(P1, ukind(&rules, "mangonel"), 35, 53, 5),
+            attack(&ids, TargetId::Building(tower)),
+        ],
+    );
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert!(ids.iter().all(|id| m.unit(*id).unwrap().owner == P1));
+    let volley = hits(&events);
+    assert_eq!(
+        volley
+            .iter()
+            .filter(|(a, t, _)| matches!(a, TargetId::Unit(_)) && *t == TargetId::Building(tower))
+            .count(),
+        5
+    );
+    assert_eq!(
+        volley
+            .iter()
+            .filter(|(a, _, _)| *a == TargetId::Building(tower))
+            .count(),
+        1,
+        "the tower's last shot lands with the volley"
+    );
+    assert_eq!(volley.len(), 6);
     assert_eq!(destroyed(&events), [tower]);
     assert!(m.view().building(tower).is_none());
     assert_eq!(m.view().map().cost_grid_generation(), generation + 1);
@@ -3031,9 +3170,12 @@ fn combat_destroyed_building_loses_its_queue_and_frees_pop() {
     assert_eq!(m.view().building(BuildingId(1)).unwrap().queue.len(), 3);
     assert_eq!(m.view().pop(P1).0, 3);
     let stock = m.stock(P1);
-    // Seven Mangonels: 7 x 120 against 800 HP.
-    m.ok(vec![spawn(ukind(&rules, "mangonel"), 15, 31, 7)]);
-    let events = m.ok(vec![attack(&[1, 2, 3, 4, 5, 6, 7], building_t(1))]);
+    // Seven Mangonels: 7 x 120 against 800 HP, spawned in the tick their
+    // `Attack` applies (idle, they would take the hall on their own).
+    let events = m.ok(vec![
+        spawn(ukind(&rules, "mangonel"), 15, 31, 7),
+        attack(&[1, 2, 3, 4, 5, 6, 7], building_t(1)),
+    ]);
     assert_eq!(destroyed(&events), [BuildingId(1)]);
     assert_eq!(m.view().pop(P1).0, 0, "the queued pop is free");
     assert_eq!(m.stock(P1), stock, "no refund");
@@ -3085,13 +3227,13 @@ fn combat_site_at_zero_hp_is_destroyed_town_sites_included() {
         })
     );
     assert_eq!(m.view().towns(P1).0, 1, "the Town site counts");
-    // UnitId(2..=18) on the Town site, UnitId(19..=21) on the Croft site.
-    m.ok(vec![
-        spawn(mangonel, 15, 31, 17),
-        spawn(mangonel, 14, 38, 3),
-    ]);
+    // UnitId(2..=18) on the Town site, UnitId(19..=21) on the Croft site,
+    // spawned in the tick their `Attack`s apply (idle, they would take the
+    // sites on their own).
     let generation = m.view().map().cost_grid_generation();
     let events = m.ok(vec![
+        spawn(mangonel, 15, 31, 17),
+        spawn(mangonel, 14, 38, 3),
         attack(&(2..=18).collect::<Vec<_>>(), building_t(1)),
         attack(&[19, 20, 21], building_t(2)),
     ]);
@@ -3187,9 +3329,13 @@ fn combat_dead_worker_frees_its_slot_and_path_request() {
     );
     m.step(100);
     assert_eq!(m.view().worked_slots(BuildingId(1)), Some((1, 1, 1)));
-    // P0's Skirmishers UnitId(2..=5).
-    m.ok(vec![spawn(skirm, 24, 33, 4)]);
-    let events = m.issue_tagged(vec![attack(&[2, 3, 4, 5], unit_t(1))], vec![], 100);
+    // P0's Skirmishers UnitId(2..=5), spawned in the tick their `Attack`
+    // applies (idle, they would take the worker on their own).
+    let events = m.issue_tagged(
+        vec![spawn(skirm, 24, 33, 4), attack(&[2, 3, 4, 5], unit_t(1))],
+        vec![],
+        100,
+    );
     assert!(died_at(&events, 1).is_some());
     assert_eq!(
         m.view().worked_slots(BuildingId(1)),
@@ -3200,13 +3346,14 @@ fn combat_dead_worker_frees_its_slot_and_path_request() {
     // The request: 100 P1 Yeomen (UnitId(1..=100)) and the victim
     // (UnitId(101)) are ordered across the river in one Move, so the
     // victim's request queues behind theirs. Two P0 Mangonels
-    // (UnitId(102..=103), 30 a hit against 40 HP, in range at once) attack
-    // it in the same tick and kill it with their first volley.
+    // (UnitId(102..=103), 30 a hit against 40 HP, in range at once) are
+    // spawned and attack it in the same tick (idle, they would take it on
+    // their own before the Move) and kill it with their first volley. The
+    // control has no Mangonels.
     let setup = || {
         let mut m = M::new(rules.clone(), 43);
         m.run_as(1, vec![spawn_for(P1, yeoman, 8, 34, 100)]);
         m.run_as(1, vec![spawn_for(P1, yeoman, 30, 30, 1)]);
-        m.ok(vec![spawn(ukind(&rules, "mangonel"), 30, 33, 2)]);
         m
     };
     let go = Command::Move {
@@ -3216,7 +3363,14 @@ fn combat_dead_worker_frees_its_slot_and_path_request() {
     };
     let mut m = setup();
     let mut control = setup();
-    let events = m.issue_tagged(vec![attack(&[102, 103], unit_t(101))], vec![go.clone()], 0);
+    let events = m.issue_tagged(
+        vec![
+            spawn(ukind(&rules, "mangonel"), 30, 33, 2),
+            attack(&[102, 103], unit_t(101)),
+        ],
+        vec![go.clone()],
+        0,
+    );
     control.issue_tagged(vec![], vec![go], 0);
     let applied = m.sim.tick() - 1;
     assert_eq!(
@@ -3250,11 +3404,13 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
     let rules = load_rules();
     let (mangonel, yeoman) = (ukind(&rules, "mangonel"), ukind(&rules, "yeoman"));
     let cmd = |p: PlayerId, seq: u32, c: Command| PlayerCommand::new(p, seq, c);
-    // P0's Mangonels are UnitId(1..=15) (P0's commands apply first), P1's
-    // Yeomen UnitId(16..=65); P1's two Watchtowers and Croft
+    // P1's Yeomen are UnitId(1..=50); P1's two Watchtowers and Croft
     // BuildingId(1..=3) stand beside the block the Yeomen leave. P1's
-    // probes UnitId(66..=67) stand on one tile west of Watchtower 1, each
-    // with its own Move to the same click east of it: the same key.
+    // probes UnitId(51..=52) stand on one tile west of Watchtower 1, each
+    // with its own Move to the same click east of it: the same key. P0's
+    // Mangonels UnitId(53..=67) are spawned in the tick their `Attack`s
+    // apply (idle, they would take the buildings on their own before the
+    // searches are saturated).
     let probe = |id: u32| Command::Move {
         units: vec![UnitId(id)],
         target: FxVec2::from_ints(20, 30),
@@ -3263,7 +3419,6 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
     let mut stream: Vec<(u32, Vec<PlayerCommand>)> = vec![(
         0,
         vec![
-            cmd(P0, 0, spawn(mangonel, 12, 26, 15)),
             cmd(P1, 0, spawn_for(P1, yeoman, 8, 34, 50)),
             cmd(
                 P1,
@@ -3278,8 +3433,8 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
             cmd(P1, 3, place_for(P1, bkind(&rules, "croft"), 16, 33, true)),
             cmd(P1, 4, spawn_for(P1, yeoman, 13, 30, 1)),
             cmd(P1, 5, spawn_for(P1, yeoman, 13, 30, 1)),
-            cmd(P1, 6, probe(66)),
-            cmd(P1, 7, probe(67)),
+            cmd(P1, 6, probe(51)),
+            cmd(P1, 7, probe(52)),
         ],
     )];
     stream.push((
@@ -3288,7 +3443,7 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
             P1,
             8,
             Command::Move {
-                units: (16..=65).map(UnitId).collect(),
+                units: (1..=50).map(UnitId).collect(),
                 target: FxVec2::from_ints(110, 100),
                 queue: false,
             },
@@ -3297,9 +3452,10 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
     stream.push((
         4,
         vec![
-            cmd(P0, 1, attack(&[1, 2, 3, 4, 5], building_t(1))),
-            cmd(P0, 2, attack(&[6, 7, 8, 9, 10], building_t(2))),
-            cmd(P0, 3, attack(&[11, 12, 13, 14, 15], building_t(3))),
+            cmd(P0, 0, spawn(mangonel, 12, 26, 15)),
+            cmd(P0, 1, attack(&[53, 54, 55, 56, 57], building_t(1))),
+            cmd(P0, 2, attack(&[58, 59, 60, 61, 62], building_t(2))),
+            cmd(P0, 3, attack(&[63, 64, 65, 66, 67], building_t(3))),
         ],
     ));
     // Probe UnitId(68), on the same tile once Watchtower 1 is destroyed
@@ -3343,11 +3499,11 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
                     .filter(|p| !p.is_empty())
             };
             if tick == 2 {
-                // Both probes are served in the tick their Moves apply: 66
-                // by a search, inserted; 67 from that entry (a hit inserts
+                // Both probes are served in the tick their Moves apply: 51
+                // by a search, inserted; 52 from that entry (a hit inserts
                 // nothing).
-                assert!(path(66).is_some() && path(66) == path(67), "same key");
-                assert!(!path(66).unwrap().contains(&Tile::new(16, 30)));
+                assert!(path(51).is_some() && path(51) == path(52), "same key");
+                assert!(!path(51).unwrap().contains(&Tile::new(16, 30)));
                 assert_eq!(
                     v.pathing().cache.next_insert,
                     u64::from(cache),
@@ -3489,49 +3645,755 @@ fn combat_restore_mid_fight_matches_uninterrupted() {
     assert!(died > 0, "the fight went on after the restore");
 }
 
-/// Arms raises the hit points and damage of the owner's military units,
-/// living ones included: a wounded Skirmisher keeps the damage it took and
-/// gains the new maximum's difference, and its hits grow at once. The
-/// owner's civilians and the other player's units are untouched.
+// ---------------------------------------------------------------------------
+// Combat behaviour: acquisition, `AttackMove`, guards and shooters
+// (`combat_*`).
+// ---------------------------------------------------------------------------
+
+/// The `rng` sub-hash of a fresh sim with `seed` after `draws` draws.
+fn rng_after(seed: u64, draws: usize) -> (u64, Vec<u32>) {
+    use rand_core::{Rng, SeedableRng};
+    let mut rng = rand_pcg::Pcg32::seed_from_u64(seed);
+    let values = (0..draws).map(|_| rng.next_u32()).collect();
+    (sim::hash::hash_value(&rng), values)
+}
+
+/// `rng_index(n)` of a draw: `(draw * n) >> 32`.
+fn index_of(draw: u32, n: u32) -> u32 {
+    u32::try_from((u64::from(draw) * u64::from(n)) >> 32).unwrap()
+}
+
+/// An idle soldier takes the nearest enemy in its reach on its own, with no
+/// draw; between enemies at exactly the same distance it draws once from
+/// the sim's RNG and takes `ties[rng_index(n)]`, the ties in `TargetId`
+/// order, so the seed decides and both get taken over 20 seeds.
 #[test]
-fn tech_arms_raises_military_hp_and_damage_including_living_units() {
+fn combat_acquires_the_nearest_enemy_and_breaks_exact_ties_with_the_rng() {
     let rules = load_rules();
-    let (skirm, yeoman, shield) = (
-        ukind(&rules, "skirmisher"),
-        ukind(&rules, "yeoman"),
-        ukind(&rules, "shieldbearer"),
-    );
-    let mut m = M::new(rules.clone(), 46);
-    // P0: Skirmisher 1, Yeoman 2. P1: Skirmisher 3 (hits P0's once) and
-    // Shieldbearer 4 (P0's target).
-    m.ok(vec![spawn(skirm, 10, 30, 1), spawn(yeoman, 4, 26, 1)]);
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    // P1's Yeomen UnitId(1) 3 tiles west and UnitId(2) 4 tiles east of
+    // where P0's Skirmisher UnitId(3) appears.
+    let mut m = M::new(rules.clone(), 50);
     m.run_as(
         1,
         vec![
-            spawn_for(P1, skirm, 11, 30, 1),
-            spawn_for(P1, shield, 10, 33, 1),
+            spawn_for(P1, yeoman, 17, 30, 1),
+            spawn_for(P1, yeoman, 24, 30, 1),
         ],
     );
-    let events = m.issue_tagged(vec![], vec![attack(&[3], unit_t(1))], 3);
+    let rng = m.sim.sub_hashes().rng;
+    m.ok(vec![spawn(skirm, 20, 30, 1)]);
+    let u = m.unit(3).unwrap();
+    assert_eq!((u.target, u.intent), (Some(unit_t(1)), Intent::Plain));
+    assert_eq!(m.sim.sub_hashes().rng, rng, "a nearest enemy, no draw");
+    assert_eq!(m.sim.sub_hashes().rng, rng_after(50, 0).0);
+
+    // Both 3 tiles off: one draw.
+    let mut taken = std::collections::BTreeSet::new();
+    for seed in 0..20 {
+        let mut m = M::new(rules.clone(), seed);
+        m.run_as(
+            1,
+            vec![
+                spawn_for(P1, yeoman, 17, 30, 1),
+                spawn_for(P1, yeoman, 23, 30, 1),
+            ],
+        );
+        m.ok(vec![spawn(skirm, 20, 30, 1)]);
+        let (hash, draws) = rng_after(seed, 1);
+        assert_eq!(m.sim.sub_hashes().rng, hash, "seed {seed}: one draw");
+        let want = unit_t(1 + index_of(draws[0], 2));
+        assert_eq!(m.unit(3).unwrap().target, Some(want), "seed {seed}");
+        taken.insert(want);
+        // Kept afterwards, with no further draw.
+        m.step(5);
+        assert_eq!(m.unit(3).unwrap().target, Some(want));
+        assert_eq!(m.sim.sub_hashes().rng, hash, "seed {seed}: kept");
+    }
+    assert_eq!(taken.len(), 2, "the seed decides: {taken:?}");
+}
+
+/// Enemy units come before enemy buildings, a building in weapon range
+/// included, and the Mangonel (`prefer: Buildings`) the other way round.
+/// While it holds a building, a soldier turns on an enemy unit that comes
+/// into its reach.
+#[test]
+fn combat_units_before_buildings_and_mangonel_prefers_buildings() {
+    let rules = load_rules();
+    let (skirm, yeoman, mangonel) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "yeoman"),
+        ukind(&rules, "mangonel"),
+    );
+    let croft = bkind(&rules, "croft");
+    // P1's Croft BuildingId(1) touches the tile where P0's Skirmisher
+    // UnitId(2) appears (in weapon range); P1's Yeoman UnitId(1) is 4 tiles
+    // south (out of weapon range, in reach).
+    let mut m = M::new(rules.clone(), 51);
+    m.run_as(
+        1,
+        vec![
+            place_for(P1, croft, 21, 30, true),
+            spawn_for(P1, yeoman, 20, 34, 1),
+        ],
+    );
+    m.ok(vec![spawn(skirm, 20, 30, 1)]);
+    assert_eq!(m.unit(2).unwrap().target, Some(unit_t(1)), "the unit first");
+    let events = m.step_tagged(200);
+    let killed = died_at(&events, 1).expect("caught and killed");
+    assert!(
+        hits_on(&events, unit_t(2), building_t(1))
+            .iter()
+            .all(|h| h.0 > killed),
+        "the Croft in weapon range never displaced the Yeoman"
+    );
+    assert!(
+        !hits_on(&events, unit_t(2), building_t(1)).is_empty(),
+        "then the Croft"
+    );
+    assert_eq!(m.unit(2).unwrap().target, Some(building_t(1)));
+    // A Yeoman appears 4 tiles off: the Skirmisher leaves the Croft for it.
+    let pos = m.unit(2).unwrap().pos;
+    let (x, y) = (pos.x.floor_to_int(), pos.y.floor_to_int());
+    m.run_as(1, vec![spawn_for(P1, yeoman, x, y + 4, 1)]); // UnitId(3)
+    assert_eq!(m.unit(2).unwrap().target, Some(unit_t(3)), "units first");
+
+    // P0's Mangonel UnitId(2) with P1's Yeoman UnitId(1) 2 tiles east and
+    // P1's Croft BuildingId(1) 5.5 tiles east: the Croft.
+    let mut m = M::new(rules.clone(), 51);
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, yeoman, 22, 30, 1),
+            place_for(P1, croft, 26, 29, true),
+        ],
+    );
+    m.ok(vec![spawn(mangonel, 20, 30, 1)]);
+    let u = m.unit(2).unwrap();
+    assert_eq!((u.target, u.intent), (Some(building_t(1)), Intent::Plain));
+    let events = m.step_tagged(100);
+    assert!(!hits_on(&events, unit_t(2), building_t(1)).is_empty());
+    assert!(hits_on(&events, unit_t(2), unit_t(1)).is_empty());
+}
+
+/// An acquired target out of weapon range gives way to an enemy that comes
+/// into weapon range (the melee crowd case: a soldier that cannot get at
+/// its target fights what is next to it); one in weapon range is kept
+/// against another that comes into range.
+#[test]
+fn combat_acquired_target_switches_to_an_enemy_in_weapon_range() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 52);
+    // P1's Yeoman UnitId(1), 4 tiles east, walks off east; P0's Skirmisher
+    // UnitId(2) takes it and chases.
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, yeoman, 24, 30, 1),
+            Command::Move {
+                units: vec![UnitId(1)],
+                target: FxVec2::from_ints(40, 30),
+                queue: false,
+            },
+        ],
+    );
+    m.ok(vec![spawn(skirm, 20, 30, 1)]);
+    let u = m.unit(2).unwrap();
+    assert_eq!(u.target, Some(unit_t(1)));
+    // P1's Yeoman UnitId(3) appears on the tile the chaser is about to
+    // enter, in its weapon range, while UnitId(1) is still out of it.
+    let ahead = m.view().map().tile_of(u.pos);
+    m.run_as(
+        1,
+        vec![spawn_for(
+            P1,
+            yeoman,
+            i32::from(ahead.x) + 1,
+            i32::from(ahead.y),
+            1,
+        )],
+    );
+    let (u, a, b) = (
+        m.unit(2).unwrap(),
+        m.unit(1).unwrap().pos,
+        m.unit(3).unwrap().pos,
+    );
+    assert!(
+        u.pos.dist_sq_i64(a) > Fx::from_int(1).to_bits(),
+        "1 still out of range"
+    );
+    assert!(u.pos.dist_sq_i64(b) < Fx::from_int(1).to_bits());
+    assert_eq!(u.target, Some(unit_t(3)), "switched to the one in range");
+    // Held in range, it is kept when another comes into range.
+    let here = m.view().map().tile_of(u.pos);
+    m.run_as(
+        1,
+        vec![spawn_for(
+            P1,
+            yeoman,
+            i32::from(here.x),
+            i32::from(here.y),
+            1,
+        )],
+    ); // UnitId(4)
+    assert_eq!(m.unit(2).unwrap().target, Some(unit_t(3)), "kept");
+}
+
+/// `AttackMove` gives armed units `Intent::AttackMove`: a Skirmisher
+/// takes the enemy Yeoman beside its route, keeping its order (not
+/// followed) while it fights, kills it and walks on to its goal, where it
+/// arrives and then guards (`Intent::Plain`). The Yeoman in the same
+/// command just moves.
+#[test]
+fn combat_attack_move_engages_then_resumes_its_route() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 53);
+    // P1's Yeoman UnitId(1) 2 tiles off the route; P0's Skirmisher UnitId(2)
+    // and Yeoman UnitId(3).
+    m.run_as(1, vec![spawn_for(P1, yeoman, 16, 32, 1)]);
+    m.ok(vec![spawn(skirm, 6, 30, 1), spawn(yeoman, 6, 28, 1)]);
+    let goal = FxVec2::from_ints(36, 30);
+    m.ok(vec![Command::AttackMove {
+        units: vec![UnitId(2), UnitId(3)],
+        target: goal,
+    }]);
+    let (s, y) = (m.unit(2).unwrap(), m.unit(3).unwrap());
+    let s_goal = s.order.as_ref().unwrap().goal;
+    assert_eq!(s.intent, Intent::AttackMove { goal: s_goal });
+    assert_eq!(y.intent, Intent::Plain, "unarmed: a Move");
+    let (mut engaged, mut engaged_with_order, mut arrived) = (0, 0, None);
+    let mut events = Vec::new();
+    for _ in 0..600 {
+        let tick = m.sim.tick();
+        let step = m.step_tagged(1);
+        let u = m.unit(2).unwrap();
+        if u.target.is_some() {
+            engaged += 1;
+            engaged_with_order +=
+                u32::from(u.order.is_some() && u.intent == Intent::AttackMove { goal: s_goal });
+        }
+        if arrived.is_none()
+            && step
+                .iter()
+                .any(|(_, e)| *e == SimEvent::UnitArrived { unit: UnitId(2) })
+        {
+            arrived = Some(tick);
+        }
+        events.extend(step);
+    }
+    let killed = died_at(&events, 1).expect("the Yeoman beside the route dies");
+    assert!(
+        engaged > 0 && engaged_with_order == engaged,
+        "{engaged} {engaged_with_order}"
+    );
+    let arrived = arrived.expect("it walked on and arrived");
+    assert!(arrived > killed);
+    let u = m.unit(2).unwrap();
+    assert_eq!(
+        (u.intent, u.target, u.order.is_none()),
+        (Intent::Plain, None, true)
+    );
+    let post = u.post.expect("a post at the goal").goal;
+    assert!(
+        post.dist_sq_i64(s_goal) <= Fx::from_int(1).to_bits(),
+        "{post:?}"
+    );
+    assert!(hits_by(&events, unit_t(3)).is_empty());
+    assert!(m.unit(3).unwrap().order.is_none(), "the Yeoman arrived too");
+}
+
+/// The attack-move intent ends with its order: on arrival (the next think
+/// finds no order and the unit guards), and on an unreachable goal, which
+/// pathing corrects to the nearest tile of the unit's component, so the
+/// unit arrives there. `combat::think` never issues the order again: no
+/// path request follows the arrival. (The defensive `PathUnreachable`
+/// branch of step 4 clears it too: `state::tests`.)
+#[test]
+fn combat_attack_move_intent_ends_on_arrival_or_unreachable() {
+    let rules = load_rules();
+    let skirm = ukind(&rules, "skirmisher");
+    for (name, click, walls) in [
+        ("arrival", (30, 30), false),
+        ("unreachable", (20, 30), true),
+    ] {
+        let mut m = M::new(rules.clone(), 54);
+        if walls {
+            // A walled pocket round (20, 30): P0's Watchtower sites.
+            m.ok(RING.iter().map(|&d| ring_tower(&rules, d)).collect());
+        }
+        m.ok(vec![spawn(skirm, 6, 30, 1)]); // UnitId(1)
+        m.ok(vec![Command::AttackMove {
+            units: vec![UnitId(1)],
+            target: FxVec2::from_ints(click.0, click.1),
+        }]);
+        assert!(matches!(
+            m.unit(1).unwrap().intent,
+            Intent::AttackMove { .. }
+        ));
+        let mut arrived = false;
+        for _ in 0..600 {
+            let events = m.step(1);
+            if events.contains(&SimEvent::UnitArrived { unit: UnitId(1) }) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "{name}: arrived");
+        assert!(
+            matches!(m.unit(1).unwrap().intent, Intent::AttackMove { .. }),
+            "{name}: the intent ends at the next think"
+        );
+        m.step(1);
+        let u = m.unit(1).unwrap();
+        assert_eq!(
+            (u.intent, u.order.is_none()),
+            (Intent::Plain, true),
+            "{name}"
+        );
+        let quiet = trace(&mut m, 1, 200).0;
+        assert_eq!(
+            (quiet.requests, quiet.with_order),
+            (0, 0),
+            "{name}: no re-issue"
+        );
+        if walls {
+            let map = m.view().map().clone();
+            let here = map.tile_of(u.pos);
+            assert_ne!(
+                map.component_of(here),
+                map.component_of(Tile::new(20, 30)),
+                "the pocket is another component"
+            );
+        }
+    }
+}
+
+/// A plain `Move` never engages, even past enemies in weapon range and
+/// while one shoots at it, and neither does a rally walk; both guard once
+/// they arrive.
+#[test]
+fn combat_move_does_not_engage() {
+    let rules = load_rules();
+    let (skirm, yeoman, bow) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "yeoman"),
+        ukind(&rules, "bowman"),
+    );
+    let mut m = M::new(rules.clone(), 55);
+    // P1's Yeomen UnitId(1..=2) on the route and a Bowman UnitId(3) beside
+    // it; P0's Skirmisher UnitId(4) walks past them.
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, yeoman, 14, 31, 1),
+            spawn_for(P1, yeoman, 20, 29, 1),
+            spawn_for(P1, bow, 17, 33, 1),
+        ],
+    );
+    let events = m.issue_tagged(
+        vec![
+            spawn(skirm, 6, 30, 1),
+            Command::Move {
+                units: vec![UnitId(4)],
+                target: FxVec2::from_ints(38, 30),
+                queue: false,
+            },
+        ],
+        vec![],
+        0,
+    );
+    let mut all = events;
+    let mut walking = 0;
+    let arrived = loop {
+        let step = m.step_tagged(1);
+        let done = step
+            .iter()
+            .any(|(_, e)| *e == SimEvent::UnitArrived { unit: UnitId(4) });
+        all.extend(step);
+        let u = m.unit(4).expect("survives the walk");
+        if done {
+            break m.sim.tick();
+        }
+        walking += 1;
+        assert_eq!((u.target, u.intent), (None, Intent::Plain));
+        assert!(walking < 600);
+    };
+    assert!(
+        hits_by(&all, unit_t(4)).is_empty(),
+        "never engaged while walking"
+    );
+    assert!(
+        !hits_on(&all, unit_t(3), unit_t(4)).is_empty(),
+        "though shot at"
+    );
+    let passed = |id: u32| m.unit(id).map(|u| u.pos);
+    assert!(
+        passed(1).is_some() && passed(2).is_some(),
+        "the Yeomen live"
+    );
+    eprintln!("move: walked {walking} ticks, arrived at {arrived}");
+
+    // A rally walk: P0's Muster Hall BuildingId(1) trains a Skirmisher that
+    // walks to the rally point past P1's Yeoman UnitId(1), 2 tiles off its
+    // way and 12 from the rally point.
+    let mut m = M::new(rules.clone(), 55);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 24, 29, 1)]);
+    m.ok(vec![
+        place(
+            bkind(&rules, "muster_hall"),
+            MUSTER_HALL.0,
+            MUSTER_HALL.1,
+            true,
+        ),
+        grant(res(&rules, "grain"), 100),
+    ]);
+    m.ok(vec![
+        Command::SetRally {
+            building: BuildingId(1),
+            target: FxVec2::from_ints(36, 27),
+        },
+        train(1, skirm),
+    ]);
+    let events = m.step_tagged(700);
+    let spawned = events
+        .iter()
+        .find(|(_, e)| *e == SimEvent::UnitSpawned { unit: UnitId(2) })
+        .map(|(t, _)| *t)
+        .expect("trained");
+    assert!(
+        events
+            .iter()
+            .any(|(t, e)| *t > spawned && *e == SimEvent::UnitArrived { unit: UnitId(2) }),
+        "walked to the rally point"
+    );
+    assert!(hits(&events.iter().map(|e| e.1.clone()).collect::<Vec<_>>()).is_empty());
+    assert_eq!(m.hp(1), Some((40, 40)));
+}
+
+/// An idle soldier guards its post: it takes an enemy that comes into its
+/// reach, chases and kills it, keeping its post, and walks back to the post
+/// afterwards.
+#[test]
+fn combat_idle_soldier_guards_and_returns_to_post() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 56);
+    m.ok(vec![spawn(skirm, 6, 30, 1)]); // UnitId(1)
+    m.ok(vec![Command::Move {
+        units: vec![UnitId(1)],
+        target: FxVec2::from_ints(20, 30),
+        queue: false,
+    }]);
+    m.step(300);
+    let post = m.unit(1).unwrap().post.expect("arrived").goal;
+    // P1's Yeoman UnitId(2) appears 4 tiles off and walks away.
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, yeoman, 24, 30, 1),
+            Command::Move {
+                units: vec![UnitId(2)],
+                target: FxVec2::from_ints(26, 34),
+                queue: false,
+            },
+        ],
+    );
+    let u = m.unit(1).unwrap();
+    assert_eq!((u.target, u.intent), (Some(unit_t(2)), Intent::Plain));
+    let events = m.step_tagged(300);
+    assert!(died_at(&events, 2).is_some(), "chased and killed");
+    let u = m.unit(1).unwrap();
+    assert_eq!(u.post.map(|p| p.goal), Some(post), "the post is kept");
+    assert_eq!((u.target, u.order.is_none()), (None, true));
+    let arrive = Fx::from_ratio(25, 100);
+    assert!(
+        u.pos.dist_sq_i64(post) <= (arrive * arrive).to_bits(),
+        "back at its post: {:?} vs {post:?}",
+        u.pos
+    );
+}
+
+/// A complete Watchtower and a complete Town shoot enemy units in range of
+/// their footprints (range plus the unit's radius, edge of the footprint
+/// to the unit's centre: 7.35 tiles for a Yeoman), the nearest first, 15
+/// a shot every 30 ticks, and nothing else: not a unit 7.5 tiles off, not
+/// their owner's units, not enemy buildings; a Watchtower site does not
+/// shoot. Between units at exactly the same distance a shooter draws once
+/// and takes `ties[rng_index(n)]` in `UnitId` order.
+#[test]
+fn combat_watchtower_and_town_shoot_enemy_units_in_range() {
+    let rules = load_rules();
+    let (yeoman, tower, town) = (
+        ukind(&rules, "yeoman"),
+        bkind(&rules, "watchtower"),
+        bkind(&rules, "town"),
+    );
+    let mut m = M::new(rules.clone(), 57);
+    // P1's Town BuildingId(1) (tiles 4..=6 x 30..=32), Watchtower
+    // BuildingId(2) at (36, 32) and Watchtower site BuildingId(3) at
+    // (20, 38), far from both; P1's own Yeoman UnitId(1) beside the tower.
+    // P0's Yeomen: UnitId(2) 6.5 tiles east of the Town, 3 at 7.5; 4 at
+    // 6.5 west of the tower, 5 at 7.5; 6 beside the site; P0's Watchtower
+    // site BuildingId(4) beside the tower.
+    m.run_as(
+        1,
+        vec![
+            place_for(P1, town, 4, 30, true),
+            place_for(P1, tower, 36, 32, true),
+            place_for(P1, tower, 20, 38, false),
+            spawn_for(P1, yeoman, 37, 33, 1),
+        ],
+    );
+    let events = m.issue_tagged(
+        vec![
+            spawn(yeoman, 13, 31, 1),
+            spawn(yeoman, 14, 31, 1),
+            spawn(yeoman, 29, 32, 1),
+            spawn(yeoman, 28, 32, 1),
+            spawn(yeoman, 21, 38, 1),
+            place(tower, 37, 31, false),
+        ],
+        vec![],
+        200,
+    );
+    let by_town = hits_by(&events, building_t(1));
+    let by_tower = hits_by(&events, building_t(2));
+    assert!(by_town.iter().all(|h| h.1 == 15) && by_tower.iter().all(|h| h.1 == 15));
+    let targets = |b: u32| {
+        hits(&events.iter().map(|e| e.1.clone()).collect::<Vec<_>>())
+            .into_iter()
+            .filter(|(a, _, _)| *a == building_t(b))
+            .map(|(_, t, _)| t)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        targets(1),
+        [unit_t(2)].into(),
+        "the Town: only the one in range"
+    );
+    assert_eq!(
+        targets(2),
+        [unit_t(4)].into(),
+        "the tower: only the one in range"
+    );
+    assert!(targets(3).is_empty(), "a site does not shoot");
+    // 40 hp at 15 a shot: the third kills, 30 ticks apart.
+    assert_eq!(by_town.len(), 3);
+    assert_eq!(
+        gaps(&by_town.iter().map(|h| h.0).collect::<Vec<_>>()),
+        [30, 30]
+    );
+    assert_eq!(died_at(&events, 2), Some(by_town[2].0));
+    assert_eq!(died_at(&events, 4), Some(by_tower[2].0));
+    for id in [1, 3, 5, 6] {
+        assert_eq!(m.hp(id), Some((40, 40)), "unit {id}");
+    }
+    assert_eq!(m.view().building(BuildingId(4)).unwrap().hp, 500);
+
+    // Two P0 Yeomen 2.5 tiles either side of P1's tower (tiles 30..=30):
+    // one draw on the first shot.
+    let mut shot_first = std::collections::BTreeSet::new();
+    for seed in 0..20 {
+        let mut m = M::new(rules.clone(), seed);
+        m.run_as(1, vec![place_for(P1, tower, 30, 32, true)]);
+        let events = m.issue_tagged(
+            vec![spawn(yeoman, 27, 32, 1), spawn(yeoman, 33, 32, 1)],
+            vec![],
+            0,
+        );
+        let (hash, draws) = rng_after(seed, 1);
+        assert_eq!(m.sim.sub_hashes().rng, hash, "seed {seed}: one draw");
+        let shot = hits_by(&events, building_t(1));
+        assert_eq!(shot.len(), 1);
+        let want = unit_t(1 + index_of(draws[0], 2));
+        let first = hits(&events.iter().map(|e| e.1.clone()).collect::<Vec<_>>())[0].1;
+        assert_eq!(first, want, "seed {seed}");
+        shot_first.insert(want);
+    }
+    assert_eq!(shot_first.len(), 2, "the seed decides");
+}
+
+/// A Town at 0 HP does not shoot: it shot in the tick the volley brought
+/// it to 0 (hits are simultaneous), and never again, though 17 enemy
+/// Mangonels stand in its range.
+#[test]
+fn combat_town_at_zero_hp_does_not_shoot() {
+    let rules = load_rules();
+    let mut m = town_at_zero(&rules, 58);
+    let town = m.view().building(BuildingId(1)).unwrap().clone();
+    let rect = (
+        FxVec2::from_ints(i32::from(town.tile.x), i32::from(town.tile.y)),
+        FxVec2::from_ints(i32::from(town.tile.x) + 3, i32::from(town.tile.y) + 3),
+    );
+    let range = Fx::from_int(7) + Fx::from_ratio(50, 100);
+    let in_range = m
+        .view()
+        .units()
+        .filter(|u| {
+            let p = FxVec2::new(
+                u.pos.x.clamp(rect.0.x, rect.1.x),
+                u.pos.y.clamp(rect.0.y, rect.1.y),
+            );
+            u.pos.dist_sq_i64(p) <= (range * range).to_bits()
+        })
+        .count();
+    assert_eq!(in_range, 17, "every Mangonel in its range");
+    let later = m.step_tagged(300);
+    assert!(hits_by(&later, building_t(1)).is_empty(), "silent at 0 HP");
+}
+
+/// An explicit chase at the edge of its reach does not flip between a
+/// direct chase and a path chase (each flip to a path would be a new path
+/// request): a Skirmisher ordered onto a runner that starts just beyond
+/// its reach (7 tiles off, the reach being 6.7 centre to centre) or just
+/// inside it (6 tiles) and walks off at the same speed, a slower one or a
+/// faster one, switches mode only when the runner crosses the edge: at most
+/// once against an equal or slower runner (path to direct, once it closes
+/// in), at most twice against a faster one (out of reach as it pulls away,
+/// back in when it stops at its goal). Its path requests are one per goal
+/// (the first walk and each re-goal) plus the periodic repath every
+/// `repath_interval` ticks of walking.
+#[test]
+fn combat_attack_at_the_edge_of_reach_does_not_flip_flop() {
+    let rules = load_rules();
+    let skirm = ukind(&rules, "skirmisher");
+    for (runner, start_x) in [
+        ("skirmisher", 17),
+        ("skirmisher", 16),
+        ("yeoman", 17),
+        ("yeoman", 16),
+        ("outrider", 17),
+        ("outrider", 16),
+    ] {
+        let mut m = M::new(rules.clone(), 60);
+        // P1's runner UnitId(1); P0's Skirmisher UnitId(2) appears 6 or 7
+        // tiles west of it, ordered onto it in the tick the runner sets off
+        // east (a plain Move: it never engages).
+        m.run_as(
+            1,
+            vec![spawn_for(P1, ukind(&rules, runner), start_x, 30, 1)],
+        );
+        m.issue_tagged(
+            vec![spawn(skirm, 10, 30, 1), attack(&[2], unit_t(1))],
+            vec![Command::Move {
+                units: vec![UnitId(1)],
+                target: FxVec2::from_ints(42, 34),
+                queue: false,
+            }],
+            0,
+        );
+        let mut mode = m.unit(2).unwrap().order.is_some();
+        let mut switches = 0;
+        let (t, _) = {
+            let mut t = Trace::default();
+            let mut had_request = m.view().pathing().has_request(UnitId(2));
+            for _ in 0..400 {
+                m.step(1);
+                let Some(u) = m.unit(2) else { break };
+                if u.intent != Intent::Attack {
+                    break;
+                }
+                let path = u.order.is_some();
+                switches += u32::from(path != mode);
+                mode = path;
+                t.with_order += u32::from(path);
+                if let Some(o) = &u.order
+                    && t.goals.last() != Some(&o.goal)
+                {
+                    t.goals.push(o.goal);
+                }
+                let request = m.view().pathing().has_request(UnitId(2));
+                t.requests += u32::from(request && !had_request);
+                had_request = request;
+            }
+            (t, ())
+        };
+        let goals = u32::try_from(t.goals.len()).unwrap();
+        let most = if runner == "outrider" { 2 } else { 1 };
+        assert!(
+            switches <= most,
+            "{runner} from {start_x}: {switches} switches, {t:?}"
+        );
+        let repaths = t.with_order / m.rules().repath_interval_ticks();
+        assert!(
+            t.requests <= goals + repaths,
+            "{runner} from {start_x}: {t:?}"
+        );
+        eprintln!(
+            "edge of reach: {runner} from x {start_x}: {switches} switch(es), {} request(s), {goals} goal(s), {} ticks on a path",
+            t.requests, t.with_order
+        );
+    }
+}
+
+/// Arms raises the hit points and damage of the owner's military units,
+/// living ones included: a wounded Skirmisher keeps the damage it took and
+/// gains the new maximum's difference, and its hits grow at once. The
+/// owner's civilians and the other player's units are untouched. Nobody
+/// fights except where the test says so: idle armed units guard, so the
+/// Skirmisher is wounded while it walks a plain `Move` (which never
+/// engages), its attacker then walks away, and its target, out of its
+/// reach between the hits, is an unarmed Supply Wain (no counter row
+/// against the Skirmisher, so a hit is its raw damage).
+#[test]
+fn tech_arms_raises_military_hp_and_damage_including_living_units() {
+    let rules = load_rules();
+    let (skirm, yeoman, wain) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "yeoman"),
+        ukind(&rules, "supply_wain"),
+    );
+    assert_eq!(
+        rules.counter_permille("skirmisher", &rules::Defender::Kind("supply_wain".into())),
+        1000
+    );
+    let mut m = M::new(rules.clone(), 46);
+    let home = (10, 40);
+    let mv = |id: u32, to: (i32, i32)| Command::Move {
+        units: vec![UnitId(id)],
+        target: FxVec2::from_ints(to.0, to.1),
+        queue: false,
+    };
+    // P0's Yeoman is UnitId(1); P1's Supply Wain UnitId(2) (P0's target, 8
+    // tiles east of P0's Skirmisher's home) and Skirmisher UnitId(3). P0's
+    // Skirmisher UnitId(4) is spawned beside P1's while walking home; P1's
+    // hits it once in that tick and then walks off east.
+    m.ok(vec![spawn(yeoman, 4, 26, 1)]);
+    m.run_as(1, vec![spawn_for(P1, wain, 18, 40, 1)]);
+    m.run_as(1, vec![spawn_for(P1, skirm, 11, 30, 1)]);
+    let events = m.issue_tagged(
+        vec![spawn(skirm, 10, 30, 1), mv(4, home)],
+        vec![attack(&[3], unit_t(4))],
+        0,
+    );
     assert_eq!(hits_by(&events, unit_t(3)).len(), 1);
-    m.run_as(1, vec![stop(&[3])]);
-    assert_eq!(m.hp(1), Some((70, 80)), "wounded");
-    assert_eq!(m.hp(2), Some((40, 40)));
+    m.run_as(1, vec![mv(3, (40, 26))]);
+    let events = m.step_tagged(200);
+    assert!(hits(&events.into_iter().map(|e| e.1).collect::<Vec<_>>()).is_empty());
+    assert_eq!(m.hp(4), Some((70, 80)), "wounded");
+    assert_eq!(m.hp(1), Some((40, 40)));
     let mut seen = Vec::new();
     for (level, id) in ["arms_1", "arms_2", "arms_3"].iter().enumerate() {
         m.ok(vec![debug_research(tech(&rules, id))]);
-        let (hp, max) = m.hp(1).unwrap();
+        let (hp, max) = m.hp(4).unwrap();
         assert_eq!(max - hp, 10, "{id}: the damage taken is kept");
-        assert_eq!(m.hp(2), Some((40, 40)), "{id}: civilians unchanged");
+        assert_eq!(m.hp(1), Some((40, 40)), "{id}: civilians unchanged");
         assert_eq!(m.hp(3), Some((80, 80)), "{id}: P1 unchanged");
-        assert_eq!(m.hp(4).unwrap().1, 130, "{id}: P1 unchanged");
-        // P0's Skirmisher hits P1's Shieldbearer (no counter row) once.
-        let events = m.issue_tagged(vec![attack(&[1], unit_t(4))], vec![], 30);
-        let landed = hits_by(&events, unit_t(1));
-        m.ok(vec![stop(&[1])]);
+        assert_eq!(m.hp(2).unwrap().1, 150, "{id}: P1 unchanged");
+        // P0's Skirmisher hits P1's Supply Wain, then walks home again.
+        let events = m.issue_tagged(vec![attack(&[4], unit_t(2))], vec![], 120);
+        let landed = hits_by(&events, unit_t(4));
+        m.ok(vec![mv(4, home)]);
+        m.step(100);
         let damage = m.view().unit_stats(P0, skirm).attack.unwrap().damage;
         assert!(landed.iter().all(|h| h.1 == damage), "{id}: {landed:?}");
         assert!(!landed.is_empty(), "{id}");
+        assert!(
+            m.unit(4).unwrap().target.is_none(),
+            "{id}: home, the Wain is out of its reach"
+        );
         seen.push((level + 1, max, damage));
     }
     // floor(80 * 1.1) = 88, then 96, 105; floor(10 * 1.1) = 11, then 12, 13.
@@ -3603,6 +4465,381 @@ fn tech_every_arms_level_strictly_raises_every_military_stat() {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance 2: the counter triangle over 20 seeds (`counters_*`).
+// ---------------------------------------------------------------------------
+
+/// How a counter duel ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DuelOutcome {
+    /// The side with units left; `None` after a timeout, which is no win.
+    winner: Option<PlayerId>,
+    /// Units left on the winning side (on both after a timeout).
+    survivors: u32,
+    /// The tick in which the last unit of the losing side died, or the
+    /// timeout.
+    end_tick: u32,
+    /// The survivors' hit points, summed.
+    survivor_hp_sum: i32,
+}
+
+/// One 10 vs 10 duel, P0's kind `a` against P1's kind `b`, on
+/// `sim::scenarios::counter_duel_setup` with `seed`: every 100 ticks each
+/// side's idle survivors (no order, no target) attack-move toward the
+/// enemy's live centroid, so no duel stalls; it ends in the tick a side is
+/// left with no unit, or after `COUNTER_DUEL_TICKS` without a winner.
+fn duel(rules: &Rules, a: UnitKindId, b: UnitKindId, seed: u64) -> DuelOutcome {
+    use sim::scenarios::{COUNTER_DUEL_TICKS, commands_at, counter_duel_setup};
+    let (setup, stream) = counter_duel_setup(rules, a, b, seed);
+    let mut sim = Sim::new(setup, rules.clone(), Box::new(NoAi));
+    // Past every seq the stream used.
+    let mut seq = [1000u32; 2];
+    let side = |view: &SimView<'_>, p: PlayerId| -> Vec<sim::Unit> {
+        view.units().filter(|u| u.owner == p).cloned().collect()
+    };
+    let mut started = false;
+    for tick in 0..COUNTER_DUEL_TICKS {
+        let mut cmds = commands_at(&stream, tick).to_vec();
+        if started && tick % 100 == 0 {
+            let view = sim.view();
+            for (p, enemy) in [(P0, P1), (P1, P0)] {
+                let idle: Vec<UnitId> = side(&view, p)
+                    .iter()
+                    .filter(|u| u.order.is_none() && u.target.is_none())
+                    .map(|u| u.id)
+                    .collect();
+                let enemies = side(&view, enemy);
+                if idle.is_empty() || enemies.is_empty() {
+                    continue;
+                }
+                let n = i32::try_from(enemies.len()).unwrap();
+                let sum = enemies.iter().fold(FxVec2::ZERO, |s, u| s + u.pos);
+                let centroid = FxVec2::new(sum.x.div_int(n), sum.y.div_int(n));
+                let i = usize::from(p.0);
+                cmds.push(PlayerCommand::new(
+                    p,
+                    seq[i],
+                    Command::AttackMove {
+                        units: idle,
+                        target: centroid,
+                    },
+                ));
+                seq[i] += 1;
+            }
+        }
+        sim.step(&cmds);
+        let view = sim.view();
+        let (p0, p1) = (side(&view, P0), side(&view, P1));
+        started |= !p0.is_empty() && !p1.is_empty();
+        if !started {
+            continue;
+        }
+        let hp = |units: &[sim::Unit]| -> i32 {
+            units
+                .iter()
+                .map(|u| view.unit_hp(u.id).expect("alive").0)
+                .sum()
+        };
+        let count = |units: &[sim::Unit]| u32::try_from(units.len()).unwrap();
+        let winner = match (p0.is_empty(), p1.is_empty()) {
+            (false, true) => Some((P0, &p0)),
+            (true, false) => Some((P1, &p1)),
+            (true, true) => {
+                return DuelOutcome {
+                    winner: None,
+                    survivors: 0,
+                    end_tick: tick,
+                    survivor_hp_sum: 0,
+                };
+            }
+            (false, false) => None,
+        };
+        if let Some((w, units)) = winner {
+            return DuelOutcome {
+                winner: Some(w),
+                survivors: count(units),
+                end_tick: tick,
+                survivor_hp_sum: hp(units),
+            };
+        }
+    }
+    let view = sim.view();
+    let all: Vec<sim::Unit> = view.units().cloned().collect();
+    DuelOutcome {
+        winner: None,
+        survivors: u32::try_from(all.len()).unwrap(),
+        end_tick: COUNTER_DUEL_TICKS,
+        survivor_hp_sum: all.iter().map(|u| view.unit_hp(u.id).unwrap().0).sum(),
+    }
+}
+
+/// Seeds per counter matchup (acceptance 2).
+const COUNTER_SEEDS: u64 = 20;
+
+/// Run `a` (P0) against `b` (P1) over `COUNTER_SEEDS` seeds and print the
+/// matchup's table: wins (a win for `a` counts only with at least
+/// `min_survivors` left), survivors min/mean/max over `a`'s wins, the range
+/// of end ticks and the number of distinct outcomes. Returns the outcomes
+/// and the counted wins.
+fn counter_matchup(a: &str, b: &str, min_survivors: u32) -> (Vec<DuelOutcome>, usize) {
+    let rules = shared_rules();
+    let (ka, kb) = (ukind(rules, a), ukind(rules, b));
+    let outcomes: Vec<DuelOutcome> = (0..COUNTER_SEEDS)
+        .map(|seed| duel(rules, ka, kb, seed))
+        .collect();
+    let won: Vec<&DuelOutcome> = outcomes
+        .iter()
+        .filter(|o| o.winner == Some(P0) && o.survivors >= min_survivors)
+        .collect();
+    let survivors: Vec<u32> = outcomes
+        .iter()
+        .filter(|o| o.winner == Some(P0))
+        .map(|o| o.survivors)
+        .collect();
+    let distinct = outcomes
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let ends: Vec<u32> = outcomes.iter().map(|o| o.end_tick).collect();
+    // The mean in hundredths, printed as a decimal (no floats in the sim
+    // crate, tests included).
+    let mean = |v: &[u32]| {
+        let x100 = if v.is_empty() {
+            0
+        } else {
+            v.iter().sum::<u32>() * 100 / u32::try_from(v.len()).unwrap()
+        };
+        format!("{}.{:02}", x100 / 100, x100 % 100)
+    };
+    let losses = outcomes.iter().filter(|o| o.winner == Some(P1)).count();
+    let timeouts = outcomes.iter().filter(|o| o.winner.is_none()).count();
+    eprintln!(
+        "counters: 10 {a} vs 10 {b} over {COUNTER_SEEDS} seeds: {a} win {}/{COUNTER_SEEDS} (with >= {min_survivors} survivors), {b} win {losses}, timeouts {timeouts}; {a} survivors min {} / mean {} / max {}; end ticks {}..={}; distinct outcomes {distinct}/{COUNTER_SEEDS}",
+        won.len(),
+        survivors.iter().min().copied().unwrap_or(0),
+        mean(&survivors),
+        survivors.iter().max().copied().unwrap_or(0),
+        ends.iter().min().unwrap(),
+        ends.iter().max().unwrap(),
+    );
+    for (seed, o) in outcomes.iter().enumerate() {
+        eprintln!("  seed {seed:2}: {o:?}");
+    }
+    let wins = won.len();
+    (outcomes, wins)
+}
+
+/// The seed changes the results, and the test asserts it: at least two
+/// distinct outcomes over the 20 seeds. (The final hash cannot show it:
+/// the seed itself is hashed state.)
+fn assert_outcomes_differ(name: &str, outcomes: &[DuelOutcome]) {
+    let distinct = outcomes
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert!(distinct >= 2, "{name}: every seed gave {:?}", outcomes[0]);
+}
+
+/// Acceptance 2: 10 Skirmishers beat 10 Bowmen in at least 18 of 20 seeds
+/// with at least 4 survivors.
+#[test]
+fn counters_skirmishers_beat_bowmen_with_at_least_four_survivors() {
+    let (outcomes, wins) = counter_matchup("skirmisher", "bowman", 4);
+    assert!(wins >= 18, "{wins}/20: {outcomes:?}");
+    assert_outcomes_differ("skirmisher vs bowman", &outcomes);
+}
+
+/// Acceptance 2: 10 Bowmen beat 10 Shieldbearers in at least 18 of 20.
+#[test]
+fn counters_bowmen_beat_shieldbearers() {
+    let (outcomes, wins) = counter_matchup("bowman", "shieldbearer", 1);
+    assert!(wins >= 18, "{wins}/20: {outcomes:?}");
+    assert_outcomes_differ("bowman vs shieldbearer", &outcomes);
+}
+
+/// Acceptance 2: 10 Shieldbearers beat 10 Outriders in at least 18 of 20.
+#[test]
+fn counters_shieldbearers_beat_outriders() {
+    let (outcomes, wins) = counter_matchup("shieldbearer", "outrider", 1);
+    assert!(wins >= 18, "{wins}/20: {outcomes:?}");
+    assert_outcomes_differ("shieldbearer vs outrider", &outcomes);
+}
+
+/// Acceptance 2: 10 Outriders beat 10 Bowmen in at least 18 of 20.
+#[test]
+fn counters_outriders_beat_bowmen() {
+    let (outcomes, wins) = counter_matchup("outrider", "bowman", 1);
+    assert!(wins >= 18, "{wins}/20: {outcomes:?}");
+    assert_outcomes_differ("outrider vs bowman", &outcomes);
+}
+
+/// The seed moves every spawned unit: `DebugSpawnJittered` puts each duel
+/// unit within a tile of its tile centre on both axes, the same seed at the
+/// same point and the 20 seeds at 20 different sets of points. It draws
+/// exactly two numbers per unit from the sim's RNG (`dx`, then `dy`), and a
+/// rejected one draws nothing and changes nothing.
+#[test]
+fn counters_seed_changes_spawn_jitter() {
+    use rand_core::{Rng, SeedableRng};
+    use sim::scenarios::{
+        COUNTER_DUEL_P0_RANKS, COUNTER_DUEL_P1_RANKS, COUNTER_DUEL_ROWS, commands_at,
+        counter_duel_setup,
+    };
+    let rules = shared_rules();
+    let (skirm, bow) = (ukind(rules, "skirmisher"), ukind(rules, "bowman"));
+    // The tile centre each unit is spawned at, in id order.
+    let centres: Vec<FxVec2> = COUNTER_DUEL_P0_RANKS
+        .iter()
+        .chain(&COUNTER_DUEL_P1_RANKS)
+        .flat_map(|&x| {
+            COUNTER_DUEL_ROWS
+                .iter()
+                .map(move |&y| Tile::new(u16::try_from(x).unwrap(), u16::try_from(y).unwrap()))
+        })
+        .map(|t| sim::Map::open(128, 128).center_of(t))
+        .collect();
+    let spawn = |seed: u64| {
+        let (setup, stream) = counter_duel_setup(rules, skirm, bow, seed);
+        let delay = setup.cmd_delay;
+        let mut sim = Sim::new(setup, rules.clone(), Box::new(NoAi));
+        for tick in 0..=delay {
+            sim.step(commands_at(&stream, tick));
+        }
+        let positions: Vec<FxVec2> = sim.view().units().map(|u| u.pos).collect();
+        (positions, sim.sub_hashes().rng)
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let one_tile = Fx::from_int(1);
+    for seed in 0..COUNTER_SEEDS {
+        let (positions, rng) = spawn(seed);
+        assert_eq!(
+            (positions.clone(), rng),
+            spawn(seed),
+            "seed {seed}: reproducible"
+        );
+        assert_eq!(positions.len(), centres.len());
+        for (p, c) in positions.iter().zip(&centres) {
+            assert!(
+                (p.x - c.x).abs() <= one_tile && (p.y - c.y).abs() <= one_tile,
+                "seed {seed}: {p:?} from {c:?}"
+            );
+        }
+        assert!(positions.iter().zip(&centres).any(|(p, c)| p != c));
+        // Two draws per unit and nothing else.
+        let mut expected = rand_pcg::Pcg32::seed_from_u64(seed);
+        for _ in 0..2 * positions.len() {
+            expected.next_u32();
+        }
+        assert_eq!(rng, sim::hash::hash_value(&expected), "seed {seed}");
+        seen.insert(positions);
+    }
+    assert_eq!(
+        seen.len(),
+        usize::try_from(COUNTER_SEEDS).unwrap(),
+        "every seed jitters differently"
+    );
+
+    // A rejected DebugSpawnJittered draws nothing and changes nothing.
+    let jittered = |owner: PlayerId, kind: UnitKindId| Command::DebugSpawnJittered {
+        owner,
+        kind,
+        at: FxVec2::from_ints(10, 30),
+        count: 3,
+        jitter_x100: 100,
+    };
+    let field = || M::new(rules.clone(), 3);
+    rejected_without_change(
+        "unknown kind",
+        &field,
+        0,
+        jittered(P0, UnitKindId(99)),
+        RejectReason::UnknownUnitKind,
+    );
+    rejected_without_change(
+        "unknown player",
+        &field,
+        0,
+        jittered(PlayerId(7), skirm),
+        RejectReason::UnknownPlayer,
+    );
+    let skirmish = || M {
+        sim: Sim::new(
+            MatchSetup::skirmish(rules, 3),
+            rules.clone(),
+            Box::new(NoAi),
+        ),
+        seq: [0; 2],
+    };
+    rejected_without_change(
+        "debug commands off",
+        &skirmish,
+        0,
+        jittered(P0, skirm),
+        RejectReason::DebugCommandsDisabled,
+    );
+}
+
+/// Acceptance 2, last clause: a Watchtower outranges Skirmishers. In the
+/// data its range is longer than the Skirmisher's, and over 20 seeds one P0
+/// Skirmisher, jittered by the seed and ordered to `Attack` a complete P1
+/// Watchtower from 12 tiles, is hit by the tower strictly before it lands
+/// its own first hit (a Skirmisher that never hits would count as later).
+#[test]
+fn counters_watchtower_outranges_skirmishers() {
+    let rules = shared_rules();
+    let tower_kind = bkind(rules, "watchtower");
+    let tower = rules
+        .building_kind(tower_kind.0)
+        .unwrap()
+        .attack
+        .clone()
+        .expect("the Watchtower shoots");
+    let skirm = ukind(rules, "skirmisher");
+    let blade = rules.units[usize::from(skirm.0)]
+        .attack
+        .clone()
+        .expect("the Skirmisher attacks");
+    assert!(
+        tower.range_tiles_x100 > blade.range_tiles_x100,
+        "{tower:?} vs {blade:?}"
+    );
+    let mut table = Vec::new();
+    for seed in 0..COUNTER_SEEDS {
+        let mut m = M::new(rules.clone(), seed);
+        // P1's Watchtower is BuildingId(1), centred on (30.5, 32.5); P0's
+        // Skirmisher UnitId(1) is spawned 12 tiles west of it and ordered
+        // to attack it in the same tick.
+        m.run_as(1, vec![place_for(P1, tower_kind, 30, 32, true)]);
+        let events = m.issue_tagged(
+            vec![
+                Command::DebugSpawnJittered {
+                    owner: P0,
+                    kind: skirm,
+                    at: FxVec2::from_ints(18, 32),
+                    count: 1,
+                    jitter_x100: 100,
+                },
+                attack(&[1], building_t(1)),
+            ],
+            vec![],
+            600,
+        );
+        let by_tower = hits_by(&events, building_t(1));
+        let by_skirm = hits_by(&events, unit_t(1));
+        let first_tower = by_tower.first().map(|h| h.0).expect("the tower shoots");
+        let first_skirm = by_skirm.first().map_or(u32::MAX, |h| h.0);
+        assert!(
+            first_tower < first_skirm,
+            "seed {seed}: tower {first_tower}, skirmisher {first_skirm}"
+        );
+        assert!(by_tower.iter().all(|(_, d)| *d == 15), "{by_tower:?}");
+        table.push((seed, first_tower, first_skirm, by_tower.len()));
+    }
+    eprintln!(
+        "watchtower vs skirmisher, (seed, tower's first hit, skirmisher's first hit, tower hits): {table:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Seeded random streams over tech and combat (`m4a_*`).
 // ---------------------------------------------------------------------------
 
@@ -3616,12 +4853,15 @@ fn shared_rules() -> &'static Rules {
 /// rectangle of `plains_1v1`, at most 40 units spawned a side (a spawn
 /// that would cross 40 is cut short; the dead still count): P0 has a
 /// complete Scriptorium (`BuildingId(1)`) and stock, and opens with
-/// Mangonels on P1's complete Watchtower (`BuildingId(2)`) and Skirmishers
-/// on P1's Bowmen; P1 has a Croft site (`BuildingId(3)`) too. Then, at
-/// random: spawns of the armed kinds for either side, `Attack` on enemy
-/// units or on any building id (many rejected), `AttackMove`, `Move` and
-/// `Stop`, and P0's `Research`, `AdvanceAge` and `DebugResearch`. Unit ids
-/// are tracked in allocation order (P0's commands apply first in a tick).
+/// Mangonels on P1's complete Watchtower (`BuildingId(2)`, which shoots)
+/// and Skirmishers on P1's Bowmen; P1 has a Croft site (`BuildingId(3)`)
+/// too. Then, at random: spawns of the armed kinds for either side (P1's
+/// armies with `DebugSpawnJittered`, a tile of jitter drawn from the sim's
+/// RNG), `Attack` on enemy units or on any building id (many rejected),
+/// `AttackMove`, `Move` and `Stop`, and P0's `Research`, `AdvanceAge` and
+/// `DebugResearch`. Idle and attack-moving units acquire targets on their
+/// own. Unit ids are tracked in allocation order (P0's commands apply
+/// first in a tick).
 fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
     let rules = shared_rules();
@@ -3702,7 +4942,13 @@ fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 &mut cmds,
                 &mut seq,
                 1,
-                spawn_for(P1, ukind(rules, "bowman"), 20, 36, 6),
+                Command::DebugSpawnJittered {
+                    owner: P1,
+                    kind: ukind(rules, "bowman"),
+                    at: FxVec2::from_ints(20, 36),
+                    count: 6,
+                    jitter_x100: 100,
+                },
             );
             spawned(&mut ids, 1, 6);
         } else if t == 1 {
@@ -3726,17 +4972,24 @@ fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
                 let n = n.min(40 - u32::try_from(ids[p].len()).unwrap());
                 let k = armed[usize::try_from(rng.next_u32()).unwrap() % armed.len()];
                 let at = point(&mut rng);
-                push(
-                    &mut cmds,
-                    &mut seq,
-                    p,
-                    Command::DebugSpawn {
-                        owner: side(p),
+                let (owner, count) = (side(p), u16::try_from(n).unwrap());
+                let cmd = if p == 1 {
+                    Command::DebugSpawnJittered {
+                        owner,
                         kind: k,
                         at,
-                        count: u16::try_from(n).unwrap(),
-                    },
-                );
+                        count,
+                        jitter_x100: 100,
+                    }
+                } else {
+                    Command::DebugSpawn {
+                        owner,
+                        kind: k,
+                        at,
+                        count,
+                    }
+                };
+                push(&mut cmds, &mut seq, p, cmd);
                 spawned(&mut ids, p, n);
             } else if roll < 30 {
                 let units = pick(&mut rng, &ids[p], n);
@@ -3797,7 +5050,9 @@ fn m4a_random_stream_spawns_at_most_40_a_side() {
     for seed in 0..64 {
         let mut spawned = [0u32; 2];
         for pc in random_m4a_commands(seed, 300).iter().flatten() {
-            if let Command::DebugSpawn { owner, count, .. } = &pc.cmd {
+            if let Command::DebugSpawn { owner, count, .. }
+            | Command::DebugSpawnJittered { owner, count, .. } = &pc.cmd
+            {
                 spawned[usize::from(owner.0)] += u32::from(*count);
             }
         }
@@ -3826,11 +5081,14 @@ fn run_m4a(seed: u64, stream: &[Vec<PlayerCommand>], cache: bool) -> (Vec<u64>, 
 
 /// The random stream really researches, kills and destroys: over 8 seeds
 /// of 300 ticks, techs complete, units die on both sides, buildings are
-/// destroyed, and Attacks are both accepted and rejected.
+/// destroyed, and Attacks are both accepted and rejected. Units also fight
+/// targets no `Attack` named for them (acquisition by guards and
+/// attack-movers), and the Watchtower shoots.
 #[test]
 fn m4a_random_stream_exercises_combat_and_tech() {
     let (mut researched, mut died, mut destroyed_n, mut hit, mut rejected_attacks) =
         (0, [0usize; 2], 0, 0, 0);
+    let (mut acquired_hits, mut shots) = (0, 0);
     for seed in 0..8 {
         let stream = random_m4a_commands(seed, 300);
         let attacks: std::collections::BTreeSet<(PlayerId, u32)> = stream
@@ -3839,10 +5097,28 @@ fn m4a_random_stream_exercises_combat_and_tech() {
             .filter(|pc| matches!(pc.cmd, Command::Attack { .. }))
             .map(PlayerCommand::sort_key)
             .collect();
+        // Every (unit, target) pair an Attack named.
+        let ordered: std::collections::BTreeSet<(TargetId, TargetId)> = stream
+            .iter()
+            .flatten()
+            .filter_map(|pc| match &pc.cmd {
+                Command::Attack { units, target } => Some(
+                    units
+                        .iter()
+                        .map(|u| (TargetId::Unit(*u), *target))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
         let (_, events) = run_m4a(seed, &stream, true);
         let mut owner = std::collections::BTreeMap::new();
         for pc in stream.iter().flatten() {
             if let Command::DebugSpawn {
+                owner: o, count, ..
+            }
+            | Command::DebugSpawnJittered {
                 owner: o, count, ..
             } = pc.cmd
             {
@@ -3853,9 +5129,23 @@ fn m4a_random_stream_exercises_combat_and_tech() {
             }
         }
         for e in &events {
+            if let SimEvent::Hit {
+                attacker, target, ..
+            } = e
+            {
+                match attacker {
+                    TargetId::Building(_) => shots += 1,
+                    TargetId::Unit(_) => {
+                        acquired_hits += usize::from(!ordered.contains(&(*attacker, *target)));
+                    }
+                }
+            }
             match e {
                 SimEvent::ResearchCompleted { .. } => researched += 1,
-                SimEvent::UnitDied { unit } => died[usize::from(owner[unit].0)] += 1,
+                SimEvent::UnitDied { unit, owner: o, .. } => {
+                    assert_eq!(*o, owner[unit], "UnitDied names the owner");
+                    died[usize::from(o.0)] += 1;
+                }
                 SimEvent::BuildingDestroyed { .. } => destroyed_n += 1,
                 SimEvent::Hit { .. } => hit += 1,
                 SimEvent::CommandRejected { player, seq, .. }
@@ -3868,9 +5158,10 @@ fn m4a_random_stream_exercises_combat_and_tech() {
         }
     }
     eprintln!(
-        "m4a stream, 8 seeds: researched={researched} died={died:?} destroyed={destroyed_n} hits={hit} rejected attacks={rejected_attacks}"
+        "m4a stream, 8 seeds: researched={researched} died={died:?} destroyed={destroyed_n} hits={hit} (acquired {acquired_hits}, shots {shots}) rejected attacks={rejected_attacks}"
     );
     assert!(researched > 0 && destroyed_n > 0 && hit > 0);
+    assert!(acquired_hits > 0 && shots > 0, "{acquired_hits} {shots}");
     assert!(died[0] > 0 && died[1] > 0, "{died:?}");
     assert!(rejected_attacks > 0);
 }

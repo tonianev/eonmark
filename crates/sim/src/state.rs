@@ -16,14 +16,17 @@
 //!    clears the unit's order and any combat intent.
 //! 5. Movement and combat: rebuild the spatial grid (start-of-tick
 //!    positions), then
-//!    - 5a `combat::think`: each unit with an explicit `Attack`, in id
-//!      order, holds, chases its target directly, walks a path toward it
-//!      or gives up;
+//!    - 5a `combat::think`: each armed unit in id order: one with an
+//!      explicit `Attack` holds, chases its target directly, walks a path
+//!      toward it or gives up; an idle guard or an attack-mover keeps,
+//!      switches or acquires a target (seeded draws break exact ties) and
+//!      holds or chases it directly; then each ready Watchtower and Town,
+//!      in id order, aims at the nearest enemy unit in range;
 //!    - 5b `movement::step` with those engagements; units that need a
 //!      repath get a new `PathRequest`;
-//!    - 5c `combat::resolve`: hits from the post-movement positions,
-//!      summed per target and applied at once, then the dead units and the
-//!      destroyed buildings are removed.
+//!    - 5c `combat::resolve`: hits from the post-movement positions (units,
+//!      then the shooters' aims), summed per target and applied at once,
+//!      then the dead units and the destroyed buildings are removed.
 //! 6. Economy and Towns, each in id order:
 //!    - 6a construction: sites whose builder is at work gain progress; a
 //!      finished site completes (a Town or Watchtower adds its border, its
@@ -135,7 +138,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// summed per target, then the dead are removed and buildings at 0 HP
 /// destroyed, sites of every kind included, while a complete Town stays at
 /// 0 HP. The Arms `UnitHp` and `UnitDamage` rows apply.
-pub const SIM_VERSION: u32 = 13;
+///
+/// 14: M4a combat behaviour. Idle armed units (guards, with or without a
+/// post) and attack-movers acquire targets in `combat::think`: enemy units
+/// before enemy buildings (the Mangonel the reverse), in weapon range
+/// before out of it, then by `dist_sq`, with a seeded `rng_index` draw
+/// among exact ties; a target out of weapon range gives way to one of its
+/// tier in range, and a building target to a unit. `AttackMove` is no
+/// longer a `Move`: armed units get `Intent::AttackMove`, engage on the
+/// way, keep their order and resume it, and guard once it is gone.
+/// Complete Watchtowers and Towns with hit points left shoot the nearest
+/// enemy unit in range (`Building::ready_at`). `DebugSpawnJittered` is
+/// appended to `Command` and draws two offsets per spawned unit.
+pub const SIM_VERSION: u32 = 14;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,9 +300,11 @@ pub enum Intent {
     /// No combat order.
     #[default]
     Plain,
-    /// Attack-moving toward `goal` (the unit's own spiral goal). Set by
-    /// `AttackMove` from the M4a combat behaviour slice; until then
-    /// `AttackMove` is applied exactly like `Move` and nothing sets it.
+    /// Attack-moving toward `goal` (the unit's own spiral goal), set by
+    /// `AttackMove` for a unit with an attack: it acquires enemies on the
+    /// way and engages them while keeping its order, which it resumes
+    /// afterwards. The intent ends with the order (arrival, an unreachable
+    /// path or a new command); the unit then guards where it stands.
     AttackMove {
         /// The unit's goal.
         goal: FxVec2,
@@ -477,8 +494,8 @@ pub struct Building {
     pub queue: Vec<QueueEntry>,
     /// Where trained units walk, if set.
     pub rally: Option<FxVec2>,
-    /// First tick at which the building may shoot again (Watchtowers and
-    /// Towns shoot from the M4a combat behaviour slice); 0 at placement.
+    /// First tick at which the building may shoot again (a complete
+    /// Watchtower or Town with hit points left shoots); 0 at placement.
     pub ready_at: u32,
 }
 
@@ -656,16 +673,26 @@ pub enum SimEvent {
         /// Damage after the counter multiplier and any variance.
         damage: i32,
     },
-    /// A unit's damage reached its hit points; it was removed.
+    /// A unit's damage reached its hit points; it was removed. Its owner
+    /// and kind are captured before the removal, so a presenter need not
+    /// have seen the unit.
     UnitDied {
         /// The unit.
         unit: UnitId,
+        /// Its owner.
+        owner: PlayerId,
+        /// Its kind.
+        kind: UnitKindId,
     },
     /// A building or site reached 0 HP and was removed (no refund; its
-    /// queue is lost).
+    /// queue is lost). Its owner and kind are captured before the removal.
     BuildingDestroyed {
         /// The building.
         building: BuildingId,
+        /// Its owner.
+        owner: PlayerId,
+        /// Its kind.
+        kind: BuildingKindId,
     },
     /// A complete Town reached 0 HP. It stays, clamped at 0; it can no
     /// longer be attacked.
@@ -962,7 +989,8 @@ impl Sim {
         }
 
         // 5. Movement and combat. 5a: explicit attackers decide whether to
-        //    hold, chase directly, walk a path or give up (from the
+        //    hold, chase directly, walk a path or give up, guards and
+        //    attack-movers acquire, and the shooters aim (from the
         //    start-of-tick positions). 5b: movement, with those engagements;
         //    a path chaser waiting for a path does not arrive.
         //    A unit that still has a request outstanding (queued or
@@ -971,7 +999,7 @@ impl Sim {
         //    budget. Its periodic timer is pushed back either way.
         self.grid.rebuild(&self.state.units);
         let stats = combat::Stats::new(&self.state, &self.rules);
-        let plan = combat::think(&mut self.state, &self.rules, &stats, tick);
+        let plan = combat::think(&mut self.state, &self.rules, &self.grid, &stats, tick);
         let repath = movement::step(
             &mut self.state.units,
             &self.state.map,
@@ -1009,7 +1037,14 @@ impl Sim {
         }
         // 5c. Hits from the post-movement positions, then the dead and the
         //     destroyed.
-        combat::resolve(&mut self.state, &self.rules, &stats, tick, &mut self.events);
+        combat::resolve(
+            &mut self.state,
+            &self.rules,
+            &stats,
+            &plan.aims,
+            tick,
+            &mut self.events,
+        );
 
         // 6. Economy and Towns: construction, training, jobs and idle
         //    seeking, income.
@@ -1042,19 +1077,26 @@ impl Sim {
 
     /// Order the owned subset of `units` to `target`: one spiral-offset goal
     /// per unit, a path request each, posts, jobs and combat orders
-    /// cleared. Shared by `Move` and `AttackMove` (applied like `Move`
-    /// until the M4a combat behaviour slice). Rejects with `NoValidUnits`
-    /// when no unit qualifies.
-    fn apply_move(&mut self, pc: &PlayerCommand, units: &[UnitId], target: FxVec2) {
+    /// cleared. Shared by `Move` and `AttackMove`, which then sets the
+    /// armed units' intent. Returns each unit with its goal, in id order;
+    /// rejects with `NoValidUnits` (returning nothing) when no unit
+    /// qualifies.
+    fn apply_move(
+        &mut self,
+        pc: &PlayerCommand,
+        units: &[UnitId],
+        target: FxVec2,
+    ) -> Vec<(UnitId, FxVec2)> {
         let tick = self.state.tick;
         let movers = self.owned_units(pc.player, units);
         if movers.is_empty() {
             self.reject(pc, RejectReason::NoValidUnits);
-            return;
+            return Vec::new();
         }
         let targets = movement::group_targets(&self.state.map, target, movers.len());
         let repath_at = tick + self.rules.repath_interval_ticks();
-        for (unit, goal) in movers.into_iter().zip(targets) {
+        let goals: Vec<(UnitId, FxVec2)> = movers.into_iter().zip(targets).collect();
+        for &(unit, goal) in &goals {
             let u = self.state.units.get_mut(&unit).expect("validated");
             u.order = Some(MoveOrder {
                 goal,
@@ -1074,6 +1116,89 @@ impl Sim {
                 from,
                 to,
             });
+        }
+        goals
+    }
+
+    /// `DebugSpawn` and `DebugSpawnJittered`: gated by `debug_commands`,
+    /// `UnknownPlayer`, `UnknownUnitKind`; then up to `count` units of
+    /// `kind` on the passable tiles of the square spiral around `at`, one
+    /// per tile, at the tile centres (the map may run out of tiles).
+    /// Returns the new units in id order.
+    fn debug_spawn(
+        &mut self,
+        pc: &PlayerCommand,
+        owner: PlayerId,
+        kind: UnitKindId,
+        at: FxVec2,
+        count: u16,
+    ) -> Vec<(UnitId, Tile)> {
+        if !self.setup.debug_commands {
+            self.reject(pc, RejectReason::DebugCommandsDisabled);
+            return Vec::new();
+        }
+        if !self.state.players.iter().any(|p| p.id == owner) {
+            self.reject(pc, RejectReason::UnknownPlayer);
+            return Vec::new();
+        }
+        let Some(kind_def) = self.rules.unit_kind(kind.0) else {
+            self.reject(pc, RejectReason::UnknownUnitKind);
+            return Vec::new();
+        };
+        let center = self.state.map.tile_of(at);
+        let tiles: Vec<Tile> = self
+            .state
+            .map
+            .spiral(center)
+            .filter(|t| self.state.map.passable(*t))
+            .take(usize::from(count))
+            .collect();
+        let mut spawned = Vec::with_capacity(tiles.len());
+        for tile in tiles {
+            let id = self.state.ids.unit();
+            let unit = Unit::spawn(
+                id,
+                owner,
+                kind,
+                tile,
+                kind_def,
+                &self.state.map,
+                self.rules.tick_rate_hz,
+            );
+            self.state.units.insert(id, unit);
+            self.events.push(SimEvent::UnitSpawned { unit: id });
+            spawned.push((id, tile));
+        }
+        spawned
+    }
+
+    /// `DebugSpawnJittered`'s offsets: for each unit in id order, `dx` then
+    /// `dy` are drawn from the sim's RNG (`combat::rng_index`) uniformly in
+    /// `-jitter_x100..=jitter_x100` hundredths of a tile and added to the
+    /// tile centre. A point off the map, on a blocked tile or in another
+    /// component than its tile keeps the centre; the draws are made anyway.
+    fn jitter(&mut self, spawned: &[(UnitId, Tile)], jitter_x100: u8) {
+        let j = i32::from(jitter_x100);
+        let span = u32::from(jitter_x100) * 2 + 1;
+        for &(id, tile) in spawned {
+            let mut offset = || {
+                let d = i32::try_from(combat::rng_index(&mut self.state.rng, span)).expect("fits");
+                Fx::from_ratio(d - j, 100)
+            };
+            let (dx, dy) = (offset(), offset());
+            let map = &self.state.map;
+            let centre = map.center_of(tile);
+            let p = FxVec2::new(centre.x + dx, centre.y + dy);
+            let on_map = p.x >= Fx::ZERO
+                && p.y >= Fx::ZERO
+                && p.x < Fx::from_int(i32::from(map.width()))
+                && p.y < Fx::from_int(i32::from(map.height()));
+            if on_map
+                && map.passable(map.tile_of(p))
+                && map.component_of(map.tile_of(p)) == map.component_of(tile)
+            {
+                self.state.units.get_mut(&id).expect("just spawned").pos = p;
+            }
         }
     }
 
@@ -1101,11 +1226,18 @@ impl Sim {
                 self.apply_move(&pc, units, *target);
             }
             Command::AttackMove { units, target } => {
-                // Identical to Move until the M4a combat behaviour slice
-                // adds target acquisition on the way. The sim must accept it
-                // so the game's A-then-click order never produces a
-                // rejection.
-                self.apply_move(&pc, units, *target);
+                // A Move whose armed units acquire enemies on the way
+                // (`combat::think`); a unit without an attack just moves.
+                for (unit, goal) in self.apply_move(&pc, units, *target) {
+                    let u = self.state.units.get_mut(&unit).expect("moved");
+                    if self
+                        .rules
+                        .unit_kind(u.kind.0)
+                        .is_some_and(|k| k.attack.is_some())
+                    {
+                        u.intent = Intent::AttackMove { goal };
+                    }
+                }
             }
             Command::Stop { units } => {
                 let stopped = self.owned_units(pc.player, units);
@@ -1130,42 +1262,17 @@ impl Sim {
                 at,
                 count,
             } => {
-                if !self.setup.debug_commands {
-                    self.reject(&pc, RejectReason::DebugCommandsDisabled);
-                    return;
-                }
-                if !self.state.players.iter().any(|p| p.id == *owner) {
-                    self.reject(&pc, RejectReason::UnknownPlayer);
-                    return;
-                }
-                let Some(kind_def) = self.rules.unit_kind(kind.0) else {
-                    self.reject(&pc, RejectReason::UnknownUnitKind);
-                    return;
-                };
-                let center = self.state.map.tile_of(*at);
-                let tiles: Vec<Tile> = self
-                    .state
-                    .map
-                    .spiral(center)
-                    .filter(|t| self.state.map.passable(*t))
-                    .take(usize::from(*count))
-                    .collect();
-                // One unit per passable tile; if the map runs out of tiles the
-                // remaining units are not spawned.
-                for tile in tiles {
-                    let id = self.state.ids.unit();
-                    let unit = Unit::spawn(
-                        id,
-                        *owner,
-                        *kind,
-                        tile,
-                        kind_def,
-                        &self.state.map,
-                        self.rules.tick_rate_hz,
-                    );
-                    self.state.units.insert(id, unit);
-                    self.events.push(SimEvent::UnitSpawned { unit: id });
-                }
+                self.debug_spawn(&pc, *owner, *kind, *at, *count);
+            }
+            Command::DebugSpawnJittered {
+                owner,
+                kind,
+                at,
+                count,
+                jitter_x100,
+            } => {
+                let spawned = self.debug_spawn(&pc, *owner, *kind, *at, *count);
+                self.jitter(&spawned, *jitter_x100);
             }
             Command::Build { unit, kind, tile } => self.apply_build(&pc, *unit, *kind, *tile),
             Command::Cancel { building, slot } => self.apply_cancel(&pc, *building, *slot),
@@ -1497,5 +1604,83 @@ impl Sim {
     /// The rules this sim runs under.
     pub fn rules(&self) -> &Rules {
         &self.rules
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    struct NoAi;
+
+    impl AiController for NoAi {
+        fn think(&mut self, _player: PlayerId, _view: &SimView<'_>) -> Vec<Command> {
+            Vec::new()
+        }
+    }
+
+    /// Step 4's `None` branch, which pathing reaches only defensively (it
+    /// corrects every goal into the unit's component, so on a real map a
+    /// path always exists): an attack-mover whose request finds no
+    /// passable tile at all loses its order and its intent, and the sim
+    /// emits `PathUnreachable`. Every tile is blocked under the request to
+    /// get there.
+    #[test]
+    fn path_unreachable_ends_an_attack_move() {
+        let rules = Rules::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap();
+        let skirm = UnitKindId(
+            u16::try_from(
+                rules
+                    .units
+                    .iter()
+                    .position(|u| u.id == "skirmisher")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let mut sim = Sim::new(MatchSetup::scenario(&rules, 9), rules, Box::new(NoAi));
+        let delay = sim.setup.cmd_delay;
+        let stamp = |seq, cmd| PlayerCommand::new(PlayerId(0), seq, cmd);
+        sim.step(&[stamp(
+            0,
+            Command::DebugSpawn {
+                owner: PlayerId(0),
+                kind: skirm,
+                at: FxVec2::from_ints(10, 30),
+                count: 1,
+            },
+        )]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
+        sim.step(&[stamp(
+            1,
+            Command::AttackMove {
+                units: vec![UnitId(1)],
+                target: FxVec2::from_ints(30, 30),
+            },
+        )]);
+        for _ in 1..delay {
+            sim.step(&[]);
+        }
+        sim.drain_events();
+        // The AttackMove applies, and its request is served, in the next
+        // step: block the whole map first.
+        let all: Vec<Tile> = (0..sim.state.map.len())
+            .map(|i| sim.state.map.tile_at(i))
+            .collect();
+        sim.state.map.set_blocked_many(&all, true);
+        sim.step(&[]);
+        let events = sim.drain_events();
+        assert!(
+            events.contains(&SimEvent::PathUnreachable { unit: UnitId(1) }),
+            "{events:?}"
+        );
+        let u = &sim.state.units[&UnitId(1)];
+        assert_eq!(
+            (u.order.is_none(), u.intent, u.target),
+            (true, Intent::Plain, None)
+        );
     }
 }

@@ -973,6 +973,9 @@ mod tests {
         // P0's Watchtower is BuildingId(1) and its Yeomen UnitId(1..=2);
         // P1's six Mangonels UnitId(3..=8) destroy the tower (6 x 120
         // against 500 HP), then kill the Yeomen (30 a hit against 40 HP).
+        // The Mangonels are spawned in the tick their first Attack is
+        // issued: idle armed units engage enemies in reach on their own
+        // (M4a), and the scene must still stand at tick 4.
         let stream: sim::scenarios::Stream = vec![
             (
                 0,
@@ -997,6 +1000,11 @@ mod tests {
                             count: 2,
                         },
                     ),
+                ],
+            ),
+            (
+                4,
+                vec![
                     PlayerCommand::new(
                         p1,
                         0,
@@ -1007,18 +1015,15 @@ mod tests {
                             count: 6,
                         },
                     ),
+                    PlayerCommand::new(
+                        p1,
+                        1,
+                        Command::Attack {
+                            units: (3..=8).map(UnitId).collect(),
+                            target: TargetId::Building(BuildingId(1)),
+                        },
+                    ),
                 ],
-            ),
-            (
-                4,
-                vec![PlayerCommand::new(
-                    p1,
-                    1,
-                    Command::Attack {
-                        units: (3..=8).map(UnitId).collect(),
-                        target: TargetId::Building(BuildingId(1)),
-                    },
-                )],
             ),
             (
                 8,

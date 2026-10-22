@@ -20,6 +20,17 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-22 at `rules_version` 16, `SIM_VERSION` 14 with
+`just rerecord` (M4a combat behaviour: idle armed units and attack-movers
+acquire targets, `AttackMove` engages, complete Watchtowers and Towns
+shoot, `DebugSpawnJittered` is appended). No fixture has a unit with an
+attack, and no enemy unit comes within range of the Seats or the second
+Towns, so nothing acquires, aims or draws: re-simulating the six
+fixtures emits no `Hit`, `UnitDied`, `BuildingDestroyed`, `TownAtZeroHp`
+or `PathUnreachable` and leaves the `rng` sub-hash at its seeded value,
+and every final hash and every `.hash` file is unchanged; only the
+headers differ.
+
 Recorded 2026-10-21 at `rules_version` 15, `SIM_VERSION` 13 with
 `just rerecord` (M4a combat core: `Unit` gained the hashed
 `damage_taken`, `ready_at`, `target` and `intent`, and `Building` gained

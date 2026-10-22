@@ -150,6 +150,25 @@ pub enum Command {
         /// Tech (index into `techs.ron`).
         tech: TechId,
     },
+    /// Spawn like [`Command::DebugSpawn`], then move each new unit, in id
+    /// order, off its tile centre by a seeded offset: `dx` then `dy`, each
+    /// drawn from the sim's RNG uniformly in `-jitter_x100..=jitter_x100`
+    /// hundredths of a tile. A point off the map, on a blocked tile or in
+    /// another component than its tile keeps the tile centre (the draws are
+    /// made anyway). The seeded spawn jitter of the M4a counter tests and
+    /// fixtures. Gated like `DebugSpawn`; a rejection draws nothing.
+    DebugSpawnJittered {
+        /// Owning player.
+        owner: PlayerId,
+        /// Unit kind (index into `units.ron`).
+        kind: UnitKindId,
+        /// Spiral centre.
+        at: FxVec2,
+        /// Units to spawn.
+        count: u16,
+        /// Largest offset per axis, in hundredths of a tile.
+        jitter_x100: u8,
+    },
 }
 
 /// A command stamped with its issuing player and per-player sequence number.

@@ -1,6 +1,7 @@
-//! Combat core (`docs/design/combat.md`, "M4a implementation notes"): unit
-//! stats resolved through the Modifier rows, the explicit `Attack` order,
-//! simultaneous hits, death and building destruction.
+//! Combat (`docs/design/combat.md`, "M4a implementation notes"): unit
+//! stats resolved through the Modifier rows, the explicit `Attack`, target
+//! acquisition by idle and attack-moving units, the Watchtower and Town
+//! shooters, simultaneous hits, death and building destruction.
 //!
 //! Hashed state lives on the units and buildings: `Unit::damage_taken`,
 //! `ready_at`, `target` and `intent`, and `Building::hp` and `ready_at`.
@@ -9,64 +10,102 @@
 //!
 //! Each tick, inside step 5 of `Sim::step`:
 //!
-//! - 5a `think`, from the start-of-tick positions, for every unit with
-//!   [`Intent::Attack`] in `UnitId` order: a target that is gone, the
-//!   unit's own or a building with no hit points left ends the order. A
-//!   target in weapon range is held ([`Engage::Hold`]). One within the
-//!   unit's reach (the longer of `acquire_range_tiles` and its range) with
-//!   a clear tile line, or a building whose footprint the unit stands
-//!   beside, is chased directly ([`Engage::Chase`]), no path and no
-//!   request. Otherwise the unit walks a path toward it (a path chase),
-//!   which ends on the tile `chase_end` gives: the target's tile when the
-//!   unit can walk there; else the tile of the unit's component nearest to
-//!   it, as pathing corrects the goal, when the target is in weapon range
-//!   from anywhere within the unit's arrive radius of that tile's centre;
-//!   for a building, the reachable ring tile nearest to the unit. A target
-//!   with no such tile cannot be reached and the order ends: at once, with
-//!   no path, and on any later tick of the walk (a wall can close behind
-//!   the target), so every attacker of a group gives up together. A new
-//!   path chase is a move order to the target's tile (to the ring tile for
-//!   a building). Once a unit target has drifted more than
-//!   `chase_regoal_tiles` from the goal (or a building's ring tile is cut
-//!   off), the order is re-goaled like a repath: the unit keeps its path
-//!   until step 4 writes the new one, and while a request is outstanding it
-//!   does not arrive at the end of its path (`Plan::awaiting`). A path
-//!   chase that has arrived (no order, a post) walks again when its end
-//!   tile is no longer the tile it arrived at (the target moved), and
-//!   otherwise gives up. There is no leash.
+//! - 5a `think`, from the start-of-tick positions: every unit with an
+//!   attack in `UnitId` order, then every shooter in `BuildingId` order.
+//!   - A unit with [`Intent::Attack`] (an explicit `Attack`): a target
+//!     that is gone, the unit's own or a building with no hit points left
+//!     ends the order. A target in weapon range is held ([`Engage::Hold`]).
+//!     One within the unit's reach (the longer of `acquire_range_tiles` and
+//!     its range) with a clear tile line, or a building whose footprint the
+//!     unit stands beside, is chased directly ([`Engage::Chase`]), no path
+//!     and no request. Otherwise the unit walks a path toward it (a path
+//!     chase), which ends on the tile `chase_end` gives: the target's tile
+//!     when the unit can walk there; else the tile of the unit's component
+//!     nearest to it, as pathing corrects the goal, when the target is in
+//!     weapon range from anywhere within the unit's arrive radius of that
+//!     tile's centre; for a building, the reachable ring tile nearest to
+//!     the unit. A target with no such tile cannot be reached and the order
+//!     ends: at once, with no path, and on any later tick of the walk (a
+//!     wall can close behind the target), so every attacker of a group
+//!     gives up together. A new path chase is a move order to the target's
+//!     tile (to the ring tile for a building). Once a unit target has
+//!     drifted more than `chase_regoal_tiles` from the goal (or a
+//!     building's ring tile is cut off), the order is re-goaled like a
+//!     repath: the unit keeps its path until step 4 writes the new one, and
+//!     while a request is outstanding it does not arrive at the end of its
+//!     path (`Plan::awaiting`). A path chase that has arrived (no order, a
+//!     post) walks again when its end tile is no longer the tile it arrived
+//!     at (the target moved), and otherwise gives up. There is no leash.
+//!   - A unit that acquires: one that is idle (no order and no job, with
+//!     or without a post: a guard) or attack-moving ([`Intent::AttackMove`],
+//!     while its order lasts; once the order is gone, because it arrived,
+//!     the intent ends and the unit guards where it stands). A plain
+//!     `Move`, a job walk or a rally walk never engages. Its candidates are
+//!     the enemy units (found through the spatial grid) and the enemy
+//!     buildings and sites with hit points left that are within its reach,
+//!     edge to edge, and in weapon range or directly chaseable (the
+//!     explicit attack's test above, `chases_directly`): it never walks a
+//!     path to a target. They rank by `(tier, out of weapon range,
+//!     dist_sq)`: tier 0 is enemy units and tier 1 enemy buildings, the
+//!     other way round for a kind with `prefer: Buildings` (the Mangonel);
+//!     the squared distance is centre to centre for a unit and to the
+//!     nearest point of the footprint for a building. Candidates that tie
+//!     exactly on that key are put in `TargetId` order and one is drawn
+//!     with `rng_index`, the only draw acquisition makes. A unit keeps its
+//!     target while it is valid and in weapon range or directly chaseable
+//!     (so it is dropped beyond the reach), unless a candidate ranks
+//!     strictly better on `(tier, out of weapon range)`: a target out of
+//!     weapon range gives way to a candidate of its tier in weapon range,
+//!     and a target of the worse tier to any candidate of the better one.
+//!     Nothing is searched while the target is of the better tier and in
+//!     weapon range. The unit then holds or chases its target directly; an
+//!     attack-mover keeps its order meanwhile (it is not followed) and
+//!     resumes it when the fight is over, and a guard keeps its post and
+//!     walks back to it afterwards.
+//!   - A shooter: a complete building with an `attack` (the Watchtower and
+//!     the Town) and hit points left, whose cooldown has run out, aims at
+//!     the nearest enemy unit whose edge is within its range of the
+//!     footprint (`dist_sq` to the footprint, then a draw among exact ties
+//!     in `UnitId` order). Shooters fire at units only and keep no target:
+//!     the aim lasts the tick.
 //! - 5b `movement::step` takes the engagements: a holding unit stands and
 //!   faces its target, a chasing one steers straight at it.
 //! - 5c `resolve`: every attacker whose target is still valid and in
 //!   weapon range from the post-movement positions, and whose cooldown has
-//!   run out, hits, in `UnitId` order; the hits are summed per target and
-//!   applied at once, so a unit killed this tick still lands its own and a
-//!   lower id has no first strike. Then `reap` removes the dead and the
-//!   destroyed.
+//!   run out, hits, in `UnitId` order, then every shooter whose aim is
+//!   still in range, in `BuildingId` order; the hits are summed per target
+//!   and applied at once, so a unit killed this tick still lands its own
+//!   and a lower id has no first strike. Then `reap` removes the dead and
+//!   the destroyed.
 //!
 //! Range is measured edge to edge: a unit is in range of a unit target when
 //! `dist_sq_i64(a, t) <= (range + r_a + r_t)^2`, and of a building when the
 //! squared distance to the nearest point of the footprint rectangle (the
 //! tiles' area, `[x0, x1 + 1] x [y0, y1 + 1]`) is at most
-//! `(range + r_a)^2`, both in `dist_sq_i64`'s scale.
+//! `(range + r_a)^2`, both in `dist_sq_i64`'s scale. A shooter has a unit
+//! in range when the squared distance from the unit's centre to the
+//! footprint is at most `(range + r_u)^2`.
 //!
 //! A hit does `floor(floor(raw * counter / 1000) * variance / 1000)`, where
-//! `raw` is the attacker's damage with its owner's `UnitDamage` rows,
-//! `counter` the counter table's permille for the pair (1000 when not
-//! listed) and `variance` 1000, or `1000 + rng_index(2v + 1) - v` when
-//! `damage_variance_permille` `v` is not 0, the only draw combat makes.
-//! Overkill is accepted: attackers do not spread their hits by the damage
-//! already dealt this tick.
+//! `raw` is the attacker's damage with its owner's `UnitDamage` rows (a
+//! shooter's `damage` as written: no row applies to buildings), `counter`
+//! the counter table's permille for the pair (1000 when not listed, and
+//! for every shot) and `variance` 1000, or `1000 + rng_index(2v + 1) - v`
+//! when `damage_variance_permille` `v` is not 0, one draw per hit in hit
+//! order. Overkill is accepted: attackers do not spread their hits by the
+//! damage already dealt this tick.
 
 use crate::construction::{self, Rect, builder_stand, building_rect, order_move};
 use crate::fx::{Fx, FxVec2};
-use crate::ids::{BuildingId, PlayerId, TargetId, Tile, UnitId, UnitKindId};
+use crate::ids::{BuildingId, BuildingKindId, PlayerId, TargetId, Tile, UnitId, UnitKindId};
 use crate::map::Map;
+use crate::movement::SpatialGrid;
 use crate::pathing::PathRequest;
-use crate::state::{Intent, RejectReason, SimEvent, State, Unit, fx_from_x100};
+use crate::state::{Construction, Intent, RejectReason, SimEvent, State, Unit, fx_from_x100};
 use crate::tech;
 use crate::town;
 use rand_core::Rng;
-use rules::{Defender, Rules};
+use rules::{Defender, Prefer, Rules};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A player's attack for one unit kind, with the owner's Modifier rows.
@@ -77,9 +116,8 @@ pub struct AttackStats {
     pub damage: i32,
     /// Weapon range, edge to edge, in tiles.
     pub range: Fx,
-    /// How far the unit chases directly (and, from the combat behaviour
-    /// slice, looks for enemies): the longer of `acquire_range_tiles` and
-    /// the range, in tiles, edge to edge.
+    /// How far the unit looks for enemies and chases directly: the longer
+    /// of `acquire_range_tiles` and the range, in tiles, edge to edge.
     pub reach: Fx,
     /// Ticks from one hit to the next (`cooldown_ds`, converted once).
     pub cooldown_ticks: u32,
@@ -113,9 +151,22 @@ pub(crate) fn unit_stats(state: &State, rules: &Rules, p: PlayerId, kind: UnitKi
     }
 }
 
-/// Every player's [`UnitStats`] per kind and the counter table, built once
-/// at the start of step 5 and read by `think` and `resolve`. Research
-/// completes in step 6b, so the table holds for the whole of step 5.
+/// A shooter's attack (`buildings.ron`): no Modifier row applies to it and
+/// no counter row names it.
+#[derive(Debug, Clone, Copy)]
+struct ShooterStats {
+    /// Damage per shot.
+    damage: i64,
+    /// Range from the footprint to the target's edge, in tiles.
+    range: Fx,
+    /// Ticks from one shot to the next.
+    cooldown_ticks: u32,
+}
+
+/// Every player's [`UnitStats`] per kind, the counter table and the
+/// shooters, built once at the start of step 5 and read by `think` and
+/// `resolve`. Research completes in step 6b, so the table holds for the
+/// whole of step 5.
 pub(crate) struct Stats {
     kinds: usize,
     /// `[player * kinds + kind]`.
@@ -124,6 +175,13 @@ pub(crate) struct Stats {
     counters: Vec<i64>,
     /// Permille against any building, `[attacker]`.
     vs_buildings: Vec<i64>,
+    /// Which enemies each unit kind acquires first, `[kind]`.
+    prefer: Vec<Prefer>,
+    /// The largest radius of any unit kind, which widens grid queries.
+    max_radius: Fx,
+    /// Each building kind's shot, `[kind]`; `None` for a kind that does
+    /// not shoot.
+    shooters: Vec<Option<ShooterStats>>,
     /// `damage_variance_permille`.
     variance: i64,
 }
@@ -150,11 +208,36 @@ impl Stats {
                 rules.counter_permille(&a.id, &Defender::Buildings),
             ));
         }
+        let prefer = rules
+            .units
+            .iter()
+            .map(|k| k.attack.as_ref().map_or(Prefer::Units, |a| a.prefer))
+            .collect();
+        let max_radius = rules
+            .units
+            .iter()
+            .map(|k| fx_from_x100(k.radius_tiles_x100))
+            .max()
+            .unwrap_or(Fx::ZERO);
+        let shooters = rules
+            .buildings
+            .iter()
+            .map(|b| {
+                b.attack.as_ref().map(|a| ShooterStats {
+                    damage: i64::from(a.damage),
+                    range: fx_from_x100(a.range_tiles_x100),
+                    cooldown_ticks: rules.cooldown_ticks(a),
+                })
+            })
+            .collect();
         Stats {
             kinds,
             units,
             counters,
             vs_buildings,
+            prefer,
+            max_radius,
+            shooters,
             variance: i64::from(rules.damage_variance_permille),
         }
     }
@@ -166,6 +249,19 @@ impl Stats {
 
     fn counter(&self, attacker: UnitKindId, defender: UnitKindId) -> i64 {
         self.counters[usize::from(attacker.0) * self.kinds + usize::from(defender.0)]
+    }
+
+    /// The tier of a target, a building or a unit, for an attacker of
+    /// `kind`: 0 is taken first (enemy units, or enemy buildings for a kind
+    /// with `prefer: Buildings`).
+    fn tier(&self, kind: UnitKindId, building: bool) -> u8 {
+        let buildings_first = self.prefer[usize::from(kind.0)] == Prefer::Buildings;
+        u8::from(building != buildings_first)
+    }
+
+    /// The shot of building kind `kind`, if it shoots.
+    fn shooter(&self, kind: BuildingKindId) -> Option<ShooterStats> {
+        self.shooters[usize::from(kind.0)]
     }
 }
 
@@ -195,6 +291,9 @@ pub(crate) struct Plan {
     /// path, and the arrived chase would give up or ask again from the back
     /// of the queue. They wait at the end until the new path lands.
     pub awaiting: BTreeSet<UnitId>,
+    /// Each ready shooter's aim this tick, in `BuildingId` order; it fires
+    /// in step 5c if the unit is still in range.
+    pub aims: Vec<(BuildingId, UnitId)>,
 }
 
 /// A target as seen by an attacker.
@@ -482,140 +581,459 @@ fn regoal(state: &mut State, rules: &Rules, id: UnitId, goal: FxVec2, tick: u32)
     });
 }
 
-/// Step 5a: decide how every unit with an explicit `Attack` engages this
-/// tick (see the module docs), from the start-of-tick positions. Issues and
-/// cancels path-chase requests; returns the direct engagements and the
-/// path chasers waiting for a path for `movement::step`. Acquisition by
-/// idle and attack-moving units arrives in the M4a combat behaviour slice.
-pub(crate) fn think(state: &mut State, rules: &Rules, stats: &Stats, tick: u32) -> Plan {
+/// Whether `u`, at `pos` with `radius`, can chase `aim` directly: within
+/// `reach` edge to edge and with a clear tile line to the target's tile (to
+/// the tile of the footprint's nearest point for a building, the footprint
+/// itself counting as clear), or, for a building, from a tile beside its
+/// footprint. On such a tile the nearest point of the footprint lies on the
+/// tile's own edge or corner, so the straight steer never leaves the tile,
+/// whatever blocks the tiles around it. The tile line cannot see that: on
+/// the east and south faces the point floors to a tile outside the
+/// footprint, and a corner crossing needs both tiles beside the corner. A
+/// building's path chase ends on such a tile, out of melee range when it
+/// is a corner one. The explicit `Attack` and acquisition both decide with
+/// it.
+fn chases_directly(map: &Map, pos: FxVec2, radius: Fx, reach: Fx, aim: &Aim) -> bool {
+    if !within(pos, radius, reach, aim) {
+        return false;
+    }
+    let here = map.tile_of(pos);
+    match *aim {
+        Aim::Building { rect } => {
+            rect.chebyshev(here) <= 1
+                || line_clear(map, here, map.tile_of(nearest_point(pos, rect)), Some(rect))
+        }
+        Aim::Unit { pos: t, .. } => line_clear(map, here, map.tile_of(t), None),
+    }
+}
+
+/// A building an acquiring unit may take: one with hit points left (so not
+/// a complete Town at 0 HP), with its owner and footprint.
+type Targetable = (BuildingId, PlayerId, Rect);
+
+/// Step 5a: decide how every unit with an attack engages this tick, in
+/// `UnitId` order, then aim every ready shooter, in `BuildingId` order (see
+/// the module docs), from the start-of-tick positions in `grid`. Issues and
+/// cancels the explicit attackers' path-chase requests and sets the
+/// acquiring units' targets; returns the direct engagements, the path
+/// chasers waiting for a path for `movement::step`, and the shooters'
+/// aims for `resolve`.
+pub(crate) fn think(
+    state: &mut State,
+    rules: &Rules,
+    grid: &SpatialGrid,
+    stats: &Stats,
+    tick: u32,
+) -> Plan {
     let mut plan = Plan::default();
-    let attackers: Vec<UnitId> = state
+    let units: Vec<(UnitId, Intent)> = state
         .units
         .values()
-        .filter(|u| u.intent == Intent::Attack)
-        .map(|u| u.id)
+        .filter(|u| u.intent == Intent::Attack || stats.unit(u.owner, u.kind).attack.is_some())
+        .map(|u| (u.id, u.intent))
         .collect();
-    for id in attackers {
-        let u = &state.units[&id];
-        let attack = stats.unit(u.owner, u.kind).attack;
-        let aim = u.target.and_then(|t| locate(state, rules, u.owner, t));
-        let (Some(attack), Some(aim)) = (attack, aim) else {
-            give_up(state, id);
-            continue;
-        };
-        let point = aim.point(u.pos);
-        if within(u.pos, u.radius, attack.range, &aim) {
-            engage_directly(state, id);
-            plan.engage.insert(id, Engage::Hold { face: point });
-            continue;
-        }
-        let map = &state.map;
-        let here = map.tile_of(u.pos);
-        // On a tile beside a footprint the nearest point of the footprint
-        // lies on that tile's own edge or corner, so the straight steer
-        // never leaves the tile, whatever blocks the tiles around it. The
-        // tile line cannot see that: on the east and south faces the point
-        // floors to a tile outside the footprint, and a corner crossing
-        // needs both tiles beside the corner. A building's path chase ends
-        // on such a tile, out of melee range when it is a corner one.
-        let clear = match aim {
-            Aim::Building { rect } => {
-                rect.chebyshev(here) <= 1 || line_clear(map, here, map.tile_of(point), Some(rect))
-            }
-            Aim::Unit { .. } => line_clear(map, here, map.tile_of(point), None),
-        };
-        if within(u.pos, u.radius, attack.reach, &aim) && clear {
-            engage_directly(state, id);
-            plan.engage.insert(id, Engage::Chase(point));
-            continue;
-        }
-        // A path chase. Its order's goal is the target's tile (pathing
-        // corrects it to the end tile), or a building's ring tile.
-        let goal = |end: Tile| match aim {
-            Aim::Unit { pos, .. } => map.center_of(map.tile_of(pos)),
-            Aim::Building { .. } => map.center_of(end),
-        };
-        match (&u.order, u.post) {
-            // Walking. Whether the target can still be reached is checked
-            // every tick, so a wall closing round it ends the chase at once
-            // and no group is left jostling for a corrected goal tile it
-            // cannot all reach. The cheap checks come first: a unit target
-            // the unit can walk to, or one it can hit from the end of its
-            // path, or a building whose ring tile it can still walk to;
-            // `chase_end` searches only when they fail.
-            (Some(order), _) => {
-                let goal_tile = map.tile_of(order.goal);
-                let to = match aim {
-                    Aim::Unit {
-                        pos, radius: rt, ..
-                    } => {
-                        let there = map.tile_of(pos);
-                        let reachable = walkable(map, here, there)
-                            || order.path.last().is_some_and(|&end| {
-                                walkable(map, here, end)
-                                    && hittable_from(rules, map, u, attack.range, pos, rt, end)
-                            })
-                            || chase_end(map, rules, u, attack.range, &aim).is_some();
-                        if !reachable {
-                            give_up(state, id);
-                            continue;
-                        }
-                        let drift = chebyshev(goal_tile, there);
-                        (u32::from(drift) > rules.chase_regoal_tiles).then(|| map.center_of(there))
-                    }
-                    Aim::Building { .. } if walkable(map, here, goal_tile) => None,
-                    Aim::Building { .. } => match chase_end(map, rules, u, attack.range, &aim) {
-                        Some(end) => Some(goal(end)),
-                        None => {
-                            give_up(state, id);
-                            continue;
-                        }
-                    },
-                };
-                if let Some(to) = to
-                    && !state.pathing.has_request(id)
-                {
-                    regoal(state, rules, id, to, tick);
-                }
-                if state.pathing.has_request(id) {
-                    plan.awaiting.insert(id);
-                }
-            }
-            (None, None) => match chase_end(map, rules, u, attack.range, &aim) {
-                Some(end) => {
-                    let to = goal(end);
-                    order_move(state, rules, id, to, tick);
-                }
-                None => give_up(state, id),
-            },
-            // The path chase arrived and the target is still out of reach.
-            // When the end tile is no longer the tile it arrived at (a unit
-            // target walked on, by up to `chase_regoal_tiles`, round an
-            // obstacle), walk again: each walk needs the target to have
-            // moved, so this is no request storm. Otherwise it cannot be
-            // reached from here: give up.
-            (None, Some(post)) => match chase_end(map, rules, u, attack.range, &aim) {
-                Some(end) if end != map.tile_of(post.goal) => {
-                    let to = goal(end);
-                    order_move(state, rules, id, to, tick);
-                }
-                _ => give_up(state, id),
-            },
+    let targetable: Vec<Targetable> = state
+        .buildings
+        .values()
+        .filter(|b| b.hp > 0)
+        .map(|b| (b.id, b.owner, building_rect(rules, &state.map, b)))
+        .collect();
+    let mut scratch = Vec::new();
+    for (id, intent) in units {
+        if intent == Intent::Attack {
+            think_explicit(state, rules, stats, id, tick, &mut plan);
+        } else {
+            think_acquiring(
+                state,
+                rules,
+                grid,
+                stats,
+                &targetable,
+                id,
+                &mut scratch,
+                &mut plan,
+            );
         }
     }
+    think_shooters(state, rules, grid, stats, tick, &mut plan);
     plan
 }
 
-/// Step 5c: collect every hit from the post-movement positions, apply them
-/// summed per target, then `reap` (see the module docs).
+/// 5a for a unit with an explicit `Attack` (see the module docs).
+fn think_explicit(
+    state: &mut State,
+    rules: &Rules,
+    stats: &Stats,
+    id: UnitId,
+    tick: u32,
+    plan: &mut Plan,
+) {
+    let u = &state.units[&id];
+    let attack = stats.unit(u.owner, u.kind).attack;
+    let aim = u.target.and_then(|t| locate(state, rules, u.owner, t));
+    let (Some(attack), Some(aim)) = (attack, aim) else {
+        give_up(state, id);
+        return;
+    };
+    let point = aim.point(u.pos);
+    if within(u.pos, u.radius, attack.range, &aim) {
+        engage_directly(state, id);
+        plan.engage.insert(id, Engage::Hold { face: point });
+        return;
+    }
+    let map = &state.map;
+    if chases_directly(map, u.pos, u.radius, attack.reach, &aim) {
+        engage_directly(state, id);
+        plan.engage.insert(id, Engage::Chase(point));
+        return;
+    }
+    let here = map.tile_of(u.pos);
+    // A path chase. Its order's goal is the target's tile (pathing
+    // corrects it to the end tile), or a building's ring tile.
+    let goal = |end: Tile| match aim {
+        Aim::Unit { pos, .. } => map.center_of(map.tile_of(pos)),
+        Aim::Building { .. } => map.center_of(end),
+    };
+    match (&u.order, u.post) {
+        // Walking. Whether the target can still be reached is checked
+        // every tick, so a wall closing round it ends the chase at once
+        // and no group is left jostling for a corrected goal tile it
+        // cannot all reach. The cheap checks come first: a unit target
+        // the unit can walk to, or one it can hit from the end of its
+        // path, or a building whose ring tile it can still walk to;
+        // `chase_end` searches only when they fail.
+        (Some(order), _) => {
+            let goal_tile = map.tile_of(order.goal);
+            let to = match aim {
+                Aim::Unit {
+                    pos, radius: rt, ..
+                } => {
+                    let there = map.tile_of(pos);
+                    let reachable = walkable(map, here, there)
+                        || order.path.last().is_some_and(|&end| {
+                            walkable(map, here, end)
+                                && hittable_from(rules, map, u, attack.range, pos, rt, end)
+                        })
+                        || chase_end(map, rules, u, attack.range, &aim).is_some();
+                    if !reachable {
+                        give_up(state, id);
+                        return;
+                    }
+                    let drift = chebyshev(goal_tile, there);
+                    (u32::from(drift) > rules.chase_regoal_tiles).then(|| map.center_of(there))
+                }
+                Aim::Building { .. } if walkable(map, here, goal_tile) => None,
+                Aim::Building { .. } => match chase_end(map, rules, u, attack.range, &aim) {
+                    Some(end) => Some(goal(end)),
+                    None => {
+                        give_up(state, id);
+                        return;
+                    }
+                },
+            };
+            if let Some(to) = to
+                && !state.pathing.has_request(id)
+            {
+                regoal(state, rules, id, to, tick);
+            }
+            if state.pathing.has_request(id) {
+                plan.awaiting.insert(id);
+            }
+        }
+        (None, None) => match chase_end(map, rules, u, attack.range, &aim) {
+            Some(end) => {
+                let to = goal(end);
+                order_move(state, rules, id, to, tick);
+            }
+            None => give_up(state, id),
+        },
+        // The path chase arrived and the target is still out of reach.
+        // When the end tile is no longer the tile it arrived at (a unit
+        // target walked on, by up to `chase_regoal_tiles`, round an
+        // obstacle), walk again: each walk needs the target to have
+        // moved, so this is no request storm. Otherwise it cannot be
+        // reached from here: give up.
+        (None, Some(post)) => match chase_end(map, rules, u, attack.range, &aim) {
+            Some(end) if end != map.tile_of(post.goal) => {
+                let to = goal(end);
+                order_move(state, rules, id, to, tick);
+            }
+            _ => give_up(state, id),
+        },
+    }
+}
+
+/// What an acquiring unit takes of the enemies of one tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    /// None of them.
+    Nothing,
+    /// Only those in weapon range.
+    InRange,
+    /// Those in weapon range or directly chaseable.
+    InReach,
+}
+
+/// A target an acquiring unit could take.
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    /// `(tier, out of weapon range, squared distance)`, best first.
+    key: (u8, bool, i64),
+    id: TargetId,
+    aim: Aim,
+}
+
+/// The candidates `u` would take, ranked by `Candidate::key` (see the
+/// module docs), among those that rank strictly better than `limit` on
+/// `(tier, out of weapon range)`: the best one, or every one that ties
+/// with it exactly, in `TargetId` order. Empty when none is in weapon
+/// range or directly chaseable. Reads `targetable` for buildings and the
+/// grid for units; `scratch` is reused between units.
+#[allow(clippy::too_many_arguments)]
+fn best_candidates(
+    state: &State,
+    grid: &SpatialGrid,
+    stats: &Stats,
+    targetable: &[Targetable],
+    u: &Unit,
+    attack: &AttackStats,
+    limit: (u8, bool),
+    scratch: &mut Vec<Candidate>,
+) -> Vec<Candidate> {
+    scratch.clear();
+    let want = |tier: u8| {
+        if (tier, false) >= limit {
+            Want::Nothing
+        } else if (tier, true) >= limit {
+            Want::InRange
+        } else {
+            Want::InReach
+        }
+    };
+    let mut consider = |want: Want, tier: u8, id: TargetId, aim: Aim, dist_sq: i64| {
+        let in_range = within(u.pos, u.radius, attack.range, &aim);
+        let ok = match want {
+            Want::Nothing => false,
+            Want::InRange => in_range,
+            Want::InReach => in_range || within(u.pos, u.radius, attack.reach, &aim),
+        };
+        if ok {
+            scratch.push(Candidate {
+                key: (tier, !in_range, dist_sq),
+                id,
+                aim,
+            });
+        }
+    };
+    let unit_tier = stats.tier(u.kind, false);
+    let units = want(unit_tier);
+    if units != Want::Nothing {
+        let edge = if units == Want::InRange {
+            attack.range
+        } else {
+            attack.reach
+        };
+        grid.for_each_in(u.pos, edge + u.radius + stats.max_radius, |other| {
+            let Some(o) = state.units.get(&other).filter(|o| o.owner != u.owner) else {
+                return;
+            };
+            let aim = Aim::Unit {
+                pos: o.pos,
+                radius: o.radius,
+                kind: o.kind,
+            };
+            consider(
+                units,
+                unit_tier,
+                TargetId::Unit(o.id),
+                aim,
+                u.pos.dist_sq_i64(o.pos),
+            );
+        });
+    }
+    let building_tier = 1 - unit_tier;
+    let buildings = want(building_tier);
+    if buildings != Want::Nothing {
+        for &(id, owner, rect) in targetable {
+            if owner != u.owner {
+                consider(
+                    buildings,
+                    building_tier,
+                    TargetId::Building(id),
+                    Aim::Building { rect },
+                    dist_sq_to_rect(u.pos, rect),
+                );
+            }
+        }
+    }
+    scratch.sort_unstable_by_key(|c| (c.key, c.id));
+    // The best candidate in weapon range or directly chaseable; the line
+    // test runs lazily, in rank order.
+    let qualifies = |c: &Candidate| {
+        !c.key.1 || chases_directly(&state.map, u.pos, u.radius, attack.reach, &c.aim)
+    };
+    let Some(first) = scratch.iter().position(qualifies) else {
+        return Vec::new();
+    };
+    let key = scratch[first].key;
+    scratch[first..]
+        .iter()
+        .take_while(|c| c.key == key)
+        .filter(|c| qualifies(c))
+        .copied()
+        .collect()
+}
+
+/// 5a for a unit that acquires: an idle guard or an attack-mover (see the
+/// module docs). Sets or clears its target and engages it.
+#[allow(clippy::too_many_arguments)]
+fn think_acquiring(
+    state: &mut State,
+    rules: &Rules,
+    grid: &SpatialGrid,
+    stats: &Stats,
+    targetable: &[Targetable],
+    id: UnitId,
+    scratch: &mut Vec<Candidate>,
+    plan: &mut Plan,
+) {
+    let u = state.units.get_mut(&id).expect("unit exists");
+    match u.intent {
+        // A plain move, a job walk, a rally walk or a guard walking a path
+        // back to its post never engages.
+        Intent::Plain if u.order.is_some() || u.job.is_some() => {
+            u.target = None;
+            return;
+        }
+        // The attack-move arrived (step 4 ends it when its path is
+        // unreachable, and an engaged attack-mover keeps its order): the
+        // unit guards where it stands.
+        Intent::AttackMove { .. } if u.order.is_none() => u.intent = Intent::Plain,
+        _ => {}
+    }
+    let u = &state.units[&id];
+    let attack = stats
+        .unit(u.owner, u.kind)
+        .attack
+        .expect("only armed units acquire");
+    // The current target, while it is valid and in weapon range or
+    // directly chaseable (so not beyond the reach).
+    let kept = u.target.and_then(|t| {
+        let aim = locate(state, rules, u.owner, t)?;
+        let in_range = within(u.pos, u.radius, attack.range, &aim);
+        (in_range || chases_directly(&state.map, u.pos, u.radius, attack.reach, &aim))
+            .then_some((t, aim, in_range))
+    });
+    // Only a candidate that ranks strictly better on (tier, out of weapon
+    // range) displaces it; nothing ranks better than an in-range target of
+    // the better tier, so then nothing is searched.
+    let limit = kept.map_or((2, false), |(t, _, in_range)| {
+        (
+            stats.tier(u.kind, matches!(t, TargetId::Building(_))),
+            !in_range,
+        )
+    });
+    let ties = if limit > (0, false) {
+        best_candidates(state, grid, stats, targetable, u, &attack, limit, scratch)
+    } else {
+        Vec::new()
+    };
+    let chosen = match ties.len() {
+        0 => kept,
+        n => {
+            let i = if n == 1 {
+                0
+            } else {
+                let n = u32::try_from(n).expect("candidates fit u32");
+                usize::try_from(rng_index(&mut state.rng, n)).expect("fits")
+            };
+            let c = ties[i];
+            Some((c.id, c.aim, !c.key.1))
+        }
+    };
+    let u = state.units.get_mut(&id).expect("unit exists");
+    u.target = chosen.map(|(t, _, _)| t);
+    if let Some((_, aim, in_range)) = chosen {
+        let point = aim.point(u.pos);
+        let engage = if in_range {
+            Engage::Hold { face: point }
+        } else {
+            Engage::Chase(point)
+        };
+        plan.engage.insert(id, engage);
+    }
+}
+
+/// 5a for the shooters: every complete building with an `attack` and hit
+/// points left whose cooldown has run out, in `BuildingId` order, aims at
+/// the nearest enemy unit in range of its footprint (exact ties drawn).
+fn think_shooters(
+    state: &mut State,
+    rules: &Rules,
+    grid: &SpatialGrid,
+    stats: &Stats,
+    tick: u32,
+    plan: &mut Plan,
+) {
+    let ready: Vec<(BuildingId, PlayerId, Rect, ShooterStats)> = state
+        .buildings
+        .values()
+        .filter(|b| b.construction == Construction::Complete && b.hp > 0 && tick >= b.ready_at)
+        .filter_map(|b| {
+            let shot = stats.shooter(b.kind)?;
+            Some((b.id, b.owner, building_rect(rules, &state.map, b), shot))
+        })
+        .collect();
+    let mut nearest: Vec<UnitId> = Vec::new();
+    for (id, owner, rect, shot) in ready {
+        let (w, h) = (rect.x1 - rect.x0 + 1, rect.y1 - rect.y0 + 1);
+        let centre = FxVec2::new(
+            Fx::from_ratio(i32::from(rect.x0) + i32::from(rect.x1) + 1, 2),
+            Fx::from_ratio(i32::from(rect.y0) + i32::from(rect.y1) + 1, 2),
+        );
+        let half = Fx::from_ratio(i32::from(w.max(h)), 2);
+        let mut best = i64::MAX;
+        nearest.clear();
+        grid.for_each_in(centre, half + shot.range + stats.max_radius, |uid| {
+            let Some(u) = state.units.get(&uid).filter(|u| u.owner != owner) else {
+                return;
+            };
+            let d = dist_sq_to_rect(u.pos, rect);
+            if d > reach_sq(shot.range + u.radius) || d > best {
+                return;
+            }
+            if d < best {
+                best = d;
+                nearest.clear();
+            }
+            nearest.push(uid);
+        });
+        let aim = match nearest.len() {
+            0 => continue,
+            1 => nearest[0],
+            n => {
+                nearest.sort_unstable();
+                let n = u32::try_from(n).expect("units fit u32");
+                nearest[usize::try_from(rng_index(&mut state.rng, n)).expect("fits")]
+            }
+        };
+        plan.aims.push((id, aim));
+    }
+}
+
+/// Step 5c: collect every hit from the post-movement positions, units in
+/// `UnitId` order then the shooters' `aims` in `BuildingId` order, apply
+/// them summed per target, then `reap` (see the module docs).
 pub(crate) fn resolve(
     state: &mut State,
     rules: &Rules,
     stats: &Stats,
+    aims: &[(BuildingId, UnitId)],
     tick: u32,
     events: &mut Vec<SimEvent>,
 ) {
-    let mut hits: Vec<(UnitId, TargetId, Aim)> = Vec::new();
+    // (attacker, target, floor(raw * counter / 1000), cooldown).
+    let mut hits: Vec<(TargetId, TargetId, i64, u32)> = Vec::new();
     for u in state.units.values() {
         let Some(t) = u.target else { continue };
         if tick < u.ready_at {
@@ -627,40 +1045,55 @@ pub(crate) fn resolve(
         let Some(aim) = locate(state, rules, u.owner, t) else {
             continue;
         };
-        if within(u.pos, u.radius, attack.range, &aim) {
-            hits.push((u.id, t, aim));
+        if !within(u.pos, u.radius, attack.range, &aim) {
+            continue;
+        }
+        let counter = match aim {
+            Aim::Unit { kind: defender, .. } => stats.counter(u.kind, defender),
+            Aim::Building { .. } => stats.vs_buildings[usize::from(u.kind.0)],
+        };
+        let damage = i64::from(attack.damage)
+            .checked_mul(counter)
+            .expect("damage times counter fits i64")
+            / 1000;
+        hits.push((TargetId::Unit(u.id), t, damage, attack.cooldown_ticks));
+    }
+    for &(id, unit) in aims {
+        let b = &state.buildings[&id];
+        let shot = stats.shooter(b.kind).expect("aimed by a shooter");
+        let u = &state.units[&unit];
+        if dist_sq_to_rect(u.pos, building_rect(rules, &state.map, b))
+            <= reach_sq(shot.range + u.radius)
+        {
+            hits.push((
+                TargetId::Building(id),
+                TargetId::Unit(unit),
+                shot.damage,
+                shot.cooldown_ticks,
+            ));
         }
     }
     if hits.is_empty() {
         return reap(state, rules, stats, events);
     }
     let mut dealt: BTreeMap<TargetId, i64> = BTreeMap::new();
-    for (id, target, aim) in hits {
-        let u: &Unit = &state.units[&id];
-        let (owner, kind) = (u.owner, u.kind);
-        let attack = stats.unit(owner, kind).attack.expect("collected armed");
-        let counter = match aim {
-            Aim::Unit { kind: defender, .. } => stats.counter(kind, defender),
-            Aim::Building { .. } => stats.vs_buildings[usize::from(kind.0)],
-        };
+    for (attacker, target, base, cooldown) in hits {
         let variance = if stats.variance == 0 {
             1000
         } else {
             let span = u32::try_from(2 * stats.variance + 1).expect("variance <= 500");
             1000 + i64::from(rng_index(&mut state.rng, span)) - stats.variance
         };
-        let damage = i64::from(attack.damage)
-            .checked_mul(counter)
-            .expect("damage times counter fits i64")
-            / 1000
-            * variance
-            / 1000;
-        let u = state.units.get_mut(&id).expect("collected");
-        u.ready_at = tick
-            .checked_add(attack.cooldown_ticks)
-            .expect("tick fits u32");
+        let damage = base * variance / 1000;
+        let ready_at = tick.checked_add(cooldown).expect("tick fits u32");
+        match attacker {
+            TargetId::Unit(id) => state.units.get_mut(&id).expect("collected").ready_at = ready_at,
+            TargetId::Building(id) => {
+                state.buildings.get_mut(&id).expect("collected").ready_at = ready_at;
+            }
+        }
         events.push(SimEvent::Hit {
-            attacker: TargetId::Unit(id),
+            attacker,
             target,
             damage: i32::try_from(damage).expect("data-check bounds a hit"),
         });
@@ -711,9 +1144,13 @@ pub(crate) fn reap(state: &mut State, rules: &Rules, stats: &Stats, events: &mut
         .map(|u| u.id)
         .collect();
     for id in dead {
-        state.units.remove(&id);
+        let u = state.units.remove(&id).expect("collected");
         state.pathing.cancel(id);
-        events.push(SimEvent::UnitDied { unit: id });
+        events.push(SimEvent::UnitDied {
+            unit: id,
+            owner: u.owner,
+            kind: u.kind,
+        });
     }
     let wrecked: Vec<BuildingId> = state
         .buildings
@@ -732,7 +1169,11 @@ pub(crate) fn reap(state: &mut State, rules: &Rules, stats: &Stats, events: &mut
         tiles.extend(removed.tiles);
         source_removed |= removed.source;
         towns.extend(removed.building.town);
-        events.push(SimEvent::BuildingDestroyed { building: id });
+        events.push(SimEvent::BuildingDestroyed {
+            building: id,
+            owner: removed.building.owner,
+            kind: removed.building.kind,
+        });
     }
     state.map.set_blocked_many(&tiles, false);
     if source_removed {

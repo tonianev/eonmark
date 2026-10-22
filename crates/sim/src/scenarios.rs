@@ -16,6 +16,9 @@
 //! `n` units on an empty sim creates `UnitId(1..=n)`. Every stream is valid
 //! only when fed to a fresh sim from tick 0.
 //!
+//! The M4a counter duels ([`counter_duel_setup`]) use `DebugSpawnJittered`:
+//! its offsets come from the sim's own RNG, so a stream stays plain data.
+//!
 //! Scenarios start empty ([`StartKind::Empty`]) except
 //! [`economy_second_town`] and [`economy_walkthrough`], which start from
 //! the standard start. On
@@ -622,6 +625,89 @@ pub fn bench_cross(rules: &Rules, n: u16, seed: u64) -> (MatchSetup, Stream) {
     if !moves.is_empty() {
         stream.push((5, moves));
     }
+    (setup, stream)
+}
+
+/// Rows of the [`counter_duel_setup`] line: five rows, three tiles apart,
+/// inside the all-grass west rectangle of `plains_1v1` (x 0..43, y 24..41).
+pub const COUNTER_DUEL_ROWS: [i32; 5] = [26, 29, 32, 35, 38];
+/// Columns of P0's two ranks in [`counter_duel_setup`], front rank first.
+pub const COUNTER_DUEL_P0_RANKS: [i32; 2] = [10, 7];
+/// Columns of P1's two ranks in [`counter_duel_setup`], front rank first.
+pub const COUNTER_DUEL_P1_RANKS: [i32; 2] = [30, 33];
+/// Where P0 attack-moves in [`counter_duel_setup`]: beyond P1's line.
+pub const COUNTER_DUEL_P0_GOAL: FxVec2 = FxVec2::from_ints(36, 32);
+/// Where P1 attack-moves in [`counter_duel_setup`]: beyond P0's line.
+pub const COUNTER_DUEL_P1_GOAL: FxVec2 = FxVec2::from_ints(4, 32);
+/// Spawn jitter of every [`counter_duel_setup`] unit, in hundredths of a
+/// tile per axis: up to a tile either way.
+pub const COUNTER_DUEL_JITTER_X100: u8 = 100;
+/// Ticks after which a counter duel is a timeout, which is no win.
+pub const COUNTER_DUEL_TICKS: u32 = 2400;
+
+/// The counter tests' 10 vs 10 duel (`docs/design/combat.md`, "Fixtures
+/// and the 20-seed tests"): ten units of kind `a` for P0 and ten of kind
+/// `b` for P1 on an empty start (`MatchSetup::scenario` with `seed`), in a
+/// line of [`COUNTER_DUEL_ROWS`] by two ranks, P0's at
+/// [`COUNTER_DUEL_P0_RANKS`] and P1's at [`COUNTER_DUEL_P1_RANKS`], 20
+/// tiles between the front ranks. During tick 0 each unit is spawned by
+/// its own `DebugSpawnJittered` (count 1, [`COUNTER_DUEL_JITTER_X100`]),
+/// rank by rank and row by row, so P0's are `UnitId(1..=10)` and P1's
+/// `UnitId(11..=20)` and the seed moves every unit up to a tile either way.
+/// During tick 1 P0 attack-moves to [`COUNTER_DUEL_P0_GOAL`] and P1 to
+/// [`COUNTER_DUEL_P1_GOAL`]. The seed perturbs the jitter and the
+/// acquisition tie-breaks. The test harness (`crates/sim/tests/m4a.rs`)
+/// adds the rest: every 100 ticks each side's idle survivors attack-move
+/// toward the live enemy centroid, and the duel ends when a side is empty
+/// or after [`COUNTER_DUEL_TICKS`]. Not a golden fixture.
+pub fn counter_duel_setup(
+    rules: &Rules,
+    a: UnitKindId,
+    b: UnitKindId,
+    seed: u64,
+) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, seed);
+    let mut spawns = Vec::new();
+    for (owner, kind, ranks) in [
+        (0u8, a, COUNTER_DUEL_P0_RANKS),
+        (1u8, b, COUNTER_DUEL_P1_RANKS),
+    ] {
+        let mut seq = 0;
+        for x in ranks {
+            for y in COUNTER_DUEL_ROWS {
+                spawns.push(PlayerCommand::new(
+                    PlayerId(owner),
+                    seq,
+                    Command::DebugSpawnJittered {
+                        owner: PlayerId(owner),
+                        kind,
+                        at: FxVec2::from_ints(x, y),
+                        count: 1,
+                        jitter_x100: COUNTER_DUEL_JITTER_X100,
+                    },
+                ));
+                seq += 1;
+            }
+        }
+    }
+    let per_side =
+        u32::try_from(COUNTER_DUEL_ROWS.len() * COUNTER_DUEL_P0_RANKS.len()).expect("ten a side");
+    let seq = per_side;
+    let stream = vec![
+        (0, spawns),
+        (
+            1,
+            vec![
+                attack_move(0, seq, ids(1..=per_side), COUNTER_DUEL_P0_GOAL),
+                attack_move(
+                    1,
+                    seq,
+                    ids(per_side + 1..=2 * per_side),
+                    COUNTER_DUEL_P1_GOAL,
+                ),
+            ],
+        ),
+    ];
     (setup, stream)
 }
 

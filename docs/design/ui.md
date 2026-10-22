@@ -39,6 +39,22 @@ M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`
 
 Costs and names on buttons come from `data/rules/*.ron` and `data/rules/strings/en.ron`; the HUD never hard-codes a number.
 
+## Research panel (M4b)
+
+M4b (`command_card.rs`, done): a selected own, complete Scriptorium (the `host` of every tech in `techs.ron`) shows its Train Scribe button and then one Research button per tech line, in `techs.ron` order: Arms, Statecraft, Trade, Letters. Each shows the line's next level, the lowest the player has not researched; a level being researched keeps its button. Once a line's three levels are done, its top level stays on the card, greyed, as "Researched". This is owner decision 8 (ROADMAP M4b Notes): the next level of each line on the card, the blocker on the button, prerequisites in the tooltip, not a full 12-tech grid. Four Research buttons and Train Scribe fit the 4 x 2 card.
+
+| Part | Contents |
+| --- | --- |
+| Which buttons | `command_card::research_actions`: for each line the building's kind hosts, the lowest level not in `SimView::researched`, or the top level when all are |
+| Enabled or greyed | `SimView::check_research` and nothing else (`research_verdicts_match_the_sim` sends each button's command to a copy of the match and gets exactly the button's verdict, for exact and short stock, a level in progress, a locked level, a finished line and a full queue) |
+| First line | The tech's name (`button.research`) |
+| Second line, enabled | The quoted cost (`SimView::research_quote`, Letters discount included) |
+| Second line, greyed | What blocks it: the cost when only the stockpile is short (the tooltip names the resource); the age that unlocks the level ("Masonry Age"); "Needs Arms II" when the level before is missing (only reachable after out-of-order debug research); "Researching 40%" (the queue entry's progress over its queued time; an entry behind another reads 0%); "Researched" |
+| Tooltip | Enabled: "Research Letters I, 25 s. Costs 60 Lore" with the quoted time. Greyed: the rejection's message plus what the level requires, the level before it and the age that unlocks it ("Not available in this age. Requires Arms I, Masonry Age"); a first level of the first age requires nothing more |
+| Click | `Research { building, tech }` (`command_card::card_command`, as for Train and Cancel); a greyed button puts its tooltip on the message line instead |
+
+A finished line reads "Researched" because a line's top level is unlocked only in the last age and `check_research` checks the age before "already researched". The selection panel adds "Researched: Trade I, Letters I" for a Scriptorium, the top level done in each line it hosts, before the queue line. Per-slot queue Cancel buttons and the infinite-queue toggle are not in M4b (owner decision 9).
+
 The infinite-queue toggle on training buildings repeats the last trained kind while resources allow. The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
 
 ## Menus

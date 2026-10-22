@@ -149,6 +149,10 @@ The tech slice (`SIM_VERSION` 12, `rules_version` 14) implements research, ages 
 
 Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim tech`), by acceptance clause: the Masonry and Charter gates (`tech_masonry_age_unlocks_only_after_two_techs_and_250_grain_100_lore`, `tech_charter_age_unlocks_only_after_five_techs_and_500_grain_300_lumber_300_lore`, `tech_age_gates_match_the_design_numbers`), the Letters discount (`tech_each_letters_level_cuts_the_next_research_cost_by_ten_percent_floored`), Modifier stacking (`tech_modifier_stacking_set_add_mul_produces_the_documented_values`) and the faction cap (`tech_faction_yield_cap_mul_1250_gives_cap_87_at_trade_level_0`). Supporting tests cover completion at the host after the fixed time, every rejection against a control sim (every sub-hash, `rng` included), level k needing level k-1 and age k for all 12 techs, Trade, Statecraft and Arms at every level, `requires_tech` (set in memory), the Masonry gates on the Engine Yard, the Outrider and Town tier 2, the exact refund on `Cancel`, the time fixed at queue time, no pop and no ramp for research entries, `DebugResearch`, restore mid-research and the view checks against apply.
 
+## M4b notes (game)
+
+The research panel lives on the Scriptorium's command card (`crates/game/src/command_card.rs`; [ui.md](ui.md#research-panel-m4b)): one button per tech line with the line's next level, its quoted cost from `SimView::research_quote`, greyed exactly when `SimView::check_research` rejects it, with the blocker on the button ("Masonry Age", "Researching 40%", "Researched") and the level before plus the age in the tooltip. The game re-implements none of the checks above. Because `Research` checks the age (6) before "already researched" (7), a finished line's top level reads "Researched" only in the age that unlocks it; in play that is always the case, since level 3 needs the Charter Age.
+
 ## Interactions
 
 | System | Interaction |
@@ -159,7 +163,7 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim tech`), by acceptance claus
 | [combat.md](combat.md) | Arms applies the +10% stat bump; ages unlock unit kinds and the Engine Yard. |
 | [attrition.md](attrition.md) | Harrying I and II are Watchtower researches gated by Masonry and Charter. |
 | [ai.md](ai.md) | The bot's build order reaches the Masonry Age before tick 18000 (M5b acceptance). |
-| [ui.md](ui.md) | Research panel with prerequisites and costs, age indicator and Advance button (M4b). |
+| [ui.md](ui.md) | Research panel with prerequisites and costs (M4b, done: the next level of each line on the Scriptorium's card), age indicator and Advance button (M4b). |
 
 ## Acceptance checklist (from M4a)
 

@@ -702,7 +702,9 @@ fn enemy_outpost_battle_clears_the_vanguard() {
 /// outrange the tower, destroy it with at least three hits; the footprint
 /// is passable and the tower's border source gone afterwards. Every
 /// prerequisite is met at least `ENEMY_OUTPOST_PREREQ_MARGIN` ticks before
-/// the command that needs it.
+/// the command that needs it, and the vanguard is wiped at least 100 ticks
+/// before `ENEMY_OUTPOST_CLEAR_TICK`, as in `enemy_outpost` (both
+/// scenarios fight the same prologue).
 #[test]
 #[ignore = "runs the 400-unit prologue and the build-up (about 5000 ticks); CI runs it with -- --ignored enemy_outpost"]
 fn enemy_outpost_walkthrough_beats_happen() {
@@ -868,6 +870,12 @@ fn enemy_outpost_walkthrough_beats_happen() {
     );
     // Prerequisites, each at least the margin before its command.
     let wipe = wipe.expect("vanguard wiped");
+    // The walkthrough fights the same prologue as `enemy_outpost`, so
+    // `ENEMY_OUTPOST_CLEAR_TICK` bounds its wipe with the same margin.
+    assert!(
+        wipe + 100 <= ENEMY_OUTPOST_CLEAR_TICK,
+        "the walkthrough's prologue: vanguard wiped during {wipe}, CLEAR_TICK {ENEMY_OUTPOST_CLEAR_TICK}"
+    );
     let done = |id: u32| completed[&BuildingId(id)];
     let last_army = spawned
         .iter()

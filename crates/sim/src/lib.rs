@@ -29,7 +29,7 @@
 //! | [`training`] | `Train`, queue `Cancel`, `SetRally`, pop, the unit cost ramps, the training and research step |
 //! | [`tech`] | `TechState` (ages, researched techs), Modifier-resolved player stats, `Research`, `AdvanceAge`, `DebugResearch` |
 //! | [`combat`] | unit combat stats from the Modifier rows, explicit `Attack` (hold, direct chase, path chase, give up), target acquisition by guards and attack-movers, Watchtower and Town shooters, simultaneous hits, death and building destruction |
-//! | [`ai_hook`] | `AiController`, `SimView` |
+//! | [`ai_hook`] | `AiController`, `SimView` (read-only quotes and checks; `building_hp` from M4b) |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

@@ -17,8 +17,8 @@
 //! only when fed to a fresh sim from tick 0.
 //!
 //! The M4a streams use `DebugSpawnJittered` ([`combat_skirmish`],
-//! [`counter_duel_setup`]): its offsets come from the sim's own RNG, so a
-//! stream stays plain data.
+//! [`counter_duel_setup`], [`combat_bench`]): its offsets come from the
+//! sim's own RNG, so a stream stays plain data.
 //!
 //! Scenarios start empty ([`StartKind::Empty`]) except
 //! [`economy_second_town`] and [`economy_walkthrough`], which start from
@@ -938,6 +938,77 @@ pub fn counter_duel_setup(
     (setup, stream)
 }
 
+/// Line kinds of [`combat_bench`], one group of each per side, in spawn
+/// order.
+pub const COMBAT_BENCH_KINDS: [&str; 4] = ["skirmisher", "shieldbearer", "bowman", "outrider"];
+/// P0's group centres in [`combat_bench`], in [`COMBAT_BENCH_KINDS`] order:
+/// two columns of two in the all-grass west rectangle of `plains_1v1`
+/// (x 0..43, y 24..41). P1's are these mirrored across x = 22.
+pub const COMBAT_BENCH_P0_CENTRES: [(i32, i32); 4] = [(6, 28), (6, 36), (14, 28), (14, 36)];
+/// P1's group centres in [`combat_bench`]: P0's mirrored across x = 22.
+pub const COMBAT_BENCH_P1_CENTRES: [(i32, i32); 4] = [(38, 28), (38, 36), (30, 28), (30, 36)];
+/// Where P0 attack-moves in [`combat_bench`]: the centre of P1's groups.
+pub const COMBAT_BENCH_P0_GOAL: FxVec2 = FxVec2::from_ints(34, 32);
+/// Where P1 attack-moves in [`combat_bench`]: the centre of P0's groups.
+pub const COMBAT_BENCH_P1_GOAL: FxVec2 = FxVec2::from_ints(10, 32);
+/// Spawn jitter of every [`combat_bench`] group, in hundredths of a tile
+/// per axis: up to a tile either way, as in the counter duels.
+pub const COMBAT_BENCH_JITTER_X100: u8 = 100;
+/// Default seed of [`combat_bench`] (`sim-cli bench --combat --seed`).
+pub const COMBAT_BENCH_SEED: u64 = 1;
+
+/// The `sim-cli bench --combat` battle (ROADMAP M4a: 200 vs 200 fighting at
+/// `units` 400), on an empty start on `plains_1v1` with `seed`. During tick
+/// 0 each side spawns one `DebugSpawnJittered` group of `units / 8` per
+/// kind of [`COMBAT_BENCH_KINDS`] ([`COMBAT_BENCH_JITTER_X100`]): P0 at
+/// [`COMBAT_BENCH_P0_CENTRES`], then P1 at [`COMBAT_BENCH_P1_CENTRES`], so
+/// P0's units are `UnitId(1..=units / 2)` and P1's the rest (`units` is
+/// rounded down to a multiple of 8). During tick 1 P0 attack-moves to
+/// [`COMBAT_BENCH_P0_GOAL`] and P1 to [`COMBAT_BENCH_P1_GOAL`]. Not in
+/// [`NAMES`]: the stream depends on `units`, and it is not a golden fixture.
+/// Fewer than 8 units gives an empty stream.
+pub fn combat_bench(rules: &Rules, units: u16, seed: u64) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, seed);
+    let per_group = units / 8;
+    if per_group == 0 {
+        return (setup, Vec::new());
+    }
+    let per_side = u32::from(per_group) * 4;
+    let mut spawns = Vec::new();
+    for (owner, centres) in [(0u8, COMBAT_BENCH_P0_CENTRES), (1, COMBAT_BENCH_P1_CENTRES)] {
+        for (seq, (kind, (x, y))) in (0u32..).zip(COMBAT_BENCH_KINDS.iter().zip(centres)) {
+            spawns.push(PlayerCommand::new(
+                PlayerId(owner),
+                seq,
+                Command::DebugSpawnJittered {
+                    owner: PlayerId(owner),
+                    kind: unit_kind(rules, kind),
+                    at: FxVec2::from_ints(x, y),
+                    count: per_group,
+                    jitter_x100: COMBAT_BENCH_JITTER_X100,
+                },
+            ));
+        }
+    }
+    let seq = u32::try_from(COMBAT_BENCH_KINDS.len()).expect("four kinds");
+    let stream = vec![
+        (0, spawns),
+        (
+            1,
+            vec![
+                attack_move(0, seq, ids(1..=per_side), COMBAT_BENCH_P0_GOAL),
+                attack_move(
+                    1,
+                    seq,
+                    ids(per_side + 1..=2 * per_side),
+                    COMBAT_BENCH_P1_GOAL,
+                ),
+            ],
+        ),
+    ];
+    (setup, stream)
+}
+
 /// Look a scenario up by name: `(setup, stream, ticks)`.
 pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
     let (setup, stream, ticks) = match name {
@@ -1155,6 +1226,40 @@ mod tests {
         let sim = run(setup, rules, &stream, 5 + delay + 1);
         assert!(sim.view().units().all(|u| u.order.is_some()));
         assert_eq!(sim.view().unit_count(), 500);
+    }
+
+    #[test]
+    fn combat_bench_spawns_mirrored_groups_and_attack_moves_them() {
+        let rules = rules();
+        let map = crate::map::Map::from_def(rules.map(&rules.default_map).unwrap());
+        for ((x0, y0), (x1, y1)) in COMBAT_BENCH_P0_CENTRES
+            .into_iter()
+            .zip(COMBAT_BENCH_P1_CENTRES)
+        {
+            assert_eq!((x0 + x1, y0), (44, y1), "P1 mirrors P0 across x = 22");
+            for (x, y) in [(x0, y0), (x1, y1)] {
+                assert!((0..43).contains(&x) && (24..41).contains(&y), "({x}, {y})");
+            }
+        }
+        for goal in [COMBAT_BENCH_P0_GOAL, COMBAT_BENCH_P1_GOAL] {
+            assert!(map.passable(map.tile_of(goal)));
+        }
+        let (setup, stream) = combat_bench(&rules, 403, COMBAT_BENCH_SEED);
+        assert_eq!(setup.seed, COMBAT_BENCH_SEED);
+        assert_eq!(commands_at(&stream, 0).len(), 8);
+        let delay = setup.cmd_delay;
+        let sim = run(setup, rules.clone(), &stream, 1 + delay + 1);
+        let view = sim.view();
+        // 403 rounds down to 400: 50 of each kind per side, P0's ids first.
+        assert_eq!(view.unit_count(), 400);
+        for u in view.units() {
+            let owner = if u.id.0 <= 200 { 0 } else { 1 };
+            assert_eq!(u.owner, PlayerId(owner), "{:?}", u.id);
+            assert!(u.order.is_some(), "{:?} attack-moves", u.id);
+            let group = usize::try_from((u.id.0 - 1) % 200 / 50).unwrap();
+            assert_eq!(u.kind, unit_kind(&rules, COMBAT_BENCH_KINDS[group]));
+        }
+        assert!(combat_bench(&rules, 7, 1).1.is_empty());
     }
 
     #[test]

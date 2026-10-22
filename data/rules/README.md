@@ -171,12 +171,14 @@ fixed-point tiles; the arrive, separation and return-to-post radii are read
 per tick. Of the training fields the sim reads `builder` from the M3a Town
 loop (a `Build` by a kind without it is rejected with `NotABuilder`), and
 training (`rules_version` 10) reads `cost`, `ramp`, `pop`, `train_time_ds`
-and `trainer`. So far `class` is checked only by the validator (no
-`Military` ramp on a `Civilian`), and `vision_tiles` is read in M7. The
-combat fields and the counter table are validated, and the sim reads `hp`,
-the `attack` damage, range and cooldown and the counter table since the
-M4a combat core slice (`rules_version` 15); `prefer` is read from the
-combat behaviour slice, with target acquisition.
+and `trainer`. The sim reads `class` since the M4a combat core slice
+(`rules_version` 15), through the `UnitSel::Military` and `Class(..)`
+selectors of the `UnitHp` and `UnitDamage` Modifier rows (Arms); the
+validator also forbids a `Military` ramp on a `Civilian`. `vision_tiles` is
+read in M7. The combat fields and the counter table are validated, and the
+sim reads `hp`, the `attack` damage, range and cooldown and the counter
+table since the M4a combat core slice (`rules_version` 15); `prefer` is
+read from the combat behaviour slice, with target acquisition.
 
 | Field | Meaning |
 |-------|---------|

@@ -3239,7 +3239,12 @@ fn combat_dead_worker_frees_its_slot_and_path_request() {
 /// Buildings destroyed while A* searches are suspended (the budget is
 /// saturated by 50 long requests) change the cost grid under them: the
 /// run is identical tick by tick with the path cache on and off, and with
-/// a restore taken right after the destruction.
+/// a restore taken right after the destruction. The comparison can fail:
+/// two probe Yeomen ask for the same `(start, goal)` key in one generation
+/// (the second is served from the first's cache entry), and a third asks
+/// for it again after the Watchtower on their detour is destroyed, where
+/// a stale entry (a destruction that did not bump the generation, or a key
+/// without it) would hand it the detour instead of the straight path.
 #[test]
 fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
     let rules = load_rules();
@@ -3247,7 +3252,14 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
     let cmd = |p: PlayerId, seq: u32, c: Command| PlayerCommand::new(p, seq, c);
     // P0's Mangonels are UnitId(1..=15) (P0's commands apply first), P1's
     // Yeomen UnitId(16..=65); P1's two Watchtowers and Croft
-    // BuildingId(1..=3) stand beside the block the Yeomen leave.
+    // BuildingId(1..=3) stand beside the block the Yeomen leave. P1's
+    // probes UnitId(66..=67) stand on one tile west of Watchtower 1, each
+    // with its own Move to the same click east of it: the same key.
+    let probe = |id: u32| Command::Move {
+        units: vec![UnitId(id)],
+        target: FxVec2::from_ints(20, 30),
+        queue: false,
+    };
     let mut stream: Vec<(u32, Vec<PlayerCommand>)> = vec![(
         0,
         vec![
@@ -3264,13 +3276,17 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
                 place_for(P1, bkind(&rules, "watchtower"), 18, 31, true),
             ),
             cmd(P1, 3, place_for(P1, bkind(&rules, "croft"), 16, 33, true)),
+            cmd(P1, 4, spawn_for(P1, yeoman, 13, 30, 1)),
+            cmd(P1, 5, spawn_for(P1, yeoman, 13, 30, 1)),
+            cmd(P1, 6, probe(66)),
+            cmd(P1, 7, probe(67)),
         ],
     )];
     stream.push((
         2,
         vec![cmd(
             P1,
-            4,
+            8,
             Command::Move {
                 units: (16..=65).map(UnitId).collect(),
                 target: FxVec2::from_ints(110, 100),
@@ -3284,6 +3300,15 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
             cmd(P0, 1, attack(&[1, 2, 3, 4, 5], building_t(1))),
             cmd(P0, 2, attack(&[6, 7, 8, 9, 10], building_t(2))),
             cmd(P0, 3, attack(&[11, 12, 13, 14, 15], building_t(3))),
+        ],
+    ));
+    // Probe UnitId(68), on the same tile once Watchtower 1 is destroyed
+    // (the Mangonels' first volley, tick 6), asks for the same key.
+    stream.push((
+        5,
+        vec![
+            cmd(P1, 9, spawn_for(P1, yeoman, 13, 30, 1)),
+            cmd(P1, 10, probe(68)),
         ],
     ));
     let at = |tick: u32| -> Vec<PlayerCommand> {
@@ -3302,6 +3327,7 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
         let mut hashes = Vec::new();
         let mut destroyed_with_search = Vec::new();
         let mut gone_total = 0;
+        let mut late_probe: Option<Vec<Tile>> = None;
         for tick in 0..TICKS {
             sim.step(&at(tick));
             let gone = destroyed(&sim.drain_events());
@@ -3309,9 +3335,37 @@ fn combat_destruction_during_a_suspended_search_is_cache_transparent() {
             if !gone.is_empty() && sim.view().pathing().active.is_some() {
                 destroyed_with_search.push((tick, sim.snapshot()));
             }
+            let v = sim.view();
+            let path = |id: u32| {
+                v.unit(UnitId(id))
+                    .and_then(|u| u.order.as_ref())
+                    .map(|o| o.path.clone())
+                    .filter(|p| !p.is_empty())
+            };
+            if tick == 2 {
+                // Both probes are served in the tick their Moves apply: 66
+                // by a search, inserted; 67 from that entry (a hit inserts
+                // nothing).
+                assert!(path(66).is_some() && path(66) == path(67), "same key");
+                assert!(!path(66).unwrap().contains(&Tile::new(16, 30)));
+                assert_eq!(
+                    v.pathing().cache.next_insert,
+                    u64::from(cache),
+                    "one search, one hit"
+                );
+            }
+            if late_probe.is_none() {
+                late_probe = path(68);
+            }
             hashes.push((sim.hash(), sim.sub_hashes()));
         }
         assert_eq!(gone_total, 3, "both Watchtowers and the Croft");
+        assert!(
+            late_probe
+                .expect("68 is served")
+                .contains(&Tile::new(16, 30)),
+            "68 walks through the destroyed Watchtower, not along the cached detour"
+        );
         (hashes, destroyed_with_search)
     };
     let (on, snaps) = run(true);
@@ -3559,14 +3613,15 @@ fn shared_rules() -> &'static Rules {
 }
 
 /// A seeded random command stream over both players in the all-grass west
-/// rectangle of `plains_1v1`, at most 40 units a side: P0 has a complete
-/// Scriptorium (`BuildingId(1)`) and stock, and opens with Mangonels on
-/// P1's complete Watchtower (`BuildingId(2)`) and Skirmishers on P1's
-/// Bowmen; P1 has a Croft site (`BuildingId(3)`) too. Then, at random:
-/// spawns of the armed kinds for either side, `Attack` on enemy units or
-/// on any building id (many rejected), `AttackMove`, `Move` and `Stop`,
-/// and P0's `Research`, `AdvanceAge` and `DebugResearch`. Unit ids are
-/// tracked in allocation order (P0's commands apply first in a tick).
+/// rectangle of `plains_1v1`, at most 40 units spawned a side (a spawn
+/// that would cross 40 is cut short; the dead still count): P0 has a
+/// complete Scriptorium (`BuildingId(1)`) and stock, and opens with
+/// Mangonels on P1's complete Watchtower (`BuildingId(2)`) and Skirmishers
+/// on P1's Bowmen; P1 has a Croft site (`BuildingId(3)`) too. Then, at
+/// random: spawns of the armed kinds for either side, `Attack` on enemy
+/// units or on any building id (many rejected), `AttackMove`, `Move` and
+/// `Stop`, and P0's `Research`, `AdvanceAge` and `DebugResearch`. Unit ids
+/// are tracked in allocation order (P0's commands apply first in a tick).
 fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     use rand_core::{Rng, SeedableRng};
     let rules = shared_rules();
@@ -3666,6 +3721,9 @@ fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
             let p = usize::try_from(rng.next_u32() % 2).unwrap();
             let n = 1 + rng.next_u32() % 4;
             if roll < 6 && ids[p].len() < 40 {
+                // Never past 40 a side: the spawn that would cross it is
+                // cut short (the draws stay the same).
+                let n = n.min(40 - u32::try_from(ids[p].len()).unwrap());
                 let k = armed[usize::try_from(rng.next_u32()).unwrap() % armed.len()];
                 let at = point(&mut rng);
                 push(
@@ -3729,6 +3787,22 @@ fn random_m4a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
         out.push(cmds);
     }
     out
+}
+
+/// `random_m4a_commands` keeps its documented bound: at most 40 units
+/// spawned a side, counted over the stream (dead units are not taken
+/// off). Without the cut, 14 of these 64 seeds spawn 41 to 43.
+#[test]
+fn m4a_random_stream_spawns_at_most_40_a_side() {
+    for seed in 0..64 {
+        let mut spawned = [0u32; 2];
+        for pc in random_m4a_commands(seed, 300).iter().flatten() {
+            if let Command::DebugSpawn { owner, count, .. } = &pc.cmd {
+                spawned[usize::from(owner.0)] += u32::from(*count);
+            }
+        }
+        assert!(spawned.iter().all(|&s| s <= 40), "seed {seed}: {spawned:?}");
+    }
 }
 
 /// Run `stream` on the empty-start scenario with `seed`: the hash after

@@ -23,6 +23,16 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-22 at `rules_version` 18, `SIM_VERSION` 14 with
+`just rerecord` (M5a rules data: the Watchtower's Harrying I and II with
+`counts_toward_age: false`, the `HarryingLevel` stat path, the attrition,
+annexation and match-end fields of `rules.ron` and the attrition and
+annexation flags of `units.ron` and `buildings.ron` joined `rules_hash`).
+The sim reads only `counts_toward_age`, and `AdvanceAge` counting the
+techs that count toward an age is the old count for every fixture: none
+researches Harrying, and every other tech counts. Every final hash and
+every `.hash` file is unchanged; only the headers differ.
+
 Recorded 2026-10-22 at `rules_version` 17, `SIM_VERSION` 14 with
 `just rerecord enemy_outpost_walkthrough` (M4b scripted owner proxy:
 `enemy_outpost_walkthrough` is a first recording of a new scenario, final

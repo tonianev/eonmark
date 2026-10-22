@@ -578,7 +578,8 @@ pub enum RejectReason {
     /// The tech is queued at one of the player's buildings.
     ResearchInProgress,
     /// `AdvanceAge` before the player has researched the next age's
-    /// `techs_required` techs (queued ones do not count).
+    /// `techs_required` techs (queued ones and the Harrying side techs,
+    /// `counts_toward_age: false`, do not count).
     NotEnoughTechs,
     /// `AdvanceAge` in the last age of `ages.ron`.
     FinalAge,

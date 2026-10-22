@@ -288,14 +288,15 @@ fn data_check(dir: &Path) -> ExitCode {
     match Rules::load(dir).and_then(|r| Ok((r, rules::strings::Strings::load(dir, "en")?))) {
         Ok((r, _strings)) => {
             println!(
-                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} factions={} maps={} strings=en",
+                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} side_techs={} factions={} maps={} strings=en",
                 r.rules_version,
                 r.rules_hash(),
                 r.resources.resources.len(),
                 r.units.len(),
                 r.buildings.len(),
                 r.ages.len(),
-                r.techs.len(),
+                r.counting_techs(),
+                r.techs.len() - r.counting_techs(),
                 r.factions.len(),
                 r.maps.keys().cloned().collect::<Vec<_>>().join(",")
             );

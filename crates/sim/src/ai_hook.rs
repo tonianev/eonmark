@@ -167,6 +167,18 @@ impl<'a> SimView<'a> {
         &self.state.tech.player(p).researched
     }
 
+    /// How many of `p`'s completed techs count toward the next age's
+    /// `techs_required` (M5a): `researched(p)` without the side techs whose
+    /// `counts_toward_age` is false (Harrying I and II), the number
+    /// `AdvanceAge` compares with the gate.
+    ///
+    /// # Panics
+    ///
+    /// If the player does not exist.
+    pub fn age_tech_count(&self, p: PlayerId) -> u32 {
+        tech::age_tech_count(self.state, self.rules, p)
+    }
+
     /// What researching `tech` costs `p` now and how many ticks it takes
     /// (what `Research` would deduct and queue), `resources.ron` order.
     ///

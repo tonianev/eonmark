@@ -2,7 +2,8 @@
 // file, it is not part of rules_hash, and editing it needs no rules_version
 // bump. Schema: crates/rules/src/strings.rs (deny_unknown_fields).
 // Placeholders: {resource} {unit} {building} {cost} {used} {cap} {count}
-// {rate} {name} {key}; any other brace fails `sim-cli data-check`.
+// {rate} {name} {key} {time} {hash}; any other brace fails
+// `sim-cli data-check`.
 (
   // Message line, one entry per sim RejectReason in snake case.
   reject: {

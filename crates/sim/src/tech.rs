@@ -355,12 +355,28 @@ pub(crate) fn enqueue_research(
         });
 }
 
+/// How many of `p`'s completed techs count toward an age's
+/// `techs_required`: every researched tech whose `counts_toward_age` is set
+/// (M5a; the Harrying side techs count toward no age). Queued research is
+/// not completed and does not count.
+pub(crate) fn age_tech_count(state: &State, rules: &Rules, p: PlayerId) -> u32 {
+    let n = state
+        .tech
+        .player(p)
+        .researched
+        .iter()
+        .filter(|t| rules.tech(t.0).is_some_and(|d| d.counts_toward_age))
+        .count();
+    u32::try_from(n).expect("at most u16::MAX techs")
+}
+
 /// Validate `AdvanceAge { player: named }` from `p` without changing
 /// anything. Checks, first failure wins: `named` is `p`
 /// (`PlayerMismatch`); `p` is not in the last age (`FinalAge`); `p` has
-/// completed the next age's `techs_required` techs, queued ones not
-/// counting (`NotEnoughTechs`); `p` can pay its cost (`CannotAfford`,
-/// first short resource). Returns the cost.
+/// completed the next age's `techs_required` techs that count toward an
+/// age ([`age_tech_count`]; queued ones and the Harrying side techs do not
+/// count) (`NotEnoughTechs`); `p` can pay its cost (`CannotAfford`, first
+/// short resource). Returns the cost.
 pub(crate) fn validate_advance(
     state: &State,
     rules: &Rules,
@@ -375,8 +391,7 @@ pub(crate) fn validate_advance(
         .ages
         .get(usize::from(mine.age) + 1)
         .ok_or(RejectReason::FinalAge)?;
-    let done = u32::try_from(mine.researched.len()).expect("at most u16::MAX techs");
-    if done < next.techs_required {
+    if age_tech_count(state, rules, p) < next.techs_required {
         return Err(RejectReason::NotEnoughTechs);
     }
     let cost = rules.amounts(&next.cost);

@@ -241,6 +241,7 @@ pub fn run(cli: &Cli) -> AppExit {
         crate::buildings::BuildingsPlugin,
         crate::health_bars::HealthBarsPlugin,
         crate::economy_hud::EconomyHudPlugin,
+        crate::age_hud::AgeHudPlugin,
         crate::command_card::CommandCardPlugin,
         crate::placement::PlacementPlugin,
         SelectionPlugin,

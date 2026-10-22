@@ -31,7 +31,7 @@ M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`
 | Region | Panel | Contents |
 | --- | --- | --- |
 | Top | Resource bar | For each of Grain, Lumber, Ore, Lore: current stockpile and the rate per 30 s. The rate text turns amber when the resource is at its Yield Cap and production is being discarded (see [economy.md](economy.md)). Lore shows its own 999 stockpile cap instead. |
-| Top, right of resources | Population and age | `used / cap` population and the current age name (Hearth, Masonry, Charter) with the Advance button and its cost when the gate is met (M4b). |
+| Top, right of resources | Population and age | `used / cap` population and the current age name (Hearth, Masonry, Charter) with the Advance button and its cost (M4b, done). The button is always shown until the last age, greyed with the tech count ("Advance: 1 / 2 techs") until the gate is met (owner decision 7, ROADMAP M4b Notes; ART_STYLE "greyed, not hidden"). |
 | Bottom left | Selection panel | One selected unit or building: name, HP, owner, current order; for a building, its training or research queue with progress and a Cancel per slot. Several units: a grid of kind icons with counts; clicking an icon narrows the selection to that kind. |
 | Bottom right | Command card | Buttons for what the selection can do: build (Yeomen), train (Muster Hall, Engine Yard, Town), research (Scriptorium, Watchtower), rally, stop, attack-move. Each button shows its cost. A button is disabled with a tooltip when the player cannot afford it, is pop-capped, lacks the age or tech, or has no building site; the tooltip text is the same reason string the sim uses in `CommandRejected`. |
 | Bottom centre | Minimap | A CPU-painted 128 x 128 `Image` in an `ImageNode` painted from the territory and fog grids plus unit and building dots each frame (M7, see [fog.md](fog.md)). Left click moves the camera. Right click orders the selection. |
@@ -54,6 +54,19 @@ M4b (`command_card.rs`, done): a selected own, complete Scriptorium (the `host` 
 | Click | `Research { building, tech }` (`command_card::card_command`, as for Train and Cancel); a greyed button puts its tooltip on the message line instead |
 
 A finished line reads "Researched" because a line's top level is unlocked only in the last age and `check_research` checks the age before "already researched". The selection panel adds "Researched: Trade I, Letters I" for a Scriptorium, the top level done in each line it hosts, before the queue line. Per-slot queue Cancel buttons and the infinite-queue toggle are not in M4b (owner decision 9).
+
+## Age indicator and Advance button (M4b)
+
+M4b (`age_hud.rs`, done): the top bar's right end is one row (`economy_hud::TopBarRight`): the age readout, the Advance button, then the pop readout. The resource bar keeps the left end, and the bottom bar is unchanged, so the `hud_click` points (open ground at the window centre, the empty bottom bar, the Stop button) are where they were.
+
+| Part | Contents |
+| --- | --- |
+| Readout | The local player's age name from `ages.ron` (`SimView::age`): "Hearth Age" |
+| Button | One line, 24 px tall, the card's font: "Advance to Masonry Age", or "Advance: 1 / 2 techs" while the tech count is what the sim rejects (`NotEnoughTechs`). The cost stays in the tooltip: with it on the label (the plan's "Advance to Masonry Age: 250 Grain 100 Lore") the row did not fit the 1280 px top bar beside the M3b amber readout ("Grain 222 +70 / 30 s, capped at 70"), and every readout wrapped onto two lines; with the short label that case keeps about 60 px to spare |
+| Enabled or greyed | `SimView::check_advance_age` and nothing else: greyed for too few techs, greyed with the cost when a resource is short, enabled once the sim would accept `AdvanceAge` (`advance_button_follows_check_advance_age`) |
+| Tooltip | Under the top bar at the right edge (`command_card::TooltipPlace::BelowTopBar`; the colours and the tooltip are the command card's, which follow any entity with a `CardState`). Enabled: "Advance to Masonry Age: Costs 250 Grain 100 Lore" (`Rules::amounts` of the next age's cost in `ages.ron`). Greyed: the rejection's message, the tech count and the cost, "Not enough Grain. 2 / 2 techs researched. Costs 250 Grain 100 Lore" |
+| Click | `AdvanceAge { player }` for the local player from a `Pointer<Click>` observer; a greyed click puts the tooltip on the message line, as a greyed card button does |
+| Last age | The button is hidden (`Display::None`; the sim answers `FinalAge`), the readout stays (`the_button_is_hidden_in_the_final_age`) |
 
 The infinite-queue toggle on training buildings repeats the last trained kind while resources allow. The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
 

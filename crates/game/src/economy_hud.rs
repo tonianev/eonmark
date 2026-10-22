@@ -5,7 +5,9 @@
 //! the local player's stockpile (`stock / cap` for a capped stockpile such
 //! as Lore) and the income per 30 s from `SimView::income`. The rate turns
 //! amber while production is discarded at the Yield Cap (`raw > credited`,
-//! `docs/design/economy.md`). The pop readout is `SimView::pop`.
+//! `docs/design/economy.md`). The pop readout is `SimView::pop`; it sits at
+//! the right end of the top bar in the [`TopBarRight`] row, which
+//! `age_hud` fills with the age readout and the Advance button (M4b).
 //!
 //! The message line shows the local player's last command rejection, in the
 //! words of `data/rules/strings/en.ron`, or a short notice (a building of
@@ -54,6 +56,14 @@ pub struct ResourceReadout(pub usize);
 /// The pop readout on the top bar.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PopReadout;
+
+/// The row at the right end of the top bar: the age readout and the
+/// Advance button (`age_hud`, M4b), then the pop readout.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TopBarRight;
+
+/// Gap between the readouts of the [`TopBarRight`] row, logical px.
+pub const RIGHT_ROW_GAP_PX: f32 = 12.0;
 
 /// The text of the message line.
 #[derive(Component, Debug, Clone, Copy)]
@@ -188,8 +198,9 @@ fn hud_text(text: &str) -> impl Bundle {
     )
 }
 
-/// Fills the top bar with one readout per resource and the pop readout,
-/// and adds the message line above the bottom bar.
+/// Fills the top bar with one readout per resource and, at its right end,
+/// the [`TopBarRight`] row holding the pop readout, and adds the message
+/// line above the bottom bar.
 pub fn spawn_economy_hud(
     mut commands: Commands,
     sim: Option<NonSend<SimHandle>>,
@@ -219,7 +230,19 @@ pub fn spawn_economy_hud(
                     ));
                 }
             });
-            bar.spawn((Name::new("Pop"), PopReadout, hud_text("")));
+            bar.spawn((
+                Name::new("Top bar right"),
+                TopBarRight,
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(RIGHT_ROW_GAP_PX),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+            ))
+            .with_children(|row| {
+                row.spawn((Name::new("Pop"), PopReadout, hud_text("")));
+            });
         });
     }
     if let Ok(root) = root.single() {

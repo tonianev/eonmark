@@ -1,23 +1,24 @@
-//! The age readout and the Advance button (M4b), on the top bar's
-//! [`TopBarRight`] row before the pop readout.
+//! The age readout and the Advance button (M4b), on the age strip: a
+//! panel hanging under the right end of the top bar, below the pop readout.
+//! The top bar keeps only the resource readouts and the pop readout, as in
+//! M3b, so its room for capped rates is not spent on the age.
 //!
 //! The readout names the local player's age (`SimView::age`, the name from
 //! `ages.ron`): "Hearth Age". The Advance button is shown in every age but
 //! the last, greyed, not hidden, while the sim would reject `AdvanceAge`
 //! (owner decision 7, ROADMAP M4b Notes; `ART_STYLE.md`: "greyed, not hidden"):
 //! `SimView::check_advance_age` alone decides, the game copies none of its
-//! checks. Its one line names the next age ("Advance to Masonry Age"), or
-//! is the tech count while that is what blocks it ("Advance: 1 / 2
-//! techs"). The cost (`Rules::amounts` of the next age in `ages.ron`) is in
-//! the tooltip, which shows under the top bar: "Advance to Masonry Age:
-//! Costs 250 Grain 100 Lore" when enabled, else the rejection's message,
-//! "n / m techs researched" and the cost. The label stays short so the row
-//! fits the 1280 px top bar beside four resource readouts with a capped
-//! rate (the M3b amber readout). A click issues `AdvanceAge { player:
-//! LOCAL_PLAYER }` from a `Pointer<Click>` observer, or puts the tooltip
-//! on the message line when greyed. In the last age the button is hidden
-//! (`Display::None`). The hover colours and the tooltip are the command
-//! card's (`command_card::card_button_colors`,
+//! checks. Its one line is the tech count while that is what blocks it
+//! ("Advance: 1 / 2 techs"), else the next age and its cost (`Rules::amounts`
+//! of the next age in `ages.ron`), "Advance to Masonry Age: 250 Grain 100
+//! Lore", greyed while a resource is short as a card button is. The tooltip
+//! shows under the strip: "Advance to Masonry Age: Costs 250 Grain 100
+//! Lore" when enabled, else the rejection's message ("Not enough Grain"),
+//! "n / m techs researched" and the cost. A click issues `AdvanceAge {
+//! player: LOCAL_PLAYER }` from a `Pointer<Click>` observer, or puts the
+//! tooltip on the message line when greyed. In the last age the button is
+//! hidden (`Display::None`). The hover colours and the tooltip are the
+//! command card's (`command_card::card_button_colors`,
 //! `command_card::update_tooltip`), which follow any entity with a
 //! [`CardState`].
 
@@ -30,15 +31,24 @@ use rules::strings::fill;
 use sim::{Command, RejectReason, SimView};
 
 use crate::command_card::{CARD_FONT_PX, CardState, TooltipPlace, card_button_colors, cost_text};
-use crate::economy_hud::{MessageState, TopBarRight, UiStrings, reject_text, spawn_economy_hud};
-use crate::hud::HUD_FONT_PX;
+use crate::economy_hud::{MessageState, UiStrings, reject_text, spawn_economy_hud};
+use crate::hud::{HUD_FONT_PX, HudRoot, PADDING_PX, TOP_BAR_HEIGHT_PX};
 use crate::palette;
 use crate::sim_driver::{LOCAL_PLAYER, PendingCommands, SimHandle};
 
-/// Advance button height, logical px (one line inside the 28 px top bar).
+/// Height of the age strip under the top bar, logical px: the top bar's.
+pub const AGE_STRIP_HEIGHT_PX: f32 = TOP_BAR_HEIGHT_PX;
+/// Gap between the age readout and the Advance button, logical px.
+pub const AGE_STRIP_GAP_PX: f32 = 12.0;
+/// Advance button height, logical px (one line inside the 28 px strip).
 pub const ADVANCE_BUTTON_HEIGHT_PX: f32 = 24.0;
 /// Advance button horizontal padding, logical px.
 pub const ADVANCE_PADDING_PX: f32 = 6.0;
+
+/// The age strip: the panel under the right end of the top bar that holds
+/// the age readout and the Advance button.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AgeStrip;
 
 /// The age readout's text.
 #[derive(Component, Debug, Clone, Copy)]
@@ -70,11 +80,12 @@ pub fn age_text(view: &SimView<'_>, rules: &Rules, strings: &UiStrings) -> Strin
 }
 
 /// The Advance button now: enabled exactly when
-/// `SimView::check_advance_age` accepts; labelled "Advance to Masonry
-/// Age", or "Advance: 1 / 2 techs" while the tech count is what the sim
-/// rejects (`NotEnoughTechs`); hidden in the last age. The tooltip is
-/// "Advance to Masonry Age: Costs 250 Grain 100 Lore" when enabled, else
-/// the rejection's message, "n / m techs researched" and the cost.
+/// `SimView::check_advance_age` accepts; labelled "Advance: 1 / 2 techs"
+/// while the tech count is what the sim rejects (`NotEnoughTechs`), else
+/// with the next age and its cost, "Advance to Masonry Age: 250 Grain 100
+/// Lore"; hidden in the last age. The tooltip is "Advance to Masonry Age:
+/// Costs 250 Grain 100 Lore" when enabled, else the rejection's message,
+/// "n / m techs researched" and the cost.
 pub fn advance_view(view: &SimView<'_>, rules: &Rules, strings: &UiStrings) -> AdvanceView {
     let verdict = view.check_advance_age(LOCAL_PLAYER);
     let Some(next) = rules.ages.get(usize::from(view.age(LOCAL_PLAYER)) + 1) else {
@@ -92,16 +103,15 @@ pub fn advance_view(view: &SimView<'_>, rules: &Rules, strings: &UiStrings) -> A
         ("cap", next.techs_required.to_string()),
     ];
     let counts = counts.each_ref().map(|(k, v)| (*k, v.as_str()));
+    let advance = fill(strings.hud("button.advance"), &[("name", &next.name)]);
+    let cost = cost_text(rules, &rules.amounts(&next.cost));
     let label = match &verdict {
         Err(RejectReason::NotEnoughTechs) => fill(strings.hud("button.advance_techs"), &counts),
-        _ => fill(strings.hud("button.advance"), &[("name", &next.name)]),
+        _ => format!("{advance}: {cost}"),
     };
-    let costs = fill(
-        strings.hud("tooltip.cost"),
-        &[("cost", &cost_text(rules, &rules.amounts(&next.cost)))],
-    );
+    let costs = fill(strings.hud("tooltip.cost"), &[("cost", &cost)]);
     let tooltip = match &verdict {
-        Ok(_) => format!("{label}: {costs}"),
+        Ok(_) => format!("{advance}: {costs}"),
         Err(reason) => format!(
             "{}. {}. {costs}",
             reject_text(strings, rules, reason),
@@ -128,6 +138,7 @@ impl Plugin for AgeHudPlugin {
     }
 }
 
+/// One line of HUD text that never wraps.
 fn text(value: &str, size: f32) -> impl Bundle {
     (
         Text::new(value),
@@ -136,15 +147,35 @@ fn text(value: &str, size: f32) -> impl Bundle {
             ..default()
         },
         TextColor(palette::HUD_TEXT),
+        TextLayout::no_wrap(),
     )
 }
 
-/// Puts the age readout and the Advance button at the start of the
-/// [`TopBarRight`] row, before the pop readout.
-pub fn spawn_age_hud(mut commands: Commands, row: Query<Entity, With<TopBarRight>>) {
-    let Ok(row) = row.single() else {
+/// Adds the age strip to the HUD root: a panel flush with the bottom of the
+/// top bar at its right end, holding the age readout and then the Advance
+/// button, its content aligned with the pop readout's right edge. It grows
+/// leftward with the button's label and blocks world clicks, as the bars do.
+pub fn spawn_age_hud(mut commands: Commands, root: Query<Entity, With<HudRoot>>) {
+    let Ok(root) = root.single() else {
         return;
     };
+    let strip = commands
+        .spawn((
+            Name::new("Age strip"),
+            AgeStrip,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(TOP_BAR_HEIGHT_PX),
+                right: Val::Px(0.0),
+                height: Val::Px(AGE_STRIP_HEIGHT_PX),
+                padding: UiRect::horizontal(Val::Px(PADDING_PX)),
+                column_gap: Val::Px(AGE_STRIP_GAP_PX),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(palette::HUD_PANEL),
+        ))
+        .id();
     let readout = commands
         .spawn((Name::new("Age"), AgeReadout, text("", HUD_FONT_PX)))
         .id();
@@ -153,7 +184,7 @@ pub fn spawn_age_hud(mut commands: Commands, row: Query<Entity, With<TopBarRight
             Name::new("Advance button"),
             AdvanceButton,
             CardState::default(),
-            TooltipPlace::BelowTopBar,
+            TooltipPlace::BelowAgeStrip,
             Button,
             Node {
                 height: Val::Px(ADVANCE_BUTTON_HEIGHT_PX),
@@ -169,7 +200,8 @@ pub fn spawn_age_hud(mut commands: Commands, row: Query<Entity, With<TopBarRight
             button.spawn((AdvanceLabel, text("", CARD_FONT_PX), Pickable::IGNORE));
         })
         .id();
-    commands.entity(row).insert_children(0, &[readout, button]);
+    commands.entity(strip).add_children(&[readout, button]);
+    commands.entity(root).add_children(&[strip]);
 }
 
 /// Every frame: the readout, and the button's label, state and visibility.
@@ -404,33 +436,160 @@ mod tests {
         ));
     }
 
-    /// The readout and the Advance button sit in the top bar's right row,
-    /// before the pop readout.
+    /// The readout and then the Advance button sit on the age strip, which
+    /// hangs under the right end of the top bar, the button's tooltip
+    /// below the strip; the top bar holds the resource readouts and the
+    /// pop readout, as in M3b.
     #[test]
-    fn the_age_readout_and_button_precede_pop_on_the_top_bar() {
+    fn the_age_strip_hangs_under_the_top_bars_right_end() {
         let mut app = hud_app();
         let world = app.world_mut();
-        let row = world
-            .query_filtered::<&Children, With<TopBarRight>>()
+        let (strip, node, row) = world
+            .query_filtered::<(Entity, &Node, &Children), With<AgeStrip>>()
+            .single(world)
+            .unwrap();
+        let (node, row) = (node.clone(), row.to_vec());
+        assert_eq!(
+            (node.position_type, node.top, node.right, node.height),
+            (
+                PositionType::Absolute,
+                Val::Px(TOP_BAR_HEIGHT_PX),
+                Val::Px(0.0),
+                Val::Px(AGE_STRIP_HEIGHT_PX)
+            )
+        );
+        assert!(
+            world
+                .get::<ChildOf>(strip)
+                .is_some_and(|p| world.get::<HudRoot>(p.parent()).is_some()),
+            "on the HUD root"
+        );
+        assert_eq!(row.len(), 2);
+        assert!(world.get::<AgeReadout>(row[0]).is_some());
+        assert!(world.get::<AdvanceButton>(row[1]).is_some());
+        assert_eq!(
+            world.get::<TooltipPlace>(row[1]),
+            Some(&TooltipPlace::BelowAgeStrip)
+        );
+        let bar = world
+            .query_filtered::<&Children, With<crate::hud::TopBar>>()
             .single(world)
             .unwrap()
             .to_vec();
-        assert_eq!(row.len(), 3);
-        assert!(world.get::<AgeReadout>(row[0]).is_some());
-        assert!(world.get::<AdvanceButton>(row[1]).is_some());
-        assert!(world.get::<PopReadout>(row[2]).is_some());
+        assert_eq!(bar.len(), 2, "the resource bar and the pop readout");
+        assert!(world.get::<PopReadout>(bar[1]).is_some());
+        let readouts = world.get::<Children>(bar[0]).unwrap();
+        assert!(readouts.iter().all(|r| {
+            world
+                .get::<crate::economy_hud::ResourceReadout>(r)
+                .is_some()
+        }));
+    }
+
+    /// The glyph advance of Bevy 0.19.1's default font, the only one the
+    /// game uses until M7 (`bevy_text-0.19.1/src/FiraMono-subset.ttf`, a
+    /// monospace font: every glyph advances 600 of 1000 units per em).
+    const GLYPH_ADVANCE_EM: f32 = 0.6;
+
+    /// The width `e` lays out to, logical px, with `text_of` the text of a
+    /// readout (else its current text): a text, `GLYPH_ADVANCE_EM` per
+    /// character of its font size; a node, its children side by side with
+    /// its column gap, plus its horizontal padding; nothing when hidden.
+    fn laid_out_width(world: &World, e: Entity, text_of: &dyn Fn(Entity) -> Option<String>) -> f32 {
+        let px = |v: Val| if let Val::Px(x) = v { x } else { 0.0 };
+        let node = world.get::<Node>(e);
+        if node.is_some_and(|n| n.display == Display::None) {
+            return 0.0;
+        }
+        let padding = node.map_or(0.0, |n| px(n.padding.left) + px(n.padding.right));
+        if let Some(text) = world.get::<Text>(e) {
+            let Some(FontSize::Px(font)) = world.get::<TextFont>(e).map(|f| f.font_size) else {
+                panic!("HUD text is sized in px");
+            };
+            let shown = text_of(e).unwrap_or_else(|| text.0.clone());
+            return padding + shown.chars().count() as f32 * GLYPH_ADVANCE_EM * font;
+        }
+        let children: Vec<Entity> = world
+            .get::<Children>(e)
+            .map(|c| c.to_vec())
+            .unwrap_or_default();
+        let gap = node.map_or(0.0, |n| px(n.column_gap));
+        padding
+            + children
+                .iter()
+                .map(|c| laid_out_width(world, *c, text_of))
+                .sum::<f32>()
+            + gap * children.len().saturating_sub(1) as f32
+    }
+
+    /// The top bar fits the default 1280 px window on one line with every
+    /// stockpile at four digits (Lore at its 999 cap), two rates held at a
+    /// Trade Yield Cap of 100 ("+100 / 30 s, capped at 100") and a pop of
+    /// 100 / 100, whatever else it shows. (Before M4b the bar held only the
+    /// resources and the pop; the age readout and the Advance button there
+    /// left too little room for a capped rate.)
+    #[test]
+    fn the_top_bar_fits_four_digit_stocks_and_two_capped_rates() {
+        use crate::economy_hud::{ResourceReadout, resource_text};
+        let mut app = hud_app();
+        let world = app.world_mut();
+        let bar = world
+            .query_filtered::<Entity, With<crate::hud::TopBar>>()
+            .single(world)
+            .unwrap();
+        let s = strings();
+        let rules = app.world().non_send::<SimHandle>().rules().clone();
+        let text_of = |e: Entity| -> Option<String> {
+            let world = app.world();
+            if let Some(r) = world.get::<ResourceReadout>(e) {
+                let def = &rules.resources.resources[r.0];
+                let stock = def.stockpile_cap.map_or(1234, i64::from);
+                let rate = sim::RateInfo {
+                    raw: if r.0 < 2 { 150 } else { 100 },
+                    cap: Some(100),
+                    credited: 100,
+                };
+                return Some(resource_text(&s, &rules, r.0, stock, &rate));
+            }
+            world
+                .get::<PopReadout>(e)
+                .map(|_| fill(s.hud("pop"), &[("used", "100"), ("cap", "100")]))
+        };
+        let world = app.world();
+        let shown: Vec<String> = world
+            .get::<Children>(bar)
+            .unwrap()
+            .iter()
+            .flat_map(|c| {
+                let below: Vec<Entity> = world
+                    .get::<Children>(c)
+                    .map(|g| g.to_vec())
+                    .unwrap_or_default();
+                std::iter::once(c).chain(below)
+            })
+            .filter_map(text_of)
+            .collect();
         assert_eq!(
-            world.get::<TooltipPlace>(row[1]),
-            Some(&TooltipPlace::BelowTopBar)
+            shown
+                .iter()
+                .filter(|t| t.ends_with(", capped at 100"))
+                .count(),
+            2,
+            "{shown:?}"
+        );
+        let width = laid_out_width(world, bar, &text_of);
+        assert!(
+            width <= crate::app::WINDOW_SIZE.0 as f32,
+            "the top bar needs {width} px: {shown:?}"
         );
     }
 
-    /// Greyed with the tech count at the start, greyed with the cost when
-    /// only the stockpile is short, enabled with the cost once the sim
-    /// accepts `AdvanceAge`, and greyed again for the Charter Age after a
-    /// click advanced; each state is `check_advance_age`'s. A greyed click
-    /// sends nothing and shows the reason; an enabled one sends
-    /// `AdvanceAge`.
+    /// Greyed with the tech count at the start; greyed with the cost on
+    /// its face when only the stockpile is short, as a card button is;
+    /// enabled with the cost once the sim accepts `AdvanceAge`; and greyed
+    /// again for the Charter Age after a click advanced. Each state is
+    /// `check_advance_age`'s. A greyed click sends nothing and shows the
+    /// reason; an enabled one sends `AdvanceAge`.
     #[test]
     fn advance_button_follows_check_advance_age() {
         let mut app = hud_app();
@@ -463,7 +622,7 @@ mod tests {
         assert_eq!(
             (want.label.as_str(), want.state),
             (
-                "Advance to Masonry Age",
+                "Advance to Masonry Age: 250 Grain 100 Lore",
                 CardState {
                     enabled: false,
                     tooltip: "Not enough Grain. 2 / 2 techs researched. Costs 250 Grain 100 Lore"
@@ -478,7 +637,7 @@ mod tests {
         assert_eq!(
             (want.label.as_str(), want.state),
             (
-                "Advance to Masonry Age",
+                "Advance to Masonry Age: 250 Grain 100 Lore",
                 CardState {
                     enabled: true,
                     tooltip: "Advance to Masonry Age: Costs 250 Grain 100 Lore".into(),

@@ -151,7 +151,7 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim tech`), by acceptance claus
 
 ## M4b notes (game)
 
-The research panel lives on the Scriptorium's command card (`crates/game/src/command_card.rs`; [ui.md](ui.md#research-panel-m4b)): one button per tech line with the line's next level, its quoted cost from `SimView::research_quote`, greyed exactly when `SimView::check_research` rejects it, with the blocker on the button ("Masonry Age", "Researching 40%", "Researched") and the level before plus the age in the tooltip. The age readout and the Advance button sit on the top bar (`crates/game/src/age_hud.rs`; [ui.md](ui.md#age-indicator-and-advance-button-m4b)): the button is greyed exactly when `SimView::check_advance_age` rejects, with the tech count ("Advance: 1 / 2 techs") while that is short (owner decision 7), and hidden in the last age. The message line says "Letters I researched" and "Masonry Age reached" for the local player's `ResearchCompleted` and `AgeAdvanced`. The game re-implements none of the checks above. Because `Research` checks the age (6) before "already researched" (7), a finished line's top level reads "Researched" only in the age that unlocks it; in play that is always the case, since level 3 needs the Charter Age.
+The research panel lives on the Scriptorium's command card (`crates/game/src/command_card.rs`; [ui.md](ui.md#research-panel-m4b)): one button per tech line with the line's next level, its quoted cost from `SimView::research_quote`, greyed exactly when `SimView::check_research` rejects it, with the blocker on the button ("Masonry Age", "Researching 40%", "Researched") and the level before plus the age in the tooltip. The age readout and the Advance button sit on the age strip under the right end of the top bar (`crates/game/src/age_hud.rs`; [ui.md](ui.md#age-indicator-and-advance-button-m4b)): the button is greyed exactly when `SimView::check_advance_age` rejects, with the tech count ("Advance: 1 / 2 techs") while that is short (owner decision 7), else showing the next age's cost ("Advance to Masonry Age: 250 Grain 100 Lore"), and hidden in the last age. The message line says "Letters I researched" and "Masonry Age reached" for the local player's `ResearchCompleted` and `AgeAdvanced`. The game re-implements none of the checks above. Because `Research` checks the age (6) before "already researched" (7), a finished line's top level reads "Researched" only in the age that unlocks it; in play that is always the case, since level 3 needs the Charter Age.
 
 ## Interactions
 
@@ -163,7 +163,7 @@ The research panel lives on the Scriptorium's command card (`crates/game/src/com
 | [combat.md](combat.md) | Arms applies the +10% stat bump; ages unlock unit kinds and the Engine Yard. |
 | [attrition.md](attrition.md) | Harrying I and II are Watchtower researches gated by Masonry and Charter. |
 | [ai.md](ai.md) | The bot's build order reaches the Masonry Age before tick 18000 (M5b acceptance). |
-| [ui.md](ui.md) | Research panel with prerequisites and costs (M4b, done: the next level of each line on the Scriptorium's card), age indicator and Advance button (M4b, done: on the top bar, greyed until the gate is met). |
+| [ui.md](ui.md) | Research panel with prerequisites and costs (M4b, done: the next level of each line on the Scriptorium's card), age indicator and Advance button (M4b, done: on a strip under the top bar, greyed until the gate is met). |
 
 ## Acceptance checklist (from M4a)
 

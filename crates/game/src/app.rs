@@ -508,8 +508,9 @@ mod tests {
 
     /// Both `enemy_outpost` scenarios open on their prologue: at tick 3
     /// every one of the 400 battle units projects inside a 1280 x 800
-    /// window between the HUD's top and bottom bars, through the RTS
-    /// camera's own pose and lens at the default framing.
+    /// window between the HUD's bottom bar and the age strip under its top
+    /// bar, through the RTS camera's own pose and lens at the default
+    /// framing.
     #[test]
     fn enemy_outpost_is_framed_on_its_prologue_battle() {
         use crate::camera::{RtsCamera, ZOOM_MAX, ZOOM_MIN};
@@ -576,7 +577,7 @@ mod tests {
         camera.computed.clip_from_view = projection.get_clip_from_view();
         let visible = Rect::new(
             0.0,
-            TOP_BAR_HEIGHT_PX,
+            TOP_BAR_HEIGHT_PX + crate::age_hud::AGE_STRIP_HEIGHT_PX,
             WINDOW_SIZE.0 as f32,
             WINDOW_SIZE.1 as f32 - BOTTOM_BAR_HEIGHT_PX,
         );

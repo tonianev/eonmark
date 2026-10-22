@@ -5,9 +5,12 @@
 //! the local player's stockpile (`stock / cap` for a capped stockpile such
 //! as Lore) and the income per 30 s from `SimView::income`. The rate turns
 //! amber while production is discarded at the Yield Cap (`raw > credited`,
-//! `docs/design/economy.md`). The pop readout is `SimView::pop`; it sits at
-//! the right end of the top bar in the [`TopBarRight`] row, which
-//! `age_hud` fills with the age readout and the Advance button (M4b).
+//! `docs/design/economy.md`). The pop readout is `SimView::pop`, at the
+//! right end of the top bar; since M4b the age readout and the Advance
+//! button hang under it on `age_hud`'s age strip, so the top bar's room
+//! goes to the readouts. Its texts never wrap: a bar too full for the
+//! window runs off its right end instead of splitting every readout onto a
+//! second line over the world.
 //!
 //! The message line shows the local player's last command rejection, in the
 //! words of `data/rules/strings/en.ron`, or a short notice, for
@@ -111,14 +114,6 @@ pub struct ResourceReadout(pub usize);
 /// The pop readout on the top bar.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PopReadout;
-
-/// The row at the right end of the top bar: the age readout and the
-/// Advance button (`age_hud`, M4b), then the pop readout.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct TopBarRight;
-
-/// Gap between the readouts of the [`TopBarRight`] row, logical px.
-pub const RIGHT_ROW_GAP_PX: f32 = 12.0;
 
 /// The text of the message line.
 #[derive(Component, Debug, Clone, Copy)]
@@ -254,7 +249,7 @@ fn hud_text(text: &str) -> impl Bundle {
 }
 
 /// Fills the top bar with one readout per resource and, at its right end,
-/// the [`TopBarRight`] row holding the pop readout, and adds the message
+/// the pop readout, each one line that never wraps, and adds the message
 /// line above the bottom bar.
 pub fn spawn_economy_hud(
     mut commands: Commands,
@@ -282,22 +277,16 @@ pub fn spawn_economy_hud(
                         Name::new(format!("Resource {i}")),
                         ResourceReadout(i),
                         hud_text(""),
+                        TextLayout::no_wrap(),
                     ));
                 }
             });
             bar.spawn((
-                Name::new("Top bar right"),
-                TopBarRight,
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    column_gap: Val::Px(RIGHT_ROW_GAP_PX),
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-            ))
-            .with_children(|row| {
-                row.spawn((Name::new("Pop"), PopReadout, hud_text("")));
-            });
+                Name::new("Pop"),
+                PopReadout,
+                hud_text(""),
+                TextLayout::no_wrap(),
+            ));
         });
     }
     if let Ok(root) = root.single() {

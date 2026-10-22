@@ -45,8 +45,8 @@
 //! button, never from `Interaction::Pressed` (a click would fire twice);
 //! `Interaction` drives the hover colour and the tooltip. The colours and
 //! the tooltip follow any entity with a [`CardState`] and an `Interaction`,
-//! so the top bar's Advance button (`age_hud`) shares them; its tooltip
-//! shows under the top bar ([`TooltipPlace`]).
+//! so the Advance button on the age strip under the top bar (`age_hud`)
+//! shares them; its tooltip shows under the strip ([`TooltipPlace`]).
 
 use bevy::picking::events::{Click, Pointer};
 use bevy::picking::pointer::PointerButton;
@@ -59,6 +59,7 @@ use sim::{
     TechId, UnitKindId,
 };
 
+use crate::age_hud::AGE_STRIP_HEIGHT_PX;
 use crate::economy_hud::{MessageState, UiStrings, reject_text};
 use crate::hud::{
     BOTTOM_BAR_HEIGHT_PX, BottomBar, HUD_FONT_PX, HudRoot, PADDING_PX, TOP_BAR_HEIGHT_PX, spawn_hud,
@@ -137,15 +138,16 @@ pub struct Tooltip;
 pub struct TooltipPanel;
 
 /// Where the tooltip of a button with a [`CardState`] shows: above the
-/// bottom bar (the default, for the command card) or under the top bar
-/// (the Advance button, M4b). Both sit at the right edge.
+/// bottom bar (the default, for the command card) or under the age strip
+/// that hangs under the top bar (the Advance button, M4b). Both sit at the
+/// right edge.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TooltipPlace {
     /// Above the bottom bar.
     #[default]
     AboveBottomBar,
-    /// Under the top bar.
-    BelowTopBar,
+    /// Under the age strip, which hangs under the top bar.
+    BelowAgeStrip,
 }
 
 /// What the card currently shows; buttons are rebuilt when it changes.
@@ -713,7 +715,10 @@ pub fn card_button_colors(
 pub fn tooltip_offsets(place: TooltipPlace) -> (Val, Val) {
     match place {
         TooltipPlace::AboveBottomBar => (Val::Auto, Val::Px(BOTTOM_BAR_HEIGHT_PX + PADDING_PX)),
-        TooltipPlace::BelowTopBar => (Val::Px(TOP_BAR_HEIGHT_PX + PADDING_PX), Val::Auto),
+        TooltipPlace::BelowAgeStrip => (
+            Val::Px(TOP_BAR_HEIGHT_PX + AGE_STRIP_HEIGHT_PX + PADDING_PX),
+            Val::Auto,
+        ),
     }
 }
 
@@ -2297,7 +2302,7 @@ mod tests {
     }
 
     /// The tooltip panel sits above the bottom bar for the card's buttons
-    /// and under the top bar for a button placed there.
+    /// and under the age strip for a button placed there.
     #[test]
     fn the_tooltip_follows_the_hovered_buttons_place() {
         let mut app = App::new();
@@ -2330,7 +2335,7 @@ mod tests {
             let t = app.world().get::<Text>(tip).unwrap();
             (n.display, n.top, n.bottom, t.0.clone())
         };
-        let (top_below, bottom_below) = tooltip_offsets(TooltipPlace::BelowTopBar);
+        let (top_below, bottom_below) = tooltip_offsets(TooltipPlace::BelowAgeStrip);
         let (top_above, bottom_above) = tooltip_offsets(TooltipPlace::AboveBottomBar);
         assert_eq!(
             read(&app),
@@ -2343,13 +2348,16 @@ mod tests {
                 tooltip: "top".into(),
             },
             Interaction::Hovered,
-            TooltipPlace::BelowTopBar,
+            TooltipPlace::BelowAgeStrip,
         ));
         app.update();
         assert_eq!(
             read(&app),
             (Display::Flex, top_below, bottom_below, "top".into())
         );
-        assert_eq!(top_below, Val::Px(TOP_BAR_HEIGHT_PX + PADDING_PX));
+        assert_eq!(
+            top_below,
+            Val::Px(TOP_BAR_HEIGHT_PX + AGE_STRIP_HEIGHT_PX + PADDING_PX)
+        );
     }
 }

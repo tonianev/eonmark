@@ -22,8 +22,8 @@
 //!   units and buildings, flat entities keyed by `TargetId` (M4b), and the
 //!   dev-only hierarchy check.
 //! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
-//! - [`age_hud`]: the age readout and the Advance button on the top bar
-//!   (M4b), greyed by `SimView::check_advance_age`.
+//! - [`age_hud`]: the age readout and the Advance button on a strip under
+//!   the top bar (M4b), greyed by `SimView::check_advance_age`.
 //! - [`camera`]: the yaw-locked RTS camera.
 //! - [`ground`] and [`palette`]: the flat 128 x 128 m ground mesh and colours.
 //! - [`headless`]: `--headless-run <ticks | replay>` on `MinimalPlugins`.

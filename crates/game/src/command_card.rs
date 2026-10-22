@@ -896,6 +896,9 @@ mod tests {
         let (state, cost) = card_state(&view, &rules, &strings(), CardAction::AttackMove);
         assert!(state.enabled);
         assert_eq!(cost, "");
+        // The key exists (`UiStrings::hud` falls back to the key itself, so
+        // the comparison alone would pass without it), and the arm reads it.
+        assert!(strings().0.hud("tooltip.attack_move").is_some());
         assert_eq!(state.tooltip, strings().hud("tooltip.attack_move"));
         assert!(strings().0.hud("button.attack_move").is_some());
 

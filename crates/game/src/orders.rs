@@ -537,6 +537,7 @@ fn resume_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::RING_Y;
     use sim::{PlayerCommand, PlayerId, Tile, UnitKindId};
 
     fn units(n: u32) -> Vec<UnitId> {
@@ -620,6 +621,28 @@ mod tests {
     /// Croft (4), a P1 Skirmisher (13) and a P1 Watchtower (5) far from
     /// everything.
     fn arena() -> sim::Sim {
+        let (setup, rules, cmds) = arena_setup();
+        let mut sim = sim::Sim::new(setup, rules, Box::new(NoAi));
+        sim.step(&cmds);
+        for _ in 0..sim.setup().cmd_delay {
+            sim.step(&[]);
+        }
+        sim
+    }
+
+    /// The [`arena`] in the game's own `SimHandle`, for systems.
+    fn arena_handle() -> SimHandle {
+        let (setup, rules, cmds) = arena_setup();
+        let mut handle = SimHandle::from_setup(setup, rules);
+        handle.step(&cmds);
+        for _ in 0..handle.setup().cmd_delay {
+            handle.step(&[]);
+        }
+        handle
+    }
+
+    /// The arena's setup, rules and tick-0 commands, sorted.
+    fn arena_setup() -> (sim::MatchSetup, Rules, Vec<PlayerCommand>) {
         let rules =
             Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
                 .expect("rules load");
@@ -667,12 +690,7 @@ mod tests {
         ];
         let mut cmds = cmds;
         sim::command::sort_commands(&mut cmds);
-        let mut sim = sim::Sim::new(setup, rules, Box::new(NoAi));
-        sim.step(&cmds);
-        for _ in 0..sim.setup().cmd_delay {
-            sim.step(&[]);
-        }
-        sim
+        (setup, rules, cmds)
     }
 
     fn select(ids: &[u32]) -> Selection {
@@ -957,6 +975,226 @@ mod tests {
         assert_eq!(attacks.target(103), None);
         assert_eq!(attacks.target(104), Some(TargetId::Unit(UnitId(999))));
         assert_eq!(attacks.0.len(), IssuedAttacks::CAPACITY);
+    }
+
+    /// What the pointer is over in [`pointer_app`]: a child entity of a
+    /// unit or building entity (as a glTF model's mesh would be), or the
+    /// open ground.
+    #[derive(Clone, Copy)]
+    enum Hover {
+        ChildOfUnit(u32),
+        ChildOfBuilding(u32),
+        Ground,
+    }
+
+    /// Where the camera in [`pointer_app`] looks: the viewport centre, where
+    /// the cursor is, hits the ground here (sim tile (50, 50)), away from
+    /// every unit and building of the arena.
+    fn pointer_ground() -> Vec3 {
+        world_from_sim(FxVec2::from_ints(50, 50), 0.0)
+    }
+
+    /// The real right-click system over the [`arena`]: a primary window with
+    /// the cursor at its centre, an RTS camera whose viewport centre looks
+    /// at [`pointer_ground`], the hover map naming `hover`, `selected` as
+    /// the selection, and the right button just released.
+    fn pointer_app(selected: &[u32], hover: Hover) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<OrderMode>()
+            .init_resource::<IssuedAttacks>()
+            .init_resource::<PendingCommands>()
+            .init_resource::<PointerOverUi>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(select(selected))
+            .insert_resource(RingAssets {
+                selection: Handle::default(),
+                marker: Handle::default(),
+                attack: Handle::default(),
+            })
+            .add_systems(Update, issue_pointer_orders);
+        app.world_mut().insert_non_send(arena_handle());
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Right);
+        buttons.release(MouseButton::Right);
+        app.insert_resource(buttons);
+        let mut window = Window::default();
+        let size = UVec2::new(window.physical_width(), window.physical_height());
+        window.set_cursor_position(Some(size.as_vec2() / 2.0));
+        app.world_mut().spawn((window, PrimaryWindow));
+        // The faked viewport of `ground_hit_solves_the_y0_plane`.
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: size,
+            scale_factor: 1.0,
+        });
+        camera.computed.clip_from_view =
+            Projection::Perspective(PerspectiveProjection::default()).get_clip_from_view();
+        let rts = RtsCamera {
+            focus: pointer_ground(),
+            ..default()
+        };
+        let transform = Transform::from_translation(rts.eye()).looking_at(rts.focus, Vec3::Y);
+        let cam = app
+            .world_mut()
+            .spawn((rts, camera, transform, GlobalTransform::from(transform)))
+            .id();
+        let hovered = match hover {
+            Hover::ChildOfUnit(id) => {
+                let unit = app.world_mut().spawn(UnitRef(UnitId(id))).id();
+                Some(app.world_mut().spawn(ChildOf(unit)).id())
+            }
+            Hover::ChildOfBuilding(id) => {
+                let building = app.world_mut().spawn(BuildingRef(BuildingId(id))).id();
+                Some(app.world_mut().spawn(ChildOf(building)).id())
+            }
+            Hover::Ground => None,
+        };
+        let mut map = HoverMap::default();
+        map.insert(
+            PointerId::Mouse,
+            hovered
+                .map(|e| {
+                    (
+                        e,
+                        bevy::picking::backend::HitData::new(cam, 1.0, None, None),
+                    )
+                })
+                .into_iter()
+                .collect(),
+        );
+        app.insert_resource(map);
+        app
+    }
+
+    /// Every marker entity: its name and position.
+    fn markers(app: &mut App) -> Vec<(String, Vec3)> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&Name, &Transform), With<crate::selection::MoveMarker>>();
+        q.iter(app.world())
+            .map(|(n, t)| (n.as_str().to_string(), t.translation))
+            .collect()
+    }
+
+    /// The right-click system end to end: the hovered child mesh resolves
+    /// through `ChildOf` to its unit or building, an `Attack` goes through
+    /// `PendingCommands` and is remembered in `IssuedAttacks`, and the
+    /// attack marker stands on the target (a building's roof), not at the
+    /// ground point under the cursor; with only Yeomen it is a `Move` with
+    /// the move marker at the ground point; an enemy-only selection orders
+    /// nothing.
+    #[test]
+    fn a_right_click_resolves_the_hovered_child_and_marks_the_target() {
+        let sim = arena();
+        let (view, rules) = (sim.view(), sim.rules());
+        let ground = pointer_ground();
+        for (selected, hover, target) in [
+            (
+                &[1, 2, 11, 12][..],
+                Hover::ChildOfUnit(13),
+                TargetId::Unit(UnitId(13)),
+            ),
+            (
+                &[11, 12][..],
+                Hover::ChildOfBuilding(5),
+                TargetId::Building(BuildingId(5)),
+            ),
+        ] {
+            let mut app = pointer_app(selected, hover);
+            app.update();
+            let cmds = app
+                .world_mut()
+                .resource_mut::<PendingCommands>()
+                .drain_sorted();
+            assert_eq!(cmds.len(), 1, "{target:?}: {cmds:?}");
+            assert_eq!(
+                cmds[0].cmd,
+                Command::Attack {
+                    units: vec![UnitId(11), UnitId(12)],
+                    target
+                }
+            );
+            assert_eq!(
+                app.world().resource::<IssuedAttacks>().target(cmds[0].seq),
+                Some(target),
+                "remembered under its seq"
+            );
+            let at = target_point(&view, rules, target).unwrap();
+            assert_eq!(
+                markers(&mut app),
+                [("Attack marker".to_string(), at + Vec3::Y * RING_Y)],
+                "on the target, not at the cursor's ground point {ground}"
+            );
+        }
+        // Only Yeomen over the same enemy unit: a Move to the ground point.
+        let mut app = pointer_app(&[1, 2], Hover::ChildOfUnit(13));
+        app.update();
+        let cmds = app
+            .world_mut()
+            .resource_mut::<PendingCommands>()
+            .drain_sorted();
+        let [cmd] = &cmds[..] else {
+            panic!("one command: {cmds:?}")
+        };
+        let Command::Move { units, target, .. } = &cmd.cmd else {
+            panic!("a Move: {cmd:?}")
+        };
+        assert_eq!(units, &[UnitId(1), UnitId(2)]);
+        let to = world_from_sim(*target, 0.0);
+        assert!((to - ground).length() < 0.01, "{to} vs {ground}");
+        let placed = markers(&mut app);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].0, "Move marker");
+        assert!((placed[0].1 - (ground + Vec3::Y * RING_Y)).length() < 0.01);
+        assert!(app.world().resource::<IssuedAttacks>().0.is_empty());
+        // An enemy-only selection: nothing, wherever the pointer is.
+        for hover in [Hover::ChildOfUnit(11), Hover::Ground] {
+            let mut app = pointer_app(&[6, 13], hover);
+            app.update();
+            assert!(app.world().resource::<PendingCommands>().is_empty());
+            assert!(markers(&mut app).is_empty());
+        }
+    }
+
+    /// A and S through the real key system: with only another player's
+    /// units selected neither does anything; with a mixed selection A
+    /// enters attack-move and S stops only the own units.
+    #[test]
+    fn a_and_s_need_an_own_unit_selected() {
+        let mut app = App::new();
+        app.init_resource::<OrderMode>()
+            .init_resource::<PendingCommands>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(select(&[6, 13]))
+            .add_systems(Update, order_mode_keys);
+        app.world_mut().insert_non_send(arena_handle());
+        let press_a_and_s = |app: &mut App| {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.reset_all();
+            keys.press(KeyCode::KeyA);
+            keys.press(KeyCode::KeyS);
+        };
+        press_a_and_s(&mut app);
+        app.update();
+        assert_eq!(*app.world().resource::<OrderMode>(), OrderMode::Normal);
+        assert!(app.world().resource::<PendingCommands>().is_empty());
+        // Mixed: P0's Yeoman 1 and Skirmisher 11 with P1's 6 and 13.
+        app.insert_resource(select(&[1, 6, 11, 13]));
+        press_a_and_s(&mut app);
+        app.update();
+        assert_eq!(*app.world().resource::<OrderMode>(), OrderMode::AttackMove);
+        let cmds = app
+            .world_mut()
+            .resource_mut::<PendingCommands>()
+            .drain_sorted();
+        let stops: Vec<&Command> = cmds.iter().map(|c| &c.cmd).collect();
+        assert_eq!(
+            stops,
+            [&Command::Stop {
+                units: vec![UnitId(1), UnitId(11)]
+            }]
+        );
     }
 
     #[test]

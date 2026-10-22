@@ -26,7 +26,9 @@
 # x,y,zoom (default 38,64,60; an empty string passes no --camera, so the
 # game's own framing for the scenario applies) and the tick to capture
 # (default 100) select what is rendered. CI runs the default and, since
-# M4b, `unit_looks 20,32,40 100`, which draws every unit look.
+# M4b, `unit_looks 20,32,40 100`, which draws every unit look, and
+# `enemy_outpost '' 400`, the 200 vs 200 prologue in the game's own framing
+# with health bars over the damaged units (the bars' unlit pipeline).
 set -euo pipefail
 
 usage="usage: scripts/render_smoke.sh <eonmark binary> [out-dir] [scenario] [camera] [tick]"

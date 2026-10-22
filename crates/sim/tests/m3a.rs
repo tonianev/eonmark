@@ -135,7 +135,9 @@ fn golden(name: &str) {
     }
 }
 
-/// 32 cases locally, 256 under CI, `PROPTEST_CASES` overrides (as in m1.rs).
+/// 32 cases locally, 256 under CI, `PROPTEST_CASES` overrides (the same
+/// switch as m1.rs, which runs 16 locally since the M4a combat behaviour
+/// slice).
 fn proptest_cases() -> u32 {
     std::env::var("PROPTEST_CASES")
         .ok()

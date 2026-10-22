@@ -295,7 +295,7 @@ Commands are validated at apply time against ownership, age, tech, borders, stoc
 
 ### Testing
 
-`cargo test -p sim` is the inner loop: no GPU, no Bevy compile, under 10 seconds for the non-ignored suite. Golden replay fixtures up to 5000 ticks run there; longer ones are `#[ignore]` and verified by `sim-cli verify` in release in the headless CI job. The game crate is smoke-tested by `--headless-run` on a fixture replay using `MinimalPlugins`. Property tests use `proptest` with 32 cases locally and 256 in CI. The in-house A* is checked against the `pathfinding` crate as a dev-only oracle.
+`cargo test -p sim` is the inner loop: no GPU, no Bevy compile, under 10 seconds for the non-ignored suite. Golden replay fixtures up to 5000 ticks run there; longer ones are `#[ignore]` and verified by `sim-cli verify` in release in the headless CI job. The game crate is smoke-tested by `--headless-run` on a fixture replay using `MinimalPlugins`. Property tests use `proptest` with 256 cases in CI (`PROPTEST_CASES=256`, or `CI` set) and fewer locally to keep `cargo test -p sim` under 10 s: 16 in `m1.rs` (32 until the M4a combat behaviour slice lowered it for that test-time budget), 32 in `m3a.rs` and 8 in `m4a.rs` (see [DEPENDENCIES.md](DEPENDENCIES.md)). The in-house A* is checked against the `pathfinding` crate as a dev-only oracle.
 
 ### Performance
 

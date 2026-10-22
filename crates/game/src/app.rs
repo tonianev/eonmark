@@ -224,6 +224,7 @@ pub fn run(cli: &Cli) -> AppExit {
         crate::render_watchdog::RenderWatchdogPlugin,
         PresentPlugin,
         crate::buildings::BuildingsPlugin,
+        crate::health_bars::HealthBarsPlugin,
         crate::economy_hud::EconomyHudPlugin,
         crate::command_card::CommandCardPlugin,
         crate::placement::PlacementPlugin,
@@ -243,6 +244,10 @@ pub fn run(cli: &Cli) -> AppExit {
 
     #[cfg(feature = "dev")]
     app.add_plugins(crate::dev_tools::DevToolsPlugin);
+    // M4b acceptance line 2: health bars and rings stay top-level entities;
+    // prints `hierarchy_check: ...` on exit and exits 1 on a violation.
+    #[cfg(feature = "dev")]
+    app.add_plugins(crate::health_bars::BarHierarchyCheckPlugin);
     #[cfg(feature = "dev")]
     if units200_auto {
         app.add_plugins(crate::selection::SyntheticBoxSelectPlugin);

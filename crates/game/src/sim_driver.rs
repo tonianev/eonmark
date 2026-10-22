@@ -1032,8 +1032,10 @@ fn step_sim(
 /// `App::should_exit` only after the frame, so this system sees messages
 /// written in `Update` (Cmd-Q, `--exit-after-seconds`) and, thanks to the
 /// ordering, the one `exit_on_all_closed` writes in `Last` for the close
-/// button (verified with `--close-window-after-seconds`, M2-C).
-fn finish_recorder_on_exit(
+/// button (verified with `--close-window-after-seconds`, M2-C). Public so
+/// a `Last` system that may itself write `AppExit` (the dev-only
+/// `health_bars::BarHierarchyCheckPlugin`) can run before it.
+pub fn finish_recorder_on_exit(
     mut exits: MessageReader<AppExit>,
     sim: NonSend<SimHandle>,
     mut recorder: ResMut<ReplayRecorder>,

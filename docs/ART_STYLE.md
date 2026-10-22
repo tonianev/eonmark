@@ -79,7 +79,7 @@ Primitive silhouettes (M2 to M7):
 | Town | `Cylinder` | Larger when it reaches the second radius tier |
 | Resource node | `Sphere` | Grain gold, timber, ore colours |
 | Selection ring, rally marker, move marker | Retained gizmo lines | Separate entities keyed by id, never children of moving units |
-| Health bar | Flat quad entity | Same rule |
+| Health bar | Flat quad entity | Same rule; unlit, a team-colour fill on a #3A3A3F track, no green-to-red, shown only while the target is damaged or selected (M4b, `health_bars.rs`) |
 
 Unit looks (M4b, `data/visuals.ron`), one silhouette per kind. Width is the kind's collision diameter from `units.ron`; each mesh has 10 facets around (a 6-latitude capsule, an icosphere of 80 faces) and flat face normals, at most 600 vertices, one mesh per kind and one material per kind and team:
 

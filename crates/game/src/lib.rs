@@ -16,6 +16,9 @@
 //!   one low-poly, flat-shaded look per unit kind and its height).
 //! - [`selection`]: picking, click/box/group selection, rings and markers.
 //! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`.
+//! - [`health_bars`]: team-coloured health bars over damaged or selected
+//!   units and buildings, flat entities keyed by `TargetId` (M4b), and the
+//!   dev-only hierarchy check.
 //! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
 //! - [`camera`]: the yaw-locked RTS camera.
 //! - [`ground`] and [`palette`]: the flat 128 x 128 m ground mesh and colours.
@@ -39,6 +42,7 @@ pub mod field;
 pub mod frame_stats;
 pub mod ground;
 pub mod headless;
+pub mod health_bars;
 pub mod hud;
 #[cfg(target_os = "macos")]
 pub mod macos_menu;

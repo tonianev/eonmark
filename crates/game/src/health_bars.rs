@@ -905,7 +905,10 @@ mod tests {
             },
             SimPlugin::new(handle, Box::new(crate::sim_driver::LocalInput)),
             BarHierarchyCheckPlugin,
-            crate::frame_stats::FrameStatsPlugin { arrival: None },
+            crate::frame_stats::FrameStatsPlugin {
+                arrival: None,
+                fight: false,
+            },
         ));
         let parent = app.world_mut().spawn_empty().id();
         app.world_mut()

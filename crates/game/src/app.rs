@@ -276,10 +276,15 @@ pub fn run(cli: &Cli) -> AppExit {
 
     // Frame-time lines on exit: the `units200_auto` owner proxy (with the
     // arrival count for its scripted move to EAST), the `enemy_outpost`
-    // scenarios' 200 vs 200 prologue (M4b) and any `--max-fps` run, whose
-    // achieved rate they document.
-    if units200_auto || is_enemy_outpost(cli.scenario.as_deref()) || cli.max_fps.is_some() {
-        app.add_plugins(FrameStatsPlugin { arrival });
+    // scenarios' 200 vs 200 prologue (M4b, with the fight window of
+    // acceptance line 2) and any `--max-fps` run, whose achieved rate they
+    // document.
+    let outpost = is_enemy_outpost(cli.scenario.as_deref());
+    if units200_auto || outpost || cli.max_fps.is_some() {
+        app.add_plugins(FrameStatsPlugin {
+            arrival,
+            fight: outpost,
+        });
     }
 
     if let Some(secs) = cli.close_window_after_seconds {

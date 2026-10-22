@@ -20,7 +20,7 @@
 //! | [`pathing`] | budgeted resumable A*, request queue, transparent cache |
 //! | [`movement`] | `SpatialGrid`, movement step, group targets |
 //! | [`replay`] | `.eonreplay` writer, reader, `verify` |
-//! | [`scenarios`] | scripted command streams shared by tests, benches, `record` and fixtures (the M4a counter duels among them) |
+//! | [`scenarios`] | scripted command streams shared by tests, benches, `record` and fixtures (the M4a counter duels and `combat_skirmish` among them) |
 //! | [`territory`] | `TerritoryField`: integer disc kernels per owner layer, tie-to-neutral ownership |
 //! | [`economy`] | `Economy` stockpiles and accumulators, `RateInfo`, exact income, jobs step, cost helpers |
 //! | [`construction`] | footprints, `Build` validation, sites, construction, site cancel |

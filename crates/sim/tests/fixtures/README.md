@@ -3,7 +3,8 @@
 Each fixture is `<name>.eonreplay` (written by `sim-cli record --scenario <name>`)
 with a sibling `<name>.hash` holding the final state hash as `0x<16 hex>` and a
 newline. `crates/sim/tests/m1.rs::golden(name)` (and its copies in `m3a.rs`
-for `economy_second_town` and `m3b.rs` for `economy_walkthrough`) verifies
+for `economy_second_town`, `m3b.rs` for `economy_walkthrough` and `m4a.rs`
+for `combat_skirmish`) verifies
 the replay and compares the final hash;
 `sim-cli verify` does the same from the command line.
 
@@ -15,6 +16,7 @@ the replay and compares the final hash;
 | `snapshot_restore` | 1200 | 200 Yeomen east, 50 more spawned for player 1 after a snapshot/restore swap at tick 300 (seed 7) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 | `economy_second_town` | 3600 | from the standard start, mirrored build orders: during tick 0 Yeoman 1 founds a Town at (40, 63) and Yeoman 2 places a Croft at (28, 60), spending exactly the 150 starting Lumber, and the Seat queues a sixth Yeoman (25 Grain); during tick 2400 Yeoman 3 places a Croft at (44, 60), attributed to the new Town; P1 mirrors them with Yeomen 6, 7 and 8 (seed 11) | `cargo test -p sim`, `sim-cli verify --release` in CI |
 | `economy_walkthrough` | 2400 | the M3b owner proxy, from the standard start, P0 only: during tick 0 Yeoman 3's Croft at (50, 60) is rejected `OutsideBorders`, Yeoman 1 founds a Town at (40, 63), Yeoman 2 places a Croft at (28, 60) and the Seat queues a Yeoman; during tick 1200 a Lumber grant for five more Crofts; the Town completes at tick 1346; during tick 1400 Yeoman 3 places the Croft at (50, 60) again (accepted) and Yeomen 1, 4, 5 and 11 four more, three Crofts per Town; from tick 2049 six worked Crofts put Grain over the Yield Cap (raw 80, credited 70); during tick 2160 Yeomen are spawned to 24/25 pop, during 2200 a `Train` reaches 25/25 and during 2240 the next is rejected `PopCapReached` (seed 12) | `cargo test -p sim`, `sim-cli verify --release` in CI |
+| `combat_skirmish` | 3000 | the M4a combat golden, empty start: during tick 0 P0 places a complete Scriptorium (2, 2) and Engine Yard (30, 12), gets stock and queues Letters I; P1 places a complete Town (22, 38) beside the field and a Watchtower (40, 25); each side spawns six Skirmishers, Shieldbearers, Bowmen and Outriders with `DebugSpawnJittered` (P0's `UnitId(1..=24)` west, P1's `25..=48` mirrored east) and P1 50 Yeomen far south-east; during tick 5 the lines attack-move into each other (the Town shoots into the fight); during tick 150 P0's Bowmen Stop and P1's Outriders Move away; Letters I completes at 501, Trade I (queued during 520) at 1061, Statecraft I queued behind it is cancelled during 540; P0 enters the Masonry Age at 1102 and trains a Mangonel (`UnitId(99)`, queued during 1110, out at 1911), which attacks the Watchtower during 1920 and destroys it with five hits at 2363 while the Yeomen, ordered across the river during 2300, keep a path search suspended (seed 21) | `cargo test -p sim`, `sim-cli verify --release` in CI on both operating systems (hash parity) |
 
 The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
@@ -29,7 +31,9 @@ Towns, so nothing acquires, aims or draws: re-simulating the six
 fixtures emits no `Hit`, `UnitDied`, `BuildingDestroyed`, `TownAtZeroHp`
 or `PathUnreachable` and leaves the `rng` sub-hash at its seeded value,
 and every final hash and every `.hash` file is unchanged; only the
-headers differ.
+headers differ. `combat_skirmish` is a first recording of a new scenario
+(`just rerecord combat_skirmish`, final hash `0x61bdf5745c3c25b1`), which
+needs no bump by itself.
 
 Recorded 2026-10-21 at `rules_version` 15, `SIM_VERSION` 13 with
 `just rerecord` (M4a combat core: `Unit` gained the hashed

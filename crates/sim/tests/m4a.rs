@@ -4,11 +4,12 @@
 //! paths, not integration-test file names). The combat core and behaviour:
 //! hit points, the explicit `Attack`, simultaneous hits, death and
 //! destruction, target acquisition by guards and attack-movers, the
-//! Watchtower and Town shooters, in tests named `combat_` (`cargo test -p
-//! sim combat`), plus the Arms hit point and damage rows (`tech_arms_*`,
-//! `tech_every_arms_*`), the counter triangle over 20 seeds (`counters_*`,
-//! acceptance 2) and the seeded random streams over tech and combat
-//! (`m4a_*`).
+//! Watchtower and Town shooters and the `combat_skirmish` golden's beats,
+//! in tests named `combat_` (`cargo test -p sim combat`), plus the Arms hit
+//! point and damage rows (`tech_arms_*`, `tech_every_arms_*`), the counter
+//! triangle over 20 seeds (`counters_*`, acceptance 2), the golden itself
+//! (`golden_combat_skirmish`) and the seeded random streams over tech and
+//! combat (`m4a_*`).
 //!
 //! Since the combat behaviour slice an idle armed unit fights any enemy in
 //! its reach on its own, so the tests that measure an explicit `Attack`
@@ -4328,6 +4329,127 @@ fn combat_attack_at_the_edge_of_reach_does_not_flip_flop() {
     }
 }
 
+/// Snapshots mid-skirmish restore to sims that match the uninterrupted run
+/// on every tick, events included: on the `combat_skirmish` stream during
+/// the line fight (attack-movers engaged with their orders kept, stopped
+/// Bowmen guarding with targets, the Town's cooldown running, jittered
+/// positions), with 50 jittered units spawned and attack-moving after the
+/// restore (`UnitId(99..=148)`, so this run stops before the stream's
+/// Mangonel beats, which name `UnitId(99)`), and again, without them, while
+/// the Mangonel batters the Watchtower, through the destruction with
+/// searches suspended.
+#[test]
+fn combat_restore_mid_skirmish_matches_uninterrupted() {
+    use sim::scenarios::{COMBAT_SKIRMISH_TICKS, combat_skirmish, commands_at};
+    let rules = load_rules();
+    let (setup, stream) = combat_skirmish(&rules);
+    let skirm = ukind(&rules, "skirmisher");
+    // The extra 50 (UnitId(99..=148)) during tick 205, after the first
+    // restore point; seqs past the stream's.
+    let extra = |tick: u32| -> Vec<PlayerCommand> {
+        if tick != 205 {
+            return Vec::new();
+        }
+        let side = |p: u8, x: i32, goal: (i32, i32)| {
+            [
+                PlayerCommand::new(
+                    PlayerId(p),
+                    1000,
+                    Command::DebugSpawnJittered {
+                        owner: PlayerId(p),
+                        kind: skirm,
+                        at: FxVec2::from_ints(x, 26),
+                        count: 25,
+                        jitter_x100: 100,
+                    },
+                ),
+                PlayerCommand::new(
+                    PlayerId(p),
+                    1001,
+                    Command::AttackMove {
+                        units: if p == 0 {
+                            (99..=123).map(UnitId).collect()
+                        } else {
+                            (124..=148).map(UnitId).collect()
+                        },
+                        target: FxVec2::from_ints(goal.0, goal.1),
+                    },
+                ),
+            ]
+        };
+        let mut cmds: Vec<PlayerCommand> = side(0, 6, (30, 30)).into();
+        cmds.extend(side(1, 33, (8, 30)));
+        cmds
+    };
+    for (snap_at, end) in [(200, 1000), (2200, 2500)] {
+        assert!(end <= COMBAT_SKIRMISH_TICKS);
+        let at = |tick: u32| -> Vec<PlayerCommand> {
+            let mut cmds = commands_at(&stream, tick).to_vec();
+            if snap_at == 200 {
+                cmds.extend(extra(tick));
+            }
+            cmds
+        };
+        let mut a = Sim::new(setup.clone(), rules.clone(), Box::new(NoAi));
+        for tick in 0..snap_at {
+            a.step(&at(tick));
+        }
+        a.drain_events();
+        {
+            let view = a.view();
+            let tick = a.tick();
+            if snap_at == 200 {
+                assert!(
+                    view.units()
+                        .any(|u| matches!(u.intent, Intent::AttackMove { .. })
+                            && u.order.is_some()
+                            && u.target.is_some()),
+                    "an engaged attack-mover"
+                );
+                assert!(
+                    view.units()
+                        .any(|u| u.intent == Intent::Plain && u.target.is_some()),
+                    "a guard with a target"
+                );
+                assert!(
+                    view.buildings().any(|b| b.ready_at > tick),
+                    "a shooter's cooldown running"
+                );
+                assert!(view.units().any(|u| u.damage_taken > 0));
+            } else {
+                let m = view.unit(UnitId(99)).expect("the Mangonel");
+                assert!(m.intent == Intent::Attack && m.ready_at > tick, "{m:?}");
+                assert!(view.building(BuildingId(4)).unwrap().hp < 500);
+            }
+        }
+        let mut b = Sim::new(setup.clone(), rules.clone(), Box::new(NoAi));
+        b.restore(&a.snapshot()).unwrap();
+        assert_eq!((a.hash(), a.sub_hashes()), (b.hash(), b.sub_hashes()));
+        let (mut hit, mut spawned) = (0, 0);
+        for tick in snap_at..end {
+            a.step(&at(tick));
+            b.step(&at(tick));
+            assert_eq!(a.hash(), b.hash(), "restored at {snap_at}, tick {tick}");
+            assert_eq!(a.sub_hashes(), b.sub_hashes(), "tick {tick}");
+            let ea = a.drain_events();
+            assert_eq!(ea, b.drain_events(), "tick {tick}");
+            hit += hits(&ea).len();
+            spawned += ea
+                .iter()
+                .filter(
+                    |e| matches!(e, SimEvent::UnitSpawned { unit } if (99..=148).contains(&unit.0)),
+                )
+                .count();
+        }
+        assert!(hit > 0, "fighting after the restore at {snap_at}");
+        if snap_at == 200 {
+            assert_eq!(spawned, 50, "the 50 spawned after the restore");
+        } else {
+            assert!(a.view().building(BuildingId(4)).is_none(), "destroyed");
+        }
+    }
+}
+
 /// Arms raises the hit points and damage of the owner's military units,
 /// living ones included: a wounded Skirmisher keeps the damage it took and
 /// gains the new maximum's difference, and its hits grow at once. The
@@ -4836,6 +4958,165 @@ fn counters_watchtower_outranges_skirmishers() {
     }
     eprintln!(
         "watchtower vs skirmisher, (seed, tower's first hit, skirmisher's first hit, tower hits): {table:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The M4a combat golden: `combat_skirmish`.
+// ---------------------------------------------------------------------------
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Verify `fixtures/<name>.eonreplay` and compare its final hash with
+/// `fixtures/<name>.hash` (as `m1.rs`, `m3a.rs` and `m3b.rs` do).
+fn golden(name: &str) {
+    let replay = fixtures_dir().join(format!("{name}.eonreplay"));
+    let hash_file = fixtures_dir().join(format!("{name}.hash"));
+    let expected = std::fs::read_to_string(&hash_file)
+        .unwrap_or_else(|e| panic!("{}: {e}", hash_file.display()));
+    let outcome = sim::verify(&replay, &data_dir(), Box::new(NoAi))
+        .unwrap_or_else(|e| panic!("{}: {e}", replay.display()));
+    match outcome {
+        sim::VerifyOutcome::Ok { final_hash, .. } => {
+            assert_eq!(format!("0x{final_hash:016x}"), expected.trim(), "{name}");
+        }
+        other => panic!("{name}: {other}"),
+    }
+}
+
+#[test]
+fn golden_combat_skirmish() {
+    golden("combat_skirmish");
+}
+
+/// The combat golden's beats, from the real sim: P0 researches Letters I
+/// and then Trade I at the Letters price, cancels the Statecraft I queued
+/// behind it (which never completes), enters the Masonry Age and trains a
+/// Mangonel (`UnitId(99)`, made by `Train`, not by a debug spawn); the two
+/// jittered lines attack-move into each other beside P1's Town and units
+/// die on both sides, the Town shoots, and the mid-fight Stop and Move are
+/// applied (nothing in the stream is rejected); the Mangonel destroys the
+/// Watchtower with five hits from out of its range while a path search is
+/// suspended, the footprint is passable again and the Mangonel stands down.
+#[test]
+fn combat_skirmish_beats_happen() {
+    use sim::scenarios::{
+        COMBAT_SKIRMISH_MANGONEL_TICK, COMBAT_SKIRMISH_SATURATE_TICK, COMBAT_SKIRMISH_TICKS,
+        COMBAT_SKIRMISH_TRAIN_TICK, COMBAT_SKIRMISH_WATCHTOWER, combat_skirmish, commands_at,
+    };
+    let rules = load_rules();
+    let (setup, stream) = combat_skirmish(&rules);
+    assert_eq!((setup.seed, setup.start), (21, StartKind::Empty));
+    let mangonel = ukind(&rules, "mangonel");
+    let (scriptorium, town, tower) = (BuildingId(1), BuildingId(3), BuildingId(4));
+    let mut sim = Sim::new(setup, rules.clone(), Box::new(NoAi));
+    let mut events: Vec<(u32, SimEvent)> = Vec::new();
+    let mut destroyed_with_search = None;
+    for t in 0..COMBAT_SKIRMISH_TICKS {
+        sim.step(commands_at(&stream, t));
+        let tick_events = sim.drain_events();
+        if tick_events.iter().any(
+            |e| matches!(e, SimEvent::BuildingDestroyed { building, .. } if *building == tower),
+        ) {
+            destroyed_with_search = Some((t, sim.view().pathing().active.is_some()));
+        }
+        events.extend(tick_events.into_iter().map(|e| (t, e)));
+    }
+    let view = sim.view();
+    let rejected: Vec<_> = events
+        .iter()
+        .filter(|(_, e)| matches!(e, SimEvent::CommandRejected { .. }))
+        .collect();
+    assert!(rejected.is_empty(), "{rejected:?}");
+    // Tech.
+    let researched: Vec<(u32, TechId)> = events
+        .iter()
+        .filter_map(|(t, e)| match e {
+            SimEvent::ResearchCompleted { player, tech } if *player == P0 => Some((*t, *tech)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        researched.iter().map(|r| r.1).collect::<Vec<_>>(),
+        [tech(&rules, "letters_1"), tech(&rules, "trade_1")]
+    );
+    assert!(events.contains(&(
+        sim::scenarios::COMBAT_SKIRMISH_CANCEL_TICK + 2,
+        SimEvent::TrainingCancelled {
+            building: scriptorium,
+            slot: 1
+        }
+    )));
+    assert!(!view.researched(P0).contains(&tech(&rules, "statecraft_1")));
+    assert!(
+        events
+            .iter()
+            .any(|(_, e)| *e == SimEvent::AgeAdvanced { player: P0, age: 1 })
+    );
+    let spawned_99 = events
+        .iter()
+        .find(|(_, e)| *e == SimEvent::UnitSpawned { unit: UnitId(99) })
+        .map(|(t, _)| *t)
+        .expect("the Mangonel is trained");
+    assert!(spawned_99 > COMBAT_SKIRMISH_TRAIN_TICK && spawned_99 < COMBAT_SKIRMISH_MANGONEL_TICK);
+    assert!(
+        !stream
+            .iter()
+            .flat_map(|(_, c)| c)
+            .any(|c| matches!(c.cmd, Command::DebugSpawn { kind, .. } | Command::DebugSpawnJittered { kind, .. } if kind == mangonel)),
+        "no Mangonel is debug-spawned"
+    );
+    // The line fight.
+    let died = |p: PlayerId| {
+        events
+            .iter()
+            .filter(|(_, e)| matches!(e, SimEvent::UnitDied { owner, .. } if *owner == p))
+            .count()
+    };
+    let (died0, died1) = (died(P0), died(P1));
+    assert!(
+        died0 > 0 && died1 > 0,
+        "deaths on both sides: {died0} {died1}"
+    );
+    let shots = |b: BuildingId| hits_by(&events, TargetId::Building(b)).len();
+    assert!(shots(town) > 0, "the Town beside the field shoots");
+    // The Watchtower.
+    let on_tower = hits_on(&events, unit_t(99), TargetId::Building(tower));
+    assert_eq!(
+        on_tower.iter().map(|h| h.1).collect::<Vec<_>>(),
+        [120; 5],
+        "five hits of 30 x 4000 / 1000"
+    );
+    let tower_hits_99 = hits_on(&events, TargetId::Building(tower), unit_t(99));
+    assert!(tower_hits_99.is_empty(), "the Mangonel outranges it");
+    let (at, searching) = destroyed_with_search.expect("the Watchtower is destroyed");
+    assert_eq!(at, on_tower[4].0);
+    assert!(
+        at > COMBAT_SKIRMISH_SATURATE_TICK && searching,
+        "destroyed while a search is suspended"
+    );
+    assert!(events.iter().any(|(t, e)| *t == at
+        && *e
+            == SimEvent::BuildingDestroyed {
+                building: tower,
+                owner: P1,
+                kind: bkind(&rules, "watchtower"),
+            }));
+    assert!(view.building(tower).is_none());
+    assert!(
+        view.map().passable(COMBAT_SKIRMISH_WATCHTOWER),
+        "footprint free"
+    );
+    let m99 = view.unit(UnitId(99)).expect("the Mangonel lives");
+    assert_eq!(
+        (m99.owner, m99.kind, m99.intent),
+        (P0, mangonel, Intent::Plain)
+    );
+    eprintln!(
+        "combat_skirmish: research {researched:?}, Mangonel trained at {spawned_99}, deaths P0 {died0} P1 {died1}, Town shots {}, tower hits {on_tower:?}, destroyed at {at} with a search suspended",
+        shots(town)
     );
 }
 

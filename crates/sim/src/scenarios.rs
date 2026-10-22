@@ -16,8 +16,9 @@
 //! `n` units on an empty sim creates `UnitId(1..=n)`. Every stream is valid
 //! only when fed to a fresh sim from tick 0.
 //!
-//! The M4a counter duels ([`counter_duel_setup`]) use `DebugSpawnJittered`:
-//! its offsets come from the sim's own RNG, so a stream stays plain data.
+//! The M4a streams use `DebugSpawnJittered` ([`combat_skirmish`],
+//! [`counter_duel_setup`]): its offsets come from the sim's own RNG, so a
+//! stream stays plain data.
 //!
 //! Scenarios start empty ([`StartKind::Empty`]) except
 //! [`economy_second_town`] and [`economy_walkthrough`], which start from
@@ -115,9 +116,9 @@ pub const ECONOMY_WALKTHROUGH_TICKS: u32 = 2400;
 /// Scenario names accepted by [`by_name`], `sim-cli record --scenario` and
 /// the game's `--scenario`. The first four are the M1 golden fixtures; the
 /// M2 names are windowed scenarios (they may be recorded too);
-/// `economy_second_town` is the M3a golden fixture and
-/// `economy_walkthrough` the M3b one.
-pub const NAMES: [&str; 10] = [
+/// `economy_second_town` is the M3a golden fixture, `economy_walkthrough`
+/// the M3b one and `combat_skirmish` the M4a one.
+pub const NAMES: [&str; 11] = [
     "move_500",
     "move_500_short",
     "group_spiral",
@@ -128,6 +129,7 @@ pub const NAMES: [&str; 10] = [
     "hud_click",
     "economy_second_town",
     "economy_walkthrough",
+    "combat_skirmish",
 ];
 
 /// Spawn rows of [`bench_cross`]: a band along the west side from the
@@ -628,6 +630,231 @@ pub fn bench_cross(rules: &Rules, n: u16, seed: u64) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
+/// Length of [`combat_skirmish`]: the Watchtower falls well before it,
+/// and it is short enough (at most 3000 ticks) for its golden to run in
+/// `cargo test`.
+pub const COMBAT_SKIRMISH_TICKS: u32 = 3000;
+/// [`combat_skirmish`]'s P0 Scriptorium (north-west tile), `BuildingId(1)`.
+pub const COMBAT_SKIRMISH_SCRIPTORIUM: Tile = Tile::new(2, 2);
+/// [`combat_skirmish`]'s P0 Engine Yard, `BuildingId(2)`.
+pub const COMBAT_SKIRMISH_ENGINE_YARD: Tile = Tile::new(30, 12);
+/// [`combat_skirmish`]'s P1 Town, `BuildingId(3)`.
+pub const COMBAT_SKIRMISH_TOWN: Tile = Tile::new(22, 38);
+/// [`combat_skirmish`]'s P1 Watchtower, `BuildingId(4)`.
+pub const COMBAT_SKIRMISH_WATCHTOWER: Tile = Tile::new(40, 25);
+/// Tick during which [`combat_skirmish`]'s two lines attack-move.
+pub const COMBAT_SKIRMISH_ATTACK_MOVE_TICK: u32 = 5;
+/// Tick during which [`combat_skirmish`] issues its mid-fight Stop (P0's
+/// Bowmen) and Move (P1's Outriders).
+pub const COMBAT_SKIRMISH_STOP_TICK: u32 = 150;
+/// Tick during which [`combat_skirmish`] queues Trade I and Statecraft I
+/// (Letters I, queued during tick 0, is complete by then).
+pub const COMBAT_SKIRMISH_RESEARCH_TICK: u32 = 520;
+/// Tick during which [`combat_skirmish`] cancels the queued Statecraft I.
+pub const COMBAT_SKIRMISH_CANCEL_TICK: u32 = 540;
+/// Tick during which [`combat_skirmish`]'s P0 enters the Masonry Age.
+pub const COMBAT_SKIRMISH_ADVANCE_TICK: u32 = 1100;
+/// Tick during which [`combat_skirmish`]'s Engine Yard queues the Mangonel.
+pub const COMBAT_SKIRMISH_TRAIN_TICK: u32 = 1110;
+/// Tick during which [`combat_skirmish`]'s trained Mangonel (`UnitId(99)`)
+/// is ordered to attack the Watchtower.
+pub const COMBAT_SKIRMISH_MANGONEL_TICK: u32 = 1920;
+/// Tick during which [`combat_skirmish`]'s 50 P1 Yeomen are ordered across
+/// the river, saturating the path budget while the Watchtower falls.
+pub const COMBAT_SKIRMISH_SATURATE_TICK: u32 = 2300;
+
+/// The M4a combat golden (`combat_skirmish`, seed 21, empty start on
+/// `plains_1v1`): tech and combat beats in one replay, so hash parity
+/// covers combat.
+///
+/// - During tick 0, P0 gets a complete Scriptorium
+///   ([`COMBAT_SKIRMISH_SCRIPTORIUM`], `BuildingId(1)`) and Engine Yard
+///   ([`COMBAT_SKIRMISH_ENGINE_YARD`], `BuildingId(2)`) and stock, and
+///   queues Letters I; P1 gets a complete Town beside the field
+///   ([`COMBAT_SKIRMISH_TOWN`], `BuildingId(3)`), which shoots into the
+///   fight, and a Watchtower off it ([`COMBAT_SKIRMISH_WATCHTOWER`],
+///   `BuildingId(4)`), both in the all-grass west rectangle. Each side spawns six of each line kind with
+///   `DebugSpawnJittered` (a tile of jitter): P0's Skirmishers, Shieldbearers,
+///   Bowmen and Outriders are `UnitId(1..=24)` west of the field, P1's
+///   `UnitId(25..=48)` mirrored east of it; P1 also spawns 50 Yeomen
+///   (`UnitId(49..=98)`) far south-east.
+/// - During [`COMBAT_SKIRMISH_ATTACK_MOVE_TICK`] the lines attack-move at
+///   each other; during [`COMBAT_SKIRMISH_STOP_TICK`], mid-fight, P0's
+///   Bowmen Stop and P1's Outriders Move away.
+/// - P0 really researches: Letters I from tick 0, Trade I queued during
+///   [`COMBAT_SKIRMISH_RESEARCH_TICK`] (at the Letters price), Statecraft I
+///   queued behind it and cancelled during [`COMBAT_SKIRMISH_CANCEL_TICK`];
+///   it enters the Masonry Age during [`COMBAT_SKIRMISH_ADVANCE_TICK`] and
+///   trains a Mangonel (`UnitId(99)`) at the Engine Yard during
+///   [`COMBAT_SKIRMISH_TRAIN_TICK`].
+/// - During [`COMBAT_SKIRMISH_MANGONEL_TICK`] the Mangonel attacks the
+///   Watchtower, which it outranges; during
+///   [`COMBAT_SKIRMISH_SATURATE_TICK`] the 50 Yeomen are ordered across the
+///   river, so path searches are suspended when the tower is destroyed.
+///
+/// Length [`COMBAT_SKIRMISH_TICKS`].
+pub fn combat_skirmish(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, 21);
+    let mut seq = [0u32; 2];
+    let mut cmd = |owner: u8, c: Command| {
+        let i = usize::from(owner);
+        seq[i] += 1;
+        PlayerCommand::new(PlayerId(owner), seq[i] - 1, c)
+    };
+    let place = |owner: u8, kind: &str, tile: Tile| Command::DebugPlaceBuilding {
+        owner: PlayerId(owner),
+        kind: building_kind(rules, kind),
+        tile,
+        complete: true,
+    };
+    let tech = |id: &str| {
+        crate::ids::TechId(
+            rules
+                .tech_by_id(id)
+                .unwrap_or_else(|| panic!("techs.ron has {id}"))
+                .0,
+        )
+    };
+    let stock = |id: &str, amount: u32| Command::DebugGrant {
+        owner: PlayerId(0),
+        resource: resource(rules, id),
+        amount,
+    };
+    let research = |id: &str| Command::Research {
+        building: crate::ids::BuildingId(1),
+        tech: tech(id),
+    };
+    let line = ["skirmisher", "shieldbearer", "bowman", "outrider"];
+    // Spiral centres per line kind: P0's west of the field, P1's mirrored
+    // across x = 19.5.
+    let p0_at = [(8, 28), (8, 36), (4, 32), (12, 32)];
+    let jittered =
+        |owner: u8, kind: &str, (x, y): (i32, i32), count: u16| Command::DebugSpawnJittered {
+            owner: PlayerId(owner),
+            kind: unit_kind(rules, kind),
+            at: FxVec2::from_ints(x, y),
+            count,
+            jitter_x100: 100,
+        };
+    let mut tick0 = vec![
+        cmd(0, place(0, "scriptorium", COMBAT_SKIRMISH_SCRIPTORIUM)),
+        cmd(0, place(0, "engine_yard", COMBAT_SKIRMISH_ENGINE_YARD)),
+        cmd(0, stock("grain", 400)),
+        cmd(0, stock("lumber", 300)),
+        cmd(0, stock("lore", 500)),
+        cmd(0, research("letters_1")),
+    ];
+    for (kind, at) in line.iter().zip(p0_at) {
+        tick0.push(cmd(0, jittered(0, kind, at, 6)));
+    }
+    tick0.push(cmd(1, place(1, "town", COMBAT_SKIRMISH_TOWN)));
+    tick0.push(cmd(1, place(1, "watchtower", COMBAT_SKIRMISH_WATCHTOWER)));
+    for (kind, (x, y)) in line.iter().zip(p0_at) {
+        tick0.push(cmd(1, jittered(1, kind, (39 - x, y), 6)));
+    }
+    tick0.push(cmd(
+        1,
+        Command::DebugSpawn {
+            owner: PlayerId(1),
+            kind: unit_kind(rules, "yeoman"),
+            at: FxVec2::from_ints(100, 106),
+            count: 50,
+        },
+    ));
+    let units = |first: u32, n: u32| ids(first..=first + n - 1);
+    let am = |units: Vec<UnitId>, x: i32, y: i32| Command::AttackMove {
+        units,
+        target: FxVec2::from_ints(x, y),
+    };
+    let stream = vec![
+        (0, tick0),
+        (
+            COMBAT_SKIRMISH_ATTACK_MOVE_TICK,
+            vec![
+                cmd(0, am(units(1, 24), 27, 32)),
+                cmd(1, am(units(25, 24), 12, 32)),
+            ],
+        ),
+        (
+            COMBAT_SKIRMISH_STOP_TICK,
+            vec![
+                cmd(
+                    0,
+                    Command::Stop {
+                        units: units(13, 6),
+                    },
+                ),
+                cmd(
+                    1,
+                    Command::Move {
+                        units: units(43, 6),
+                        target: FxVec2::from_ints(40, 40),
+                        queue: false,
+                    },
+                ),
+            ],
+        ),
+        (
+            COMBAT_SKIRMISH_RESEARCH_TICK,
+            vec![
+                cmd(0, research("trade_1")),
+                cmd(0, research("statecraft_1")),
+            ],
+        ),
+        (
+            COMBAT_SKIRMISH_CANCEL_TICK,
+            vec![cmd(
+                0,
+                Command::Cancel {
+                    building: crate::ids::BuildingId(1),
+                    slot: 1,
+                },
+            )],
+        ),
+        (
+            COMBAT_SKIRMISH_ADVANCE_TICK,
+            vec![cmd(
+                0,
+                Command::AdvanceAge {
+                    player: PlayerId(0),
+                },
+            )],
+        ),
+        (
+            COMBAT_SKIRMISH_TRAIN_TICK,
+            vec![cmd(
+                0,
+                Command::Train {
+                    building: crate::ids::BuildingId(2),
+                    kind: unit_kind(rules, "mangonel"),
+                },
+            )],
+        ),
+        (
+            COMBAT_SKIRMISH_MANGONEL_TICK,
+            vec![cmd(
+                0,
+                Command::Attack {
+                    units: vec![UnitId(99)],
+                    target: crate::ids::TargetId::Building(crate::ids::BuildingId(4)),
+                },
+            )],
+        ),
+        (
+            COMBAT_SKIRMISH_SATURATE_TICK,
+            vec![cmd(
+                1,
+                Command::Move {
+                    units: units(49, 50),
+                    target: FxVec2::from_ints(20, 104),
+                    queue: false,
+                },
+            )],
+        ),
+    ];
+    (setup, stream)
+}
+
 /// Rows of the [`counter_duel_setup`] line: five rows, three tiles apart,
 /// inside the all-grass west rectangle of `plains_1v1` (x 0..43, y 24..41).
 pub const COUNTER_DUEL_ROWS: [i32; 5] = [26, 29, 32, 35, 38];
@@ -753,6 +980,10 @@ pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
         "economy_walkthrough" => {
             let (s, c) = economy_walkthrough(rules);
             (s, c, ECONOMY_WALKTHROUGH_TICKS)
+        }
+        "combat_skirmish" => {
+            let (s, c) = combat_skirmish(rules);
+            (s, c, COMBAT_SKIRMISH_TICKS)
         }
         _ => return None,
     };

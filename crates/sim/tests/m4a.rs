@@ -3910,7 +3910,8 @@ fn combat_attack_move_engages_then_resumes_its_route() {
 /// pathing corrects to the nearest tile of the unit's component, so the
 /// unit arrives there. `combat::think` never issues the order again: no
 /// path request follows the arrival. (The defensive `PathUnreachable`
-/// branch of step 4 clears it too: `state::tests`.)
+/// branch of step 4 clears the intent too, an explicit `Attack`'s included:
+/// `state::tests::path_unreachable_ends_an_explicit_attack_without_a_request_storm`.)
 #[test]
 fn combat_attack_move_intent_ends_on_arrival_or_unreachable() {
     let rules = load_rules();
@@ -4114,6 +4115,58 @@ fn combat_idle_soldier_guards_and_returns_to_post() {
         "back at its post: {:?} vs {post:?}",
         u.pos
     );
+}
+
+/// A guard keeps a target its straight chase can reach. P0's own sites
+/// block tiles 6..=7 x 30..=31. From (9, 31) the tile line to the Yeoman's
+/// tile (6, 32) crossed the corner of (7, 31) exactly, so the guard dropped
+/// the target. With a post it then flipped between chase and return every
+/// tick; without one it froze 2.7 tiles away.
+#[test]
+fn combat_guard_keeps_a_target_its_straight_chase_can_reach() {
+    let rules = load_rules();
+    let (skirm, yeoman, tower) = (
+        ukind(&rules, "skirmisher"),
+        ukind(&rules, "yeoman"),
+        bkind(&rules, "watchtower"),
+    );
+    for with_post in [false, true] {
+        let mut m = M::new(rules.clone(), 58);
+        m.ok(vec![
+            place(tower, 6, 30, false),
+            place(tower, 7, 30, false),
+            place(tower, 6, 31, false),
+            place(tower, 7, 31, false),
+        ]);
+        m.run_as(1, vec![spawn_for(P1, yeoman, 6, 32, 1)]); // UnitId(1)
+        if with_post {
+            m.ok(vec![spawn(skirm, 20, 31, 1)]); // UnitId(2), out of reach
+            m.ok(vec![Command::Move {
+                units: vec![UnitId(2)],
+                target: FxVec2::from_ints(11, 31),
+                queue: false,
+            }]);
+        } else {
+            m.ok(vec![spawn(skirm, 11, 31, 1)]);
+        }
+        let (mut last, mut changes, mut died) = (None, 0, false);
+        for _ in 0..600 {
+            if died_at(&m.step_tagged(1), 1).is_some() {
+                died = true;
+                break;
+            }
+            let t = m.unit(2).unwrap().target;
+            if t != last {
+                changes += 1;
+                last = t;
+            }
+        }
+        assert!(
+            died,
+            "post {with_post}: the guard reaches and kills the Yeoman"
+        );
+        assert_eq!(changes, 1, "post {with_post}: taken once and kept");
+    }
 }
 
 /// A complete Watchtower and a complete Town shoot enemy units in range of

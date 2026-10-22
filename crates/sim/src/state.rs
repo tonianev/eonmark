@@ -1623,9 +1623,12 @@ mod tests {
     /// Step 4's `None` branch, which pathing reaches only defensively (it
     /// corrects every goal into the unit's component, so on a real map a
     /// path always exists): an attack-mover whose request finds no
-    /// passable tile at all loses its order and its intent, and the sim
-    /// emits `PathUnreachable`. Every tile is blocked under the request to
-    /// get there.
+    /// passable tile at all loses its order, and the sim emits
+    /// `PathUnreachable`. Every tile is blocked under the request to get
+    /// there. The test pins the event and the order clear: with the order
+    /// gone, think's `AttackMove` arm would end the intent even if step 4
+    /// did not (`path_unreachable_ends_an_explicit_attack_without_a_request_storm`
+    /// covers step 4's intent clear).
     #[test]
     fn path_unreachable_ends_an_attack_move() {
         let rules = Rules::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap();
@@ -1681,6 +1684,89 @@ mod tests {
         assert_eq!(
             (u.order.is_none(), u.intent, u.target),
             (true, Intent::Plain, None)
+        );
+    }
+
+    /// Step 4's defensive `None` branch ends an explicit `Attack` too.
+    /// Without the clear, `think_explicit`'s `(None, None)` arm would
+    /// re-order the unit every tick (`chase_end` answers `Some` from a
+    /// blocked tile), and every step 4 would answer `None` again: a request
+    /// and a `PathUnreachable` every tick.
+    #[test]
+    fn path_unreachable_ends_an_explicit_attack_without_a_request_storm() {
+        let rules = Rules::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap();
+        let kind = |name: &str| {
+            UnitKindId(
+                u16::try_from(rules.units.iter().position(|u| u.id == name).unwrap()).unwrap(),
+            )
+        };
+        let (skirm, bow) = (kind("skirmisher"), kind("bowman"));
+        let mut sim = Sim::new(MatchSetup::scenario(&rules, 9), rules, Box::new(NoAi));
+        let delay = sim.setup.cmd_delay;
+        let stamp = |seq, cmd| PlayerCommand::new(PlayerId(0), seq, cmd);
+        sim.step(&[
+            // UnitId(1)
+            stamp(
+                0,
+                Command::DebugSpawn {
+                    owner: PlayerId(0),
+                    kind: skirm,
+                    at: FxVec2::from_ints(10, 30),
+                    count: 1,
+                },
+            ),
+            // UnitId(2), beyond reach
+            stamp(
+                1,
+                Command::DebugSpawn {
+                    owner: PlayerId(1),
+                    kind: bow,
+                    at: FxVec2::from_ints(30, 30),
+                    count: 1,
+                },
+            ),
+        ]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
+        sim.step(&[stamp(
+            2,
+            Command::Attack {
+                units: vec![UnitId(1)],
+                target: crate::ids::TargetId::Unit(UnitId(2)),
+            },
+        )]);
+        for _ in 1..delay {
+            sim.step(&[]);
+        }
+        sim.step(&[]); // applies; 5a path-chases: order_move + request
+        assert!(sim.state.pathing.has_request(UnitId(1)));
+        sim.drain_events();
+        let all: Vec<Tile> = (0..sim.state.map.len())
+            .map(|i| sim.state.map.tile_at(i))
+            .collect();
+        sim.state.map.set_blocked_many(&all, true);
+        sim.step(&[]); // step 4 serves the request: None
+        let events = sim.drain_events();
+        assert!(
+            events.contains(&SimEvent::PathUnreachable { unit: UnitId(1) }),
+            "{events:?}"
+        );
+        let u = &sim.state.units[&UnitId(1)];
+        assert_eq!(
+            (u.order.is_none(), u.intent, u.target),
+            (true, Intent::Plain, None)
+        );
+        assert!(
+            !sim.state.pathing.has_request(UnitId(1)),
+            "no re-request in the same step"
+        );
+        sim.step(&[]);
+        assert!(
+            !sim.drain_events()
+                .iter()
+                .any(|e| matches!(e, SimEvent::PathUnreachable { .. })),
+            "no storm"
         );
     }
 }

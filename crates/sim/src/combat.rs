@@ -16,9 +16,12 @@
 //!     that is gone, the unit's own or a building with no hit points left
 //!     ends the order. A target in weapon range is held ([`Engage::Hold`]).
 //!     One within the unit's reach (the longer of `acquire_range_tiles` and
-//!     its range) with a clear tile line, or a building whose footprint the
-//!     unit stands beside, is chased directly ([`Engage::Chase`]), no path
-//!     and no request. Otherwise the unit walks a path toward it (a path
+//!     its range) with a clear straight segment from the unit's position
+//!     (to the target, or to the nearest point of a building's footprint),
+//!     or a building whose footprint the unit stands beside, is chased
+//!     directly ([`Engage::Chase`]), no path and no request; the segment
+//!     is the walk the chase steers, so it stays clear while the target
+//!     stands still. Otherwise the unit walks a path toward it (a path
 //!     chase), which ends on the tile `chase_end` gives: the target's tile
 //!     when the unit can walk there; else the tile of the unit's component
 //!     nearest to it, as pathing corrects the goal, when the target is in
@@ -44,10 +47,11 @@
 //!     the enemy units (found through the spatial grid) and the enemy
 //!     buildings and sites with hit points left that are within its reach,
 //!     edge to edge, and in weapon range or directly chaseable (the
-//!     explicit attack's test above, `chases_directly`): it never walks a
-//!     path to a target. They rank by `(tier, out of weapon range,
-//!     dist_sq)`: tier 0 is enemy units and tier 1 enemy buildings, the
-//!     other way round for a kind with `prefer: Buildings` (the Mangonel);
+//!     explicit attack's test above, `chases_directly`, on the straight
+//!     segment from the unit's position): it never walks a path to a
+//!     target. They rank by `(tier, out of weapon range, dist_sq)`: tier 0
+//!     is enemy units and tier 1 enemy buildings, the other way round for
+//!     a kind with `prefer: Buildings` (the Mangonel);
 //!     the squared distance is centre to centre for a unit and to the
 //!     nearest point of the footprint for a building. Candidates that tie
 //!     exactly on that key are put in `TargetId` order and one is drawn
@@ -106,6 +110,7 @@ use crate::tech;
 use crate::town;
 use rand_core::Rng;
 use rules::{Defender, Prefer, Rules};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A player's attack for one unit kind, with the owner's Modifier rows.
@@ -374,46 +379,73 @@ fn within(pos: FxVec2, radius: Fx, extra: Fx, aim: &Aim) -> bool {
     }
 }
 
-/// Whether the tile line from `a` to `b` is clear: every tile a straight
-/// segment between the two tile centres passes through is passable (tiles
-/// of `ignore`, the target's own footprint, count as passable), and where
-/// the segment passes exactly through a corner, both tiles beside the
-/// corner are, as for a diagonal step in `Map::neighbors8`.
-pub(crate) fn line_clear(map: &Map, a: Tile, b: Tile, ignore: Option<Rect>) -> bool {
-    let open = |x: i32, y: i32| {
-        let t = Tile::new(
-            u16::try_from(x).expect("between two map tiles"),
-            u16::try_from(y).expect("between two map tiles"),
-        );
+/// Whether the straight segment from `a` to `b` stays on passable tiles
+/// (tiles of `ignore`, the target's footprint, count as passable): every
+/// tile it passes through is passable and, where it passes exactly through
+/// a tile corner, both tiles beside the corner are, as for a diagonal step
+/// in `Map::neighbors8`. It is the walk `Engage::Chase` steers, so for a
+/// target that stands still the test keeps holding from every point the
+/// chase reaches. Between two tile centres it passes the tiles of the
+/// tile line between them.
+pub(crate) fn segment_clear(map: &Map, a: FxVec2, b: FxVec2, ignore: Option<Rect>) -> bool {
+    const ONE: i128 = 1 << 32;
+    let open = |x: i128, y: i128| {
+        let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y)) else {
+            return false;
+        };
+        let t = Tile::new(x, y);
         map.passable(t) || ignore.is_some_and(|r| r.contains(t))
     };
-    let (dx, dy) = (
-        i32::from(b.x) - i32::from(a.x),
-        i32::from(b.y) - i32::from(a.y),
-    );
-    let (nx, ny) = (dx.abs(), dy.abs());
-    let (sx, sy) = (dx.signum(), dy.signum());
-    let (mut x, mut y) = (i32::from(a.x), i32::from(a.y));
+    let (s, e) = (map.tile_of(a), map.tile_of(b));
+    let (mut x, mut y) = (i128::from(s.x), i128::from(s.y));
+    let (ex, ey) = (i128::from(e.x), i128::from(e.y));
+    let (sx, sy) = ((ex - x).signum(), (ey - y).signum());
+    let (nx, ny) = ((ex - x).abs(), (ey - y).abs());
+    let (ax, ay) = (i128::from(a.x.to_bits()), i128::from(a.y.to_bits()));
+    let dx = (i128::from(b.x.to_bits()) - ax).abs();
+    let dy = (i128::from(b.y.to_bits()) - ay).abs();
     if !open(x, y) {
         return false;
     }
     let (mut done_x, mut done_y) = (0, 0);
     while done_x < nx || done_y < ny {
-        let decision = (1 + 2 * done_x) * ny - (1 + 2 * done_y) * nx;
-        if decision == 0 {
-            if !open(x + sx, y) || !open(x, y + sy) {
-                return false;
-            }
-            x += sx;
-            y += sy;
-            done_x += 1;
-            done_y += 1;
-        } else if decision < 0 {
-            x += sx;
-            done_x += 1;
+        // Distance from `a` to the next boundary on each axis; the
+        // boundary with the smaller distance / |d| is crossed first.
+        let to_x = if sx > 0 {
+            (x + 1) * ONE - ax
         } else {
-            y += sy;
-            done_y += 1;
+            ax - x * ONE
+        };
+        let to_y = if sy > 0 {
+            (y + 1) * ONE - ay
+        } else {
+            ay - y * ONE
+        };
+        let first = if done_y == ny {
+            Ordering::Less
+        } else if done_x == nx {
+            Ordering::Greater
+        } else {
+            (to_x * dy).cmp(&(to_y * dx))
+        };
+        match first {
+            Ordering::Equal => {
+                if !open(x + sx, y) || !open(x, y + sy) {
+                    return false;
+                }
+                x += sx;
+                y += sy;
+                done_x += 1;
+                done_y += 1;
+            }
+            Ordering::Less => {
+                x += sx;
+                done_x += 1;
+            }
+            Ordering::Greater => {
+                y += sy;
+                done_y += 1;
+            }
         }
         if !open(x, y) {
             return false;
@@ -582,28 +614,30 @@ fn regoal(state: &mut State, rules: &Rules, id: UnitId, goal: FxVec2, tick: u32)
 }
 
 /// Whether `u`, at `pos` with `radius`, can chase `aim` directly: within
-/// `reach` edge to edge and with a clear tile line to the target's tile (to
-/// the tile of the footprint's nearest point for a building, the footprint
-/// itself counting as clear), or, for a building, from a tile beside its
-/// footprint. On such a tile the nearest point of the footprint lies on the
-/// tile's own edge or corner, so the straight steer never leaves the tile,
-/// whatever blocks the tiles around it. The tile line cannot see that: on
-/// the east and south faces the point floors to a tile outside the
-/// footprint, and a corner crossing needs both tiles beside the corner. A
-/// building's path chase ends on such a tile, out of melee range when it
-/// is a corner one. The explicit `Attack` and acquisition both decide with
-/// it.
+/// `reach` edge to edge and with a clear straight segment from the unit's
+/// position to the target's (to the footprint's nearest point for a
+/// building, the footprint itself counting as clear; `segment_clear`), or,
+/// for a building, from a tile beside its footprint. The segment is the
+/// walk `Engage::Chase` steers, so a chase that starts never loses the test
+/// while its target stands still. On a tile beside the footprint the
+/// nearest point of the footprint lies on the tile's own edge or corner,
+/// so the straight steer never leaves the tile, whatever blocks the tiles
+/// around it. The segment test cannot see that: a segment ending on a tile
+/// boundary counts the tile beyond it (outside the footprint on its east
+/// and south sides), and a corner crossing needs both tiles beside the
+/// corner. A building's path chase ends on such a tile, out of melee range
+/// when it is a corner one. The explicit `Attack` and acquisition both
+/// decide with it, for taking a target and for keeping it.
 fn chases_directly(map: &Map, pos: FxVec2, radius: Fx, reach: Fx, aim: &Aim) -> bool {
     if !within(pos, radius, reach, aim) {
         return false;
     }
-    let here = map.tile_of(pos);
     match *aim {
         Aim::Building { rect } => {
-            rect.chebyshev(here) <= 1
-                || line_clear(map, here, map.tile_of(nearest_point(pos, rect)), Some(rect))
+            rect.chebyshev(map.tile_of(pos)) <= 1
+                || segment_clear(map, pos, nearest_point(pos, rect), Some(rect))
         }
-        Aim::Unit { pos: t, .. } => line_clear(map, here, map.tile_of(t), None),
+        Aim::Unit { pos: t, .. } => segment_clear(map, pos, t, None),
     }
 }
 
@@ -867,8 +901,8 @@ fn best_candidates(
         }
     }
     scratch.sort_unstable_by_key(|c| (c.key, c.id));
-    // The best candidate in weapon range or directly chaseable; the line
-    // test runs lazily, in rank order.
+    // The best candidate in weapon range or directly chaseable; the
+    // segment test runs lazily, in rank order.
     let qualifies = |c: &Candidate| {
         !c.key.1 || chases_directly(&state.map, u.pos, u.radius, attack.reach, &c.aim)
     };
@@ -1209,39 +1243,64 @@ mod tests {
         );
     }
 
+    /// `segment_clear` between the centres of tiles `a` and `b`.
+    fn centres_clear(map: &Map, a: (u16, u16), b: (u16, u16), ignore: Option<Rect>) -> bool {
+        let (a, b) = (Tile::new(a.0, a.1), Tile::new(b.0, b.1));
+        segment_clear(map, map.center_of(a), map.center_of(b), ignore)
+    }
+
     #[test]
-    fn tile_lines_respect_blocked_tiles_and_corners() {
+    fn segments_between_tile_centres_respect_blocked_tiles_and_corners() {
         let mut map = Map::open(10, 10);
-        assert!(line_clear(&map, Tile::new(0, 0), Tile::new(9, 3), None));
+        assert!(centres_clear(&map, (0, 0), (9, 3), None));
         map.set_blocked(Tile::new(4, 2), true);
         // Row 2 from x 0 to 9 crosses (4, 2).
-        assert!(!line_clear(&map, Tile::new(0, 2), Tile::new(9, 2), None));
-        // A blocked target footprint does not block its own line.
+        assert!(!centres_clear(&map, (0, 2), (9, 2), None));
+        // A blocked target footprint does not block its own segment.
         let footprint = rect(4, 2, 4, 2);
-        assert!(line_clear(
-            &map,
-            Tile::new(0, 2),
-            Tile::new(4, 2),
-            Some(footprint)
-        ));
-        assert!(!line_clear(
-            &map,
-            Tile::new(0, 2),
-            Tile::new(9, 2),
-            Some(rect(5, 2, 5, 2))
-        ));
+        assert!(centres_clear(&map, (0, 2), (4, 2), Some(footprint)));
+        assert!(!centres_clear(&map, (0, 2), (9, 2), Some(rect(5, 2, 5, 2))));
         // An exact diagonal through a corner needs both tiles beside it.
         let mut d = Map::open(4, 4);
-        assert!(line_clear(&d, Tile::new(0, 0), Tile::new(3, 3), None));
+        assert!(centres_clear(&d, (0, 0), (3, 3), None));
         d.set_blocked(Tile::new(1, 0), true);
-        assert!(!line_clear(&d, Tile::new(0, 0), Tile::new(3, 3), None));
-        assert!(!line_clear(&d, Tile::new(3, 3), Tile::new(0, 0), None));
-        // A steep line passes tiles a diagonal-only walk would skip.
+        assert!(!centres_clear(&d, (0, 0), (3, 3), None));
+        assert!(!centres_clear(&d, (3, 3), (0, 0), None));
+        // A steep segment passes tiles a diagonal-only walk would skip.
         let mut s = Map::open(4, 8);
         s.set_blocked(Tile::new(1, 3), true);
-        assert!(!line_clear(&s, Tile::new(0, 0), Tile::new(2, 7), None));
-        assert!(line_clear(&s, Tile::new(0, 0), Tile::new(0, 7), None));
-        assert!(line_clear(&s, Tile::new(2, 2), Tile::new(2, 2), None));
+        assert!(!centres_clear(&s, (0, 0), (2, 7), None));
+        assert!(centres_clear(&s, (0, 0), (0, 7), None));
+        assert!(centres_clear(&s, (2, 2), (2, 2), None));
+    }
+
+    #[test]
+    fn segments_follow_the_straight_walk_not_the_tile_centres() {
+        let mut map = Map::open(12, 12);
+        for (x, y) in [(6, 4), (7, 4), (6, 5), (7, 5)] {
+            map.set_blocked(Tile::new(x, y), true);
+        }
+        let target = map.center_of(Tile::new(6, 6));
+        // From (9, 5)'s centre the segment crosses (7, 5)'s corner exactly:
+        // blocked.
+        assert!(!segment_clear(
+            &map,
+            map.center_of(Tile::new(9, 5)),
+            target,
+            None
+        ));
+        // A chaser on (9, 5) that came straight from (11, 5)'s centre
+        // passes south of it.
+        let here = FxVec2::new(Fx::from_ratio(999, 100), Fx::from_ratio(580, 100));
+        assert!(segment_clear(&map, here, target, None));
+        let mut d = Map::open(4, 4);
+        d.set_blocked(Tile::new(1, 0), true);
+        assert!(!segment_clear(
+            &d,
+            d.center_of(Tile::new(0, 0)),
+            d.center_of(Tile::new(3, 3)),
+            None
+        ));
     }
 
     #[test]

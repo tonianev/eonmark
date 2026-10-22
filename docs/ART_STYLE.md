@@ -182,6 +182,8 @@ Attach one 1280x720 screenshot at 40 m to every PR that adds or changes art, and
 | `visuals.ron` changed, Rust did not (for a model swap) | |
 | Draw-call counter in the dev panel is under 500 with the test scene | |
 
+The last row has no counter to read yet: Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so through M4b it is marked n/a in the PR with the expected counts instead (at 200 vs 200 about 75 to 100 batches, [design/ui.md](design/ui.md#health-bars-rings-and-markers)), and an Xcode Metal frame capture on the Mac stands in for it. The dev-panel counter arrives with the pre-stream art pass, where glTF models make it matter (ROADMAP M3b).
+
 ## Milestones
 
 | Milestone | Visual deliverable |

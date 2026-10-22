@@ -33,14 +33,14 @@ M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`
 | Top | Resource bar | For each of Grain, Lumber, Ore, Lore: current stockpile and the rate per 30 s. The rate text turns amber when the resource is at its Yield Cap and production is being discarded (see [economy.md](economy.md)). Lore shows its own 999 stockpile cap instead. |
 | Top, right of resources | Population | `used / cap` population at the right end of the top bar. |
 | Top right, under the bar | Age strip | The current age name (Hearth, Masonry, Charter) and the Advance button (M4b, done), on a strip hanging under the right end of the top bar so the bar's room stays with the resource readouts. The button is always shown until the last age: greyed with the tech count ("Advance: 1 / 2 techs") while that is short, else showing the next age and its cost ("Advance to Masonry Age: 250 Grain 100 Lore"), greyed while a resource is short (owner decision 7, ROADMAP M4b Notes; ART_STYLE "greyed, not hidden"). |
-| Bottom left | Selection panel | One selected unit or building: name, HP, owner, current order; for a building, its training or research queue with progress and a Cancel per slot. Several units: a grid of kind icons with counts; clicking an icon narrows the selection to that kind. |
+| Bottom left | Selection panel | One selected unit or building: name, HP, owner, current order; for a building, its training or research queue with progress and a Cancel per slot (per-slot Cancel is not built yet: help-wanted issue #41). Several units: a grid of kind icons with counts; clicking an icon narrows the selection to that kind. |
 | Bottom right | Command card | Buttons for what the selection can do: build (Yeomen), train (Muster Hall, Engine Yard, Town), research (Scriptorium, Watchtower), rally, stop, attack-move. Each button shows its cost. A button is disabled with a tooltip when the player cannot afford it, is pop-capped, lacks the age or tech, or has no building site; the tooltip text is the same reason string the sim uses in `CommandRejected`. |
 | Bottom centre | Minimap | A CPU-painted 128 x 128 `Image` in an `ImageNode` painted from the territory and fog grids plus unit and building dots each frame (M7, see [fog.md](fog.md)). Left click moves the camera. Right click orders the selection. |
 | Above the command card | Message line | The last rejection or notice for a few seconds: "Outside your borders", "Not enough Ore", "Population cap reached", "Town annexed". Since M4b also "Letters I researched", "Masonry Age reached", "Watchtower destroyed" and "Muster Hall lost" (see Notices below). |
 
 Costs and names on buttons come from `data/rules/*.ron` and `data/rules/strings/en.ron`; the HUD never hard-codes a number.
 
-The infinite-queue toggle on training buildings repeats the last trained kind while resources allow. The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
+The infinite-queue toggle on training buildings repeats the last trained kind while resources allow (not built yet: it needs a repeat flag on the sim's training queue, a `Command` and a hash change; issue #42, help wanted and needs-design). The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
 
 ## Research panel (M4b)
 
@@ -56,7 +56,7 @@ M4b (`command_card.rs`, done): a selected own, complete Scriptorium (the `host` 
 | Tooltip | Enabled: "Research Letters I, 25 s. Costs 60 Lore" with the quoted time. Greyed: the rejection's message plus what the level requires, the level before it and the age that unlocks it ("Not available in this age. Requires Arms I, Masonry Age"); a first level of the first age requires nothing more |
 | Click | `Research { building, tech }` (`command_card::card_command`, as for Train and Cancel); a greyed button puts its tooltip on the message line instead |
 
-A finished line reads "Researched" because a line's top level is unlocked only in the last age and `check_research` checks the age before "already researched". The selection panel adds "Researched: Trade I, Letters I" for a Scriptorium, the top level done in each line it hosts, before the queue line. So that this fifth line never pushes the queue line below the window, the panel is up to `command_card::INFO_WIDTH_PX` = 580 px wide (300 px before M4b) and each of a Scriptorium's lines fits one row: the longest are "Researched: Arms III, Statecraft III, Trade III, Letters III" (60 characters) and "Queue: Statecraft III 99%, Letters III, Trade III, Arms III, Scribe" (67), at 8.4 px a character in the 14 px HUD font, and five rows of 16.8 px fit the 88 px from the bar's top padding to the bottom of the window (`the_scriptoriums_longest_panel_fits_the_bottom_bar`). The panel is a flex item that fills the room left of the card, its text capped at that width, so a window too narrow for the full width narrows the text and wraps it instead of laying it over the card. Per-slot queue Cancel buttons and the infinite-queue toggle are not in M4b (owner decision 9).
+A finished line reads "Researched" because a line's top level is unlocked only in the last age and `check_research` checks the age before "already researched". The selection panel adds "Researched: Trade I, Letters I" for a Scriptorium, the top level done in each line it hosts, before the queue line. So that this fifth line never pushes the queue line below the window, the panel is up to `command_card::INFO_WIDTH_PX` = 580 px wide (300 px before M4b) and each of a Scriptorium's lines fits one row: the longest are "Researched: Arms III, Statecraft III, Trade III, Letters III" (60 characters) and "Queue: Statecraft III 99%, Letters III, Trade III, Arms III, Scribe" (67), at 8.4 px a character in the 14 px HUD font, and five rows of 16.8 px fit the 88 px from the bar's top padding to the bottom of the window (`the_scriptoriums_longest_panel_fits_the_bottom_bar`). The panel is a flex item that fills the room left of the card, its text capped at that width, so a window too narrow for the full width narrows the text and wraps it instead of laying it over the card. Per-slot queue Cancel buttons and the infinite-queue toggle are not in M4b (owner decision 9): issues #41 and #42.
 
 ## Age indicator and Advance button (M4b)
 
@@ -130,7 +130,7 @@ Keys the design fixes are given as such. Keys marked "proposed" are not fixed by
 | Stop | S (`orders.rs`; also the Stop button on the bottom bar) | M2 |
 | Read an enemy's hit points | left click an enemy unit: it is selected, the panel shows "HP n / m" and its bar shows; orders, keys and the card name only the player's own units (`orders::own_selected_units`), so such a selection orders nothing. Another player's building is not selectable in M4b (`selection::on_building_click`; selecting one would first need `issue_rally` guarded and its queue hidden), so its hit points show only on its bar, once it is damaged | M4b |
 | Set rally point | right click with a training building selected | M3b |
-| Infinite queue toggle | button on the command card; key proposed Q | Not in M4b (owner decision 9, 2026-10-22, ROADMAP M4b Notes): a help-wanted issue, since it needs a repeat flag on the sim's training queue, a `Command` and a hash change |
+| Infinite queue toggle | button on the command card; key proposed Q | Not in M4b (owner decision 9, 2026-10-22, ROADMAP M4b Notes): help-wanted issue #42 (also needs-design), since it needs a repeat flag on the sim's training queue, a `Command` and a hash change |
 | Select next idle Yeoman | period (.): the next idle builder by id, wrapping, and the camera centres on it (`selection::select_idle_builder`; idle as the sim's idle seeking reads it: no job, no order) | M3b |
 | Pause | Space | M6 |
 | Game speed x1 / x2 / x4 | proposed minus and equals to step down and up | M6 |
@@ -171,6 +171,18 @@ M4b (`health_bars.rs`, done): a bar is shown only while its target is damaged or
 - **Batches.** Every bar is the one left-anchored `Rectangle` quad (origin on its left edge, so the fill shortens from the right) with one of three unlit, two-sided, fog-free `StandardMaterial`s (track, blue fill, red fill): at most three batches for any number of bars, and no shadow passes (`bars_use_one_quad_and_three_materials`).
 - **Hierarchy check (dev only).** With `--features dev`, `BarHierarchyCheckPlugin` looks every frame (in `Last`, before the replay recorder finishes) for a `HealthBar` or `SelectionRing` entity with a `ChildOf`. The first one logs an `error!` with the entity ids and writes `AppExit::from_code(1)`, so the replay still gets its trailer; on any exit it prints `hierarchy_check: ok frames=<n> bar_targets_max=<m> rings_max=<r>` (or `FAIL violations=<k> ...`). The check runs after `bevy::window::ExitSystems`, like the recorder and `frame_stats`' exit lines, so the red close button prints it too (`hierarchy_check_reports_when_the_window_closes`), and before the `frame_stats:` lines, so a failing frame still prints those. `bar_targets_max` counts targets, not entities. Unit entities may have children (glTF scenes at the art pass); bars and rings may not have a parent. The test `hierarchy_check_flags_a_parented_bar` is its positive control. The dev Sim panel shows the bar targets and entities.
 
+Expected draw batches at 200 vs 200 (M4b, the baseline for the art pass's dev-panel counter). Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so there is no counter yet (the same gap as the ROADMAP M3b line); these are the counts the layout allows, to be checked with an Xcode Metal frame capture on the Mac:
+
+| What | Batches | Why |
+| --- | --- | --- |
+| Units | at most 48 | 8 kinds x 2 teams = 16 mesh and material bins, each in the main pass and the 2 shadow cascades |
+| Health bars | at most 3 | one quad, three unlit materials, no shadow passes, however many bars |
+| Buildings | about 12 | about 4 materials (two teams, site scaffold) x 3 passes |
+| Ground | about 2 | the `FieldExt` ground and its grid |
+| `bevy_ui` | 10 to 40 | bars, card buttons, texts |
+| Total | about 75 to 100 | under the 500 budget |
+| Selection rings | 1 each | retained gizmos are drawn one by one: all 200 own units selected add about 200, still under 500 |
+
 ## Developer-only panels
 
 Behind the `dev` cargo feature only: `bevy/bevy_dev_tools`, `bevy_egui` 0.40.1 and `bevy-inspector-egui` 0.37.0. They provide the FPS overlay, the frame-time graph, the `Sim::hash()` and sub-hash readout, the draw-call counter with its 500 budget, a world inspector (hidden until F12: listing every entity each frame costs several milliseconds with 200 units and 200 rings on screen, and it covers the map), and tuning panels. At M2 the Sim panel also shows `sim_driver::DriverStats` (ticks this and last frame, stalled and dropped ticks, commands recorded), the selection size, pending commands and the mesh and material counts. `--scenario units200` is the 200-unit stress case (`--stress N` was never built). `cargo clippy -p game --features dev` runs in CI so the feature does not rot, and `bundle.sh` fails if `bevy_dylib` is linked, so no dev build ships. No gameplay UI may depend on egui.
@@ -202,6 +214,13 @@ M3b:
 - [x] In-game: place a Croft outside the border and the ghost is red and the HUD says 'Outside your borders'; inside it turns green, Yeomen walk over and build it; founding a second Town visibly expands the tinted territory and border line; the Grain readout turns amber once the cap is reached; at 25/25 pop the Train button is disabled with a tooltip and the sim rejects with `PopCapReached` (`--scenario economy_walkthrough` replay verifies and a ci_testing screenshot shows the amber readout).
 - [ ] `cargo run --release -p game -- --scenario economy_walkthrough` holds >= 60 fps on the dev Mac with the overlay (and with FieldExt if landed); dev-panel draw calls < 500.
 
+M4b:
+
+- [x] In-game: build a Scriptorium, research 2 techs, advance to Masonry Age, build an Engine Yard, train Mangonels and a mixed army, destroy an enemy Watchtower placed via `--scenario enemy_outpost`; the auto-recorded replay verifies (the same sequence exists as a scripted replay for the owner proxy).
+- [ ] `cargo run --release -p game -- --scenario enemy_outpost` with 200 vs 200 fighting holds >= 60 fps; health bars are not children of unit entities (asserted by a dev-only hierarchy check).
+
+Line 1 was observed on Linux (ROADMAP M4b, plan decision 21, the M3b precedent): the `enemy_outpost_walkthrough` golden and its windowed run, and `scripts/m4b_outpost_drive.sh` playing the sequence on `--scenario enemy_outpost` with real X input, its replay verifying ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m4b)). Line 2 needs the dev Mac (owner decisions 2 and 3); the [owner's Mac checklist](../PLAYTEST.md#owners-mac-checklist-m4b) has the commands. Its Linux proxy under lavapipe, which renders in software at about 6 fps and so can neither pass nor fail the line: the dev build's background run of `--scenario enemy_outpost` printed `hierarchy_check: ok frames=1520 bar_targets_max=37 rings_max=0` and `frame_stats: fight frames=100 seconds=22.43 mean=224.28 p95=258.96 max=279.74 fps=4.5 ticks=151..576 on_screen_max=400 units_at_first_hit=200/200` on 2026-10-22 ([../BUILD_TIMES.md](../BUILD_TIMES.md) has the rows).
+
 M6:
 
 - [ ] Game speed x4 and pause work and the replay verifies with the same final hash as the x1 replay of the same scripted input (`--scenario scripted_match --speed 4`).
@@ -219,6 +238,9 @@ cargo run -p game --features dev -- --scenario scripted_moves --max-fps 30
 cargo run -p game --features dev -- --scenario scripted_moves --max-fps 120
 cargo run -p game --features dev -- --scenario hud_click
 cargo run --release -p game -- --scenario economy_walkthrough
+cargo run -p game --features dev -- --scenario enemy_outpost
+cargo run --release -p game -- --scenario enemy_outpost
+scripts/m4b_outpost_drive.sh target/ci/eonmark target/release/sim-cli <out-dir>   # Linux, Xvfb + lavapipe
 ```
 
 ## Open questions

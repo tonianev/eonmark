@@ -116,7 +116,7 @@ Units without a path yet wait in place; nothing in combat depends on wall-clock 
 
 ## M4a implementation notes
 
-The combat core slice (`SIM_VERSION` 13, `rules_version` 15) implements hit points, the explicit `Attack`, simultaneous hits, death and building destruction in `crates/sim/src/combat.rs`, on the stats of the M4a rules data (`rules_version` 13). The combat behaviour slice (`SIM_VERSION` 14, `rules_version` 16) adds target acquisition by idle and attack-moving units, a real `AttackMove` (applied like `Move` until then), the Watchtower and Town shooters, seeded spawn jitter (`DebugSpawnJittered`), the 20-seed counter tests and the `combat_skirmish` golden. It changed no stat: the starting data passes every counter test (tables below). Where it is more precise than the sections above:
+The combat core slice (`SIM_VERSION` 13, `rules_version` 15) implements hit points, the explicit `Attack`, simultaneous hits, death and building destruction in `crates/sim/src/combat.rs`, on the stats of the M4a rules data (`rules_version` 13). The combat behaviour slice (`SIM_VERSION` 14, `rules_version` 16) adds target acquisition by idle and attack-moving units, a real `AttackMove` (applied like `Move` until then), the Watchtower and Town shooters, seeded spawn jitter (`DebugSpawnJittered`), the 20-seed counter tests and the `combat_skirmish` golden. It changed no stat: the starting data passes every counter test (tables below). The M4a close adds the combat bench (below) and, from review, makes the direct-chase test trace the straight segment the chase walks from the unit's position (`combat::segment_clear`) instead of the line between tile centres, so a guard beside a blocked corner no longer drops and retakes its target; `SIM_VERSION` stays 14 and `rules_version` 16, because no fixture hash, counter table or bench result moved and `SIM_VERSION` 14 has not been released. Where it is more precise than the sections above:
 
 | Topic | As implemented |
 | --- | --- |
@@ -157,6 +157,10 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim combat`): `combat_damage_is
 
 `sim::scenarios::combat_skirmish` (seed 21, empty start, 3000 ticks; `crates/sim/tests/fixtures/combat_skirmish.eonreplay`) puts tech and combat in one replay that CI verifies on both operating systems, so hash parity covers combat. P0 gets a complete Scriptorium and Engine Yard, researches Letters I (complete at tick 501) and then Trade I at the Letters price (tick 1061), queues and cancels Statecraft I, enters the Masonry Age (tick 1102) and trains a Mangonel. Each side spawns six of each line kind (Skirmisher, Shieldbearer, Bowman, Outrider) with `DebugSpawnJittered` and the lines attack-move into each other beside P1's complete Town, which shoots into the fight; mid-fight P0's Bowmen Stop and P1's Outriders Move away. Every P0 line unit and 17 of P1's die. The Mangonel attacks P1's Watchtower from out of its range and destroys it with five hits of 120 (tick 2363) while 50 P1 Yeomen ordered across the river keep a path search suspended. `combat_skirmish_beats_happen` checks those beats, `golden_combat_skirmish` the recorded hash.
 
+### The combat bench (acceptance 4)
+
+`cargo run -p sim-cli --release -- bench --units 400 --ticks 1200 --combat [--seed S]` runs `sim::scenarios::combat_bench(rules, units, seed)`, which is not in `NAMES` and never a fixture: an empty start on `plains_1v1` where each side spawns one `DebugSpawnJittered` group of `units / 8` per line kind (Skirmisher, Shieldbearer, Bowman, Outrider) in the all-grass west rectangle, P0's centred on (6, 28), (6, 36), (14, 28) and (14, 36) and P1's mirrored across x = 22, and during tick 1 each side attack-moves to the other's centre, (34, 32) and (10, 32). Only `Sim::step` is timed (`Instant` stays in `sim-cli`, never in the sim) and events are counted outside the timed region. The output is the overall step mean, p95 and max; the fighting ticks (a tick with at least one `Hit` after which both sides keep a quarter of their units, 50 at 400) with their mean and p95; the hits, the deaths per side and the buildings destroyed; and the final hash. It exits 1 only when fewer than 100 ticks were fighting ticks (seeds 1 to 10 give 454 to 501). `--combat` conflicts with `--astar` and `--territory` (`cli_parses_bench_combat_flags`), and `bench_combat_small_run_fights` runs 40 units for 300 ticks: hits, deaths on both sides and the same hash twice. The criterion bench `combat_step` (`cargo bench -p sim --bench combat_step`) snapshots the battle before its first fighting tick and times the 20 steps from there on a restored sim. Measured numbers are in `docs/BUILD_TIMES.md`; the run at the M4a close is under "Acceptance checklist" below.
+
 ## Interactions
 
 | System | Interaction |
@@ -172,12 +176,17 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim combat`): `combat_damage_is
 
 ## Acceptance checklist (from M4a)
 
-- [ ] `cargo test -p sim counters` over 20 seeds each (seed perturbs spawn jitter and acquisition tie-breaks, so results differ across seeds and the test asserts they do): 10 Skirmishers vs 10 Bowmen -> Skirmishers win >= 18/20 with >= 4 survivors; 10 Bowmen vs 10 Shieldbearers -> Bowmen >= 18/20; 10 Shieldbearers vs 10 Outriders -> Shieldbearers >= 18/20; 10 Outriders vs 10 Bowmen -> Outriders >= 18/20; a Watchtower outranges Skirmishers.
-- [ ] `cargo run -p sim-cli --release -- bench --units 400 --ticks 1200 --combat` keeps mean step < 5 ms with 200 vs 200 fighting.
+- [x] `cargo test -p sim counters` over 20 seeds each (seed perturbs spawn jitter and acquisition tie-breaks, so results differ across seeds and the test asserts they do): 10 Skirmishers vs 10 Bowmen -> Skirmishers win >= 18/20 with >= 4 survivors; 10 Bowmen vs 10 Shieldbearers -> Bowmen >= 18/20; 10 Shieldbearers vs 10 Outriders -> Shieldbearers >= 18/20; 10 Outriders vs 10 Bowmen -> Outriders >= 18/20; a Watchtower outranges Skirmishers.
+
+  Observed on PR #35, 2026-10-22, with `cargo test -p sim --profile ci counters -- --nocapture` (the `ci` profile inherits `dev`; the tests are the same): `test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 62 filtered out` in m4a, every matchup 20/20 with the tables of "Counter tests (acceptance 2)" above, at least 2 distinct outcomes asserted per matchup (19, 14, 20 and 16 of 20), and the Watchtower's first hit in ticks 38..=53 against the Skirmisher's 99..=113 in all 20 seeds. The direct-chase review fix (`segment_clear`, 5e05569) left every table identical.
+
+- [x] `cargo run -p sim-cli --release -- bench --units 400 --ticks 1200 --combat` keeps mean step < 5 ms with 200 vs 200 fighting.
+
+  Observed on PR #35, 2026-10-22, on a 4-vCPU Intel Xeon 2.1 GHz Linux cloud VM (not the dev Mac), two runs: `step_ms mean=0.502 p95=2.152 max=4.056` and `step_ms mean=0.506 p95=1.713 max=2.962`; `fighting_ticks=501`, fighting mean 1.013 and 1.060 ms, fighting p95 2.287 and 1.859 ms; `hits=2836 deaths_p0=173 deaths_p1=200 destroyed=0`, `final_hash=0x9e1b5bfe9bb8c731` both times (see "The combat bench" above and `docs/BUILD_TIMES.md`). The dev-Mac re-measure is open.
 
 Good first issue from M4a:
 
-- [ ] Propose counter multiplier tweaks with a `cargo test -p sim counters` table (any OS).
+- [ ] Propose counter multiplier tweaks with a `cargo test -p sim counters` table (any OS). Filed as #36.
 
 ```bash
 cargo test -p sim counters

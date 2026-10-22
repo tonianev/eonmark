@@ -163,8 +163,13 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim tech`), by acceptance claus
 
 ## Acceptance checklist (from M4a)
 
-- [ ] `cargo test -p sim tech`: Masonry Age unlocks only after 2 techs plus 250 Grain + 100 Lore; Charter Age after 5 techs plus 500 Grain + 300 Lumber + 300 Lore; each Letters level reduces the next research cost by 10% floored; Modifier stacking Set -> Add -> Mul produces the documented values; a faction row `yield_cap Mul 1250` yields cap 87 at Trade level 0.
-- [ ] `cargo run -p sim-cli -- data-check data/` passes with 3 ages, 8 unit kinds, 8 building kinds, 12 techs; removing a tech referenced by ages.ron exits 1 naming file and field; a Mul value written as 1.25 exits 1.
+- [x] `cargo test -p sim tech`: Masonry Age unlocks only after 2 techs plus 250 Grain + 100 Lore; Charter Age after 5 techs plus 500 Grain + 300 Lumber + 300 Lore; each Letters level reduces the next research cost by 10% floored; Modifier stacking Set -> Add -> Mul produces the documented values; a faction row `yield_cap Mul 1250` yields cap 87 at Trade level 0.
+
+  Observed on PR #35, 2026-10-22, with `cargo test -p sim --profile ci tech -- --nocapture` (the `ci` profile inherits `dev`; the tests are the same): `test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out` in m4a. `masonry: 2 techs + 250 Grain + 100 Lore -> age 1, stock [250, 0, 0, 100] -> 0`; the Charter gate in `tech_charter_age_unlocks_only_after_five_techs_and_500_grain_300_lumber_300_lore`; `letters 0: arms_1 costs 75 Lore + 50 Ore, 600 ticks` down to `letters 3: arms_1 costs 54 Lore + 36 Ore, 436 ticks`; the stacking values of the Modifier model (87, 72 with a floor after each `Mul`, 137 for Set 100, Add 10 and Mul 1250 in every row order); `faction Mul 1250, Trade 0: period 0 +87 Grain`, and the same in periods 1 and 2.
+
+- [x] `cargo run -p sim-cli -- data-check data/` passes with 3 ages, 8 unit kinds, 8 building kinds, 12 techs; removing a tech referenced by ages.ron exits 1 naming file and field; a Mul value written as 1.25 exits 1.
+
+  Observed on PR #35, 2026-10-22: `cargo run -p sim-cli --profile ci -- data-check data` prints `OK rules_version=16 rules_hash=0xaee9a61e782125ee resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en` (the same for `data/`) and exits 0; `cargo test -p sim-cli --profile ci --test data_check` passes its 3 tests, which run the binary on edited copies of `data/`. By hand on the same copies: `error: <copy>/rules/ages.ron: ages[1].unlocks.techs[1]: "statecraft_2" is not an id in techs.ron` and `error: <copy>/rules/techs.ron: 143:49: Expected comma`, both exit 1.
 
 ```bash
 cargo test -p sim tech

@@ -698,9 +698,11 @@ fn enemy_outpost_battle_clears_the_vanguard() {
 /// rejected; P0 completes the Scriptorium, the Muster Hall and the Engine
 /// Yard (`BuildingId(4..=6)`), researches Letters I and then Trade I at the
 /// Letters price, enters the Masonry Age, trains its mixed army and two
-/// Mangonels (`UnitId(411..=417)`, by `Train`), and the Mangonels, which
-/// outrange the tower, destroy it with at least three hits; the footprint
-/// is passable and the tower's border source gone afterwards. Every
+/// Mangonels (`UnitId(411..=417)`, by `Train`); the Mangonels, which
+/// outrange the tower and take none of its shots, hit it at least three
+/// times, and with the attack-moving army destroy it by `destroy_by` (a
+/// Mangonel hit does 120 of its 500 HP, so the army's hits count too); the
+/// footprint is passable and the tower's border source gone afterwards. Every
 /// prerequisite is met at least `ENEMY_OUTPOST_PREREQ_MARGIN` ticks before
 /// the command that needs it, and the vanguard is wiped at least 100 ticks
 /// before `ENEMY_OUTPOST_CLEAR_TICK`, as in `enemy_outpost` (both

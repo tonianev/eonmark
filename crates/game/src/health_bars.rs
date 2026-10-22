@@ -934,6 +934,22 @@ mod tests {
             match (bars(&app).get(&target), hp_of(&app, target)) {
                 (Some(bar), Some(hp)) => {
                     assert_eq!((bar.spec.hp, bar.spec.max), hp, "the sim's hit points");
+                    // The fill quad itself, as `place_bars` left it this
+                    // frame: as wide as the hit points left, and drawn.
+                    let fill = *app.world().get::<Transform>(bar.fill).unwrap();
+                    let want =
+                        BAR_WIDTH * bar_scale(BAR_REFERENCE_ZOOM) * hp.0 as f32 / hp.1 as f32;
+                    assert!(
+                        (fill.scale.x - want).abs() < 1e-5,
+                        "fill at {}/{}: {} wide, want {want}",
+                        hp.0,
+                        hp.1,
+                        fill.scale.x
+                    );
+                    assert_eq!(
+                        app.world().get::<Visibility>(bar.fill),
+                        Some(&Visibility::Inherited)
+                    );
                     if seen.last() != Some(&hp.0) {
                         seen.push(hp.0);
                     }
@@ -952,6 +968,48 @@ mod tests {
         let (back, fill) = entities.expect("the bar existed");
         assert!(app.world().get_entity(back).is_err(), "track despawned");
         assert!(app.world().get_entity(fill).is_err(), "fill despawned");
+    }
+
+    /// At zero hit points (a Town held at 0) `place_bars` hides the fill
+    /// quad and leaves it as wide as the track, never scaled to nothing.
+    #[test]
+    fn place_bars_hides_an_empty_fill() {
+        use bevy::ecs::system::RunSystemOnce;
+        let rules = rules();
+        let mut app = bar_app(duel(&rules));
+        run_to(&mut app, 3);
+        app.world_mut()
+            .resource_mut::<Selection>()
+            .set_building(BuildingId(1));
+        app.update();
+        let target = TargetId::Building(BuildingId(1));
+        let bar = bars(&app)[&target];
+        assert_eq!(
+            app.world().get::<Visibility>(bar.fill),
+            Some(&Visibility::Inherited),
+            "a full bar shows its fill"
+        );
+        app.world_mut()
+            .resource_mut::<HealthBars>()
+            .0
+            .get_mut(&target)
+            .unwrap()
+            .spec
+            .hp = 0;
+        app.world_mut().run_system_once(place_bars).unwrap();
+        assert_eq!(
+            app.world().get::<Visibility>(bar.fill),
+            Some(&Visibility::Hidden)
+        );
+        let back = app.world().get::<Transform>(bar.back).unwrap().scale.x;
+        let fill = app.world().get::<Transform>(bar.fill).unwrap().scale.x;
+        assert!(back > 0.0);
+        assert_eq!(fill, back, "the track's width, not zero");
+        assert_eq!(
+            app.world().get::<Visibility>(bar.back),
+            Some(&Visibility::Inherited),
+            "the track still shows"
+        );
     }
 
     #[test]
@@ -1015,11 +1073,18 @@ mod tests {
         let mut app = bar_app(duel(&rules));
         run_to(&mut app, 3);
         assert!(bars(&app).is_empty(), "nothing damaged, nothing selected");
+        // Freeze the clock: the next updates change only the selection, so
+        // the bars follow it without a tick.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::ZERO,
+        ));
+        let frozen = tick(&app);
         // Selecting an undamaged unit (own or enemy) shows a full bar.
         app.world_mut()
             .resource_mut::<Selection>()
             .set([UnitId(2), UnitId(4)]);
         app.update();
+        assert_eq!(tick(&app), frozen, "no tick: the selection alone");
         let shown: BTreeSet<TargetId> = bars(&app).keys().copied().collect();
         assert_eq!(
             shown,
@@ -1033,17 +1098,23 @@ mod tests {
         // Deselected again: gone.
         app.world_mut().resource_mut::<Selection>().clear();
         app.update();
+        assert_eq!(tick(&app), frozen);
         assert!(bars(&app).is_empty());
         // A selected building shows one too, at full hit points.
         app.world_mut()
             .resource_mut::<Selection>()
             .set_building(BuildingId(1));
         app.update();
+        assert_eq!(tick(&app), frozen);
         let shown: Vec<TargetId> = bars(&app).keys().copied().collect();
         assert_eq!(shown, [TargetId::Building(BuildingId(1))]);
         let bar = bars(&app)[&TargetId::Building(BuildingId(1))];
         assert_eq!((bar.spec.hp, bar.spec.max), (500, 500));
         app.world_mut().resource_mut::<Selection>().clear();
+        // One tick per update again for the fight.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(50),
+        ));
         // The fight damages units 2 and 3: their bars appear unselected.
         for _ in 0..400 {
             app.update();
@@ -1249,6 +1320,24 @@ mod tests {
         assert_eq!(meshes.len(), 1, "one shared quad");
         assert_eq!(materials.len(), 3, "track, blue fill, red fill");
         let assets = app.world().resource::<BarAssets>().clone();
+        // Each quad has its own part's material: the track, or the fill of
+        // its target's owner.
+        for bar in bars(&app).values() {
+            let material = |e: Entity| {
+                app.world()
+                    .get::<MeshMaterial3d<StandardMaterial>>(e)
+                    .unwrap()
+                    .0
+                    .id()
+            };
+            assert_eq!(material(bar.back), assets.back.id());
+            assert_eq!(
+                material(bar.fill),
+                assets.fill[usize::from(bar.spec.owner.0)].id(),
+                "{:?}'s fill",
+                bar.spec.owner
+            );
+        }
         assert!(materials.contains(&assets.back.id()));
         assert!(materials.contains(&assets.fill[0].id()));
         assert!(materials.contains(&assets.fill[1].id()));

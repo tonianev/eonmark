@@ -4,9 +4,9 @@ This document specifies research and age advancement: the 12 Scriptorium techs i
 
 | Field | Value |
 | --- | --- |
-| Milestone | M4a (sim), M4b (research panel and age indicator) |
+| Milestone | M4a (sim), M4b (research panel and age indicator), M5a (the Watchtower's Harrying I and II) |
 | Labels | `area:sim`, `area:rules` |
-| Rules files | `data/rules/techs.ron` (12 techs as Modifier lists; Harrying I/II join in M5a), `data/rules/ages.ron` (3 ages, gates, unlock lists), `data/rules/rules.ron` (base values the Modifiers act on), `data/rules/factions.ron` (faction Modifier lists; Freeholders has none) |
+| Rules files | `data/rules/techs.ron` (the 12 Scriptorium techs as Modifier lists, and from M5a the Watchtower's Harrying I and II, side techs that count toward no age), `data/rules/ages.ron` (3 ages, gates, unlock lists), `data/rules/rules.ron` (base values the Modifiers act on), `data/rules/factions.ron` (faction Modifier lists; Freeholders has none) |
 | Sim module | `crates/sim/src/tech.rs` |
 | Sub-hash | `tech` |
 
@@ -50,7 +50,7 @@ Every tech and faction effect is one row:
 Modifier { target: StatPath, op: Set | Add | Mul, value: i32 }
 ```
 
-`StatPath` is a closed enum in `crates/rules` (`YieldCap`, `PopCap`, `TownLimit`, `TownBorderRadius`, `ResearchCost`, `ResearchTime`, `UnitHp(sel)` and `UnitDamage(sel)`, with `sel` one of `Military`, `Class(<UnitClass>)` or `Kind("<unit id>")`; gather-rate and Watchtower border paths join with the M9 factions). `Mul` values are permille: 1250 means x1.25. `Add` and `Set` values are plain integers. `sim-cli data-check` rejects a float anywhere in a Modifier and an unknown StatPath.
+`StatPath` is a closed enum in `crates/rules` (`YieldCap`, `PopCap`, `TownLimit`, `TownBorderRadius`, `ResearchCost`, `ResearchTime`, `UnitHp(sel)` and `UnitDamage(sel)`, with `sel` one of `Military`, `Class(<UnitClass>)` or `Kind("<unit id>")`, and from M5a `HarryingLevel`, the attrition level a player's borders impose; gather-rate and Watchtower border paths join with the M9 factions). `Mul` values are permille: 1250 means x1.25. `Add` and `Set` values are plain integers. `sim-cli data-check` rejects a float anywhere in a Modifier and an unknown StatPath.
 
 Resolution for one StatPath, in integer math:
 
@@ -126,7 +126,9 @@ Ages are gated by the cumulative count of researched Scriptorium techs plus a re
 | Age gates are monotonic | exit 1 |
 | Every tech referenced by `ages.ron` exists | removing one exits 1 naming file and field |
 | Every unit kind has a trainer and every level has its predecessor | exit 1 |
-| Counts: 3 ages, 8 unit kinds, 8 building kinds, 12 techs | printed in the summary |
+| Counts: 3 ages, 8 unit kinds, 8 building kinds, 12 techs (from M5a, 12 techs that count toward an age and 2 side techs: `techs=12 side_techs=2`) | printed in the summary |
+| Age gates count only the techs that count toward an age (M5a) | an age whose `techs_required` the ages before it cannot meet without the side techs exits 1 naming `ages[i].techs_required` |
+| The `HarryingLevel` rows reach at most level 8, and the attrition interval halved once per level above 1 stays at least one tick (M5a) | exit 1 naming `techs.ron` (the level) or `rules.ron` `attrition_interval_ds` (the interval) |
 
 ## M4a implementation notes
 
@@ -154,6 +156,26 @@ Tests (`crates/sim/tests/m4a.rs`, `cargo test -p sim tech`), by acceptance claus
 The research panel lives on the Scriptorium's command card (`crates/game/src/command_card.rs`; [ui.md](ui.md#research-panel-m4b)): one button per tech line with the line's next level, its quoted cost from `SimView::research_quote`, greyed exactly when `SimView::check_research` rejects it, with the blocker on the button ("Masonry Age", "Researching 40%", "Researched") and the level before plus the age in the tooltip. The age readout and the Advance button sit on the age strip under the right end of the top bar (`crates/game/src/age_hud.rs`; [ui.md](ui.md#age-indicator-and-advance-button-m4b)): the button is greyed exactly when `SimView::check_advance_age` rejects, with the tech count ("Advance: 1 / 2 techs") while that is short (owner decision 7), else showing the next age's cost ("Advance to Masonry Age: 250 Grain 100 Lore"), and hidden in the last age. The message line says "Letters I researched" and "Masonry Age reached" for the local player's `ResearchCompleted` and `AgeAdvanced`. The game re-implements none of the checks above. Because `Research` checks the age (6) before "already researched" (7), a finished line's top level reads "Researched" only in the age that unlocks it; in play that is always the case, since level 3 needs the Charter Age.
 
 ROADMAP M4b acceptance line 1 exercises all of it in one match: build a Scriptorium, research two techs, advance to the Masonry Age, build an Engine Yard, train Mangonels and a mixed army, and destroy the Watchtower of `--scenario enemy_outpost`. `enemy_outpost_walkthrough` is the scripted sequence (Letters I, then Trade I at the Letters price, the Masonry Age during tick 1850, the golden fixture), and `scripts/m4b_outpost_drive.sh` plays the same sequence on the interactive scenario with real X input under Xvfb, its recorded replay verifying ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m4b)).
+
+## M5a notes (rules data)
+
+M5a's first slice (`rules_version` 18, `SIM_VERSION` 14) adds the Watchtower's Harrying line to `techs.ron` as TechIds 12 and 13, after `letters_3`, so no existing index moves. The numbers are the owner's starting data (ROADMAP M5a Notes, decision 9):
+
+| Tech | Host | Unlocked in | Cost | `research_time_ds` | Rows |
+| --- | --- | --- | --- | --- | --- |
+| Harrying I (`harrying_1`) | Watchtower | Masonry Age | 75 Ore + 100 Lore | 400 (40 s, 800 ticks) | `HarryingLevel Add 1` |
+| Harrying II (`harrying_2`) | Watchtower | Charter Age | 150 Ore + 200 Lore | 600 (60 s, 1200 ticks) | `HarryingLevel Add 1` |
+
+Harrying I sits between Arms I (50 Ore + 75 Lore, 300 ds) and Arms II (100 + 150, 450 ds); Harrying II matches Arms III's 150 Ore and 600 ds. Both rows are `Add 1`, so a player has level 2 only with both techs; researching Harrying II alone (only `DebugResearch` can skip the prerequisite) gives level 1. The Letters rows lower their cost and time as they do every research.
+
+| Topic | As implemented |
+| --- | --- |
+| Side techs | A tech has `counts_toward_age` (default `true`); both Harrying techs set `false`. `tech::validate_advance` compares the gate with `tech::age_tech_count`, the researched techs that count toward an age, and `SimView::age_tech_count(p)` returns the same number. With the old data every tech counted, so the change is behaviour-neutral for every fixture and needs no `SIM_VERSION` bump. `data-check` prints `techs=12 side_techs=2`, and the reachability check counts only the techs that count, so a Charter gate of 9 would fail (8 reachable) even though Harrying I is unlocked in Masonry. |
+| Where it is researched | Harrying I is unlocked in the Masonry Age and Harrying II in the Charter Age, one age later than the same level of a Scriptorium line, so `Research` rejects Harrying I in the Hearth Age with `AgeRequired`, at a Scriptorium with `CannotResearchHere`, and Harrying II before Harrying I with `PrerequisiteMissing`. A Watchtower researches it through its own queue, which Research shares as at the Scriptorium. |
+| `HarryingLevel` | Player-wide, base 0. Nothing in the sim reads it until the attrition slice; `data-check` already bounds its worst case over every tech and faction row at `MAX_HARRYING_LEVEL` (8) and checks that `attrition_interval_ticks() >> (level - 1)` is at least one tick at that level. |
+| Game | The command card offers a selected own Watchtower the Harrying line the way it offers a Scriptorium its four lines (`command_card::research_actions` drives the buttons by each tech's `host` and each line's top level, so no game code names the line); the Advance button's "n / m techs" is `SimView::age_tech_count`. |
+
+Tests: `tech_harrying_does_not_count_toward_ages` and `tech_harrying_is_researched_at_a_watchtower_from_masonry` (`crates/sim/tests/m5a.rs`), `tech_level_k_needs_level_k_minus_1_and_age_k` (`m4a.rs`, now checking every Scriptorium tech at the Scriptorium and both Harrying techs at a Watchtower), `harrying_techs_do_not_count_toward_age_gates` and `harrying_level_worst_case_bounds_the_level_and_the_interval` (`crates/rules`), and in the game `command_card::tests::watchtower_card_offers_harrying_from_masonry` and `age_hud::tests::advance_tooltip_counts_only_age_techs`.
 
 ## Interactions
 

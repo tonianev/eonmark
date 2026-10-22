@@ -8,7 +8,10 @@
 //!   unit kind it trains (the kind's `trainer`), with the ramped cost
 //!   (`SimView::unit_cost`); a click issues `Train`;
 //! - one of their construction sites: a Cancel button (`Cancel` slot 0,
-//!   full refund).
+//!   full refund);
+//! - local units with no builder among them and at least one armed unit
+//!   (M4b): an Attack-move button, which enters [`OrderMode::AttackMove`]
+//!   as the A key does.
 //!
 //! A button the sim would reject is greyed, not hidden, and its tooltip is
 //! the rejection's message (`SimView::check_train`, or for Build
@@ -20,7 +23,8 @@
 //!
 //! The selection panel at the left of the bar names the selection: unit
 //! kinds and counts, or the building with its state (construction
-//! progress, Town tier, workers, training queue).
+//! progress, Town tier, workers, training queue). One selected unit or
+//! building, another player's included, also shows its hit points (M4b).
 //!
 //! Buttons issue commands from a `Pointer<Click>` observer, like the Stop
 //! button, never from `Interaction::Pressed` (a click would fire twice);
@@ -63,6 +67,8 @@ pub enum CardAction {
     Train(BuildingId, UnitKindId),
     /// Cancel a construction site (slot 0).
     CancelSite(BuildingId),
+    /// Enter attack-move mode for the selected units (M4b).
+    AttackMove,
 }
 
 /// A card button and what it does.
@@ -231,17 +237,22 @@ pub fn card_actions(view: &SimView<'_>, rules: &Rules, selection: &Selection) ->
             }
         };
     }
-    let builders = selection
+    let own: Vec<_> = selection
         .units
         .iter()
         .filter_map(|u| view.unit(*u))
-        .any(|u| u.owner == LOCAL_PLAYER && rules.unit_kind(u.kind.0).is_some_and(|k| k.builder));
-    if !builders {
-        return Vec::new();
+        .filter(|u| u.owner == LOCAL_PLAYER)
+        .filter_map(|u| rules.unit_kind(u.kind.0))
+        .collect();
+    if own.iter().any(|k| k.builder) {
+        return (0..rules.buildings.len())
+            .map(|i| CardAction::Build(BuildingKindId(u16::try_from(i).expect("kinds fit u16"))))
+            .collect();
     }
-    (0..rules.buildings.len())
-        .map(|i| CardAction::Build(BuildingKindId(u16::try_from(i).expect("kinds fit u16"))))
-        .collect()
+    if own.iter().any(|k| k.attack.is_some()) {
+        return vec![CardAction::AttackMove];
+    }
+    Vec::new()
 }
 
 /// A cost vector as text: "100 Lumber", "40 Grain 10 Ore"; "free" for none.
@@ -282,7 +293,7 @@ pub fn evaluate(
             let verdict = view.check_train(LOCAL_PLAYER, building, kind).map(|_| ());
             (def.name.clone(), cost, verdict)
         }
-        CardAction::CancelSite(_) => (String::new(), Vec::new(), Ok(())),
+        CardAction::CancelSite(_) | CardAction::AttackMove => (String::new(), Vec::new(), Ok(())),
     }
 }
 
@@ -325,6 +336,7 @@ pub fn rebuild_card(
                     &[("unit", &rules.units[usize::from(kind.0)].name)],
                 ),
                 CardAction::CancelSite(_) => strings.hud("button.cancel").to_string(),
+                CardAction::AttackMove => strings.hud("button.attack_move").to_string(),
             };
             grid.spawn((
                 Name::new(format!("Card {label}")),
@@ -360,7 +372,7 @@ pub fn card_state(
 ) -> (CardState, String) {
     let (name, cost, verdict) = evaluate(view, rules, action);
     let cost_line = match action {
-        CardAction::CancelSite(_) => String::new(),
+        CardAction::CancelSite(_) | CardAction::AttackMove => String::new(),
         _ => cost_text(rules, &cost),
     };
     let tooltip = match (&verdict, action) {
@@ -376,6 +388,7 @@ pub fn card_state(
             fill(strings.hud("tooltip.cost"), &[("cost", &cost_line)])
         ),
         (Ok(()), CardAction::CancelSite(_)) => strings.hud("tooltip.cancel_site").to_string(),
+        (Ok(()), CardAction::AttackMove) => strings.hud("tooltip.attack_move").to_string(),
     };
     let state = CardState {
         enabled: verdict.is_ok(),
@@ -506,7 +519,17 @@ pub fn on_card_click(
             let seq = pending.push_local(Command::Cancel { building, slot: 0 });
             info!("Cancel site seq {seq}");
         }
+        CardAction::AttackMove => *mode = OrderMode::AttackMove,
     }
+}
+
+/// The selection panel's hit-point line, "HP {count} / {cap}", from the
+/// sim's `(hp, max_hp)`.
+pub fn hp_text(strings: &UiStrings, (hp, max): (i32, i32)) -> String {
+    fill(
+        strings.hud("info.hp"),
+        &[("count", &hp.to_string()), ("cap", &max.to_string())],
+    )
 }
 
 /// The selection panel's text for `selection`.
@@ -524,6 +547,9 @@ pub fn selection_text(
             return String::new();
         };
         let mut lines = vec![kind.name.clone()];
+        if let Some(hp) = view.building_hp(id) {
+            lines.push(hp_text(strings, hp));
+        }
         match b.construction {
             Construction::Site { progress } => {
                 let total = rules.build_time_ticks(kind).max(1);
@@ -584,7 +610,7 @@ pub fn selection_text(
     for u in selection.units.iter().filter_map(|id| view.unit(*id)) {
         *counts.entry(u.kind.0).or_default() += 1;
     }
-    counts
+    let mut lines: Vec<String> = counts
         .iter()
         .filter_map(|(k, n)| {
             rules.unit_kind(*k).map(|u| {
@@ -594,8 +620,14 @@ pub fn selection_text(
                 )
             })
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    // One unit, the local player's or not: its hit points.
+    if let [id] = selection.units.iter().copied().collect::<Vec<_>>()[..]
+        && let Some(hp) = view.unit_hp(id)
+    {
+        lines.push(hp_text(strings, hp));
+    }
+    lines.join("\n")
 }
 
 /// Every frame: the selection panel names the selection.
@@ -701,11 +733,211 @@ mod tests {
         );
         assert_eq!(verdict, Ok(()));
         let text = selection_text(&view, rules, &strings(), &selection);
-        assert_eq!(text, "Town\nSeat, tier 1");
+        assert_eq!(text, "Town\nHP 2000 / 2000\nSeat, tier 1");
         selection.set((1..=5).map(sim::UnitId));
         assert_eq!(
             selection_text(&view, rules, &strings(), &selection),
             "Yeoman x5"
+        );
+    }
+
+    /// One selected unit or building shows the sim's hit points, another
+    /// player's included; several units do not.
+    #[test]
+    fn one_unit_or_building_shows_its_hp_enemy_included() {
+        let mut sim = standard();
+        let rules = sim.rules().clone();
+        let p1 = sim::PlayerId(1);
+        let sk = UnitKindId(
+            u16::try_from(
+                rules
+                    .units
+                    .iter()
+                    .position(|u| u.id == "skirmisher")
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        let arms = sim::TechId(rules.tech_by_id("arms_1").unwrap().0);
+        // P1 researches Arms I and spawns a Skirmisher (UnitId 11) next to
+        // P0's Yeoman 1, then attacks it once the spawn has applied.
+        let cmds = [
+            sim::PlayerCommand::new(
+                p1,
+                0,
+                Command::DebugResearch {
+                    owner: p1,
+                    tech: arms,
+                },
+            ),
+            sim::PlayerCommand::new(
+                p1,
+                1,
+                Command::DebugSpawn {
+                    owner: p1,
+                    kind: sk,
+                    at: sim.view().unit(sim::UnitId(1)).unwrap().pos,
+                    count: 1,
+                },
+            ),
+        ];
+        sim.step(&cmds);
+        for _ in 0..sim.setup().cmd_delay {
+            sim.step(&[]);
+        }
+        let attack = sim::PlayerCommand::new(
+            p1,
+            2,
+            Command::Attack {
+                units: vec![sim::UnitId(11)],
+                target: sim::TargetId::Unit(sim::UnitId(1)),
+            },
+        );
+        sim.step(&[attack]);
+        let mut hit = false;
+        for _ in 0..200 {
+            sim.step(&[]);
+            if sim
+                .view()
+                .unit(sim::UnitId(1))
+                .is_some_and(|u| u.damage_taken > 0)
+            {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the Skirmisher hit Yeoman 1");
+        let (view, s) = (sim.view(), strings());
+        let mut selection = Selection::default();
+        selection.set([sim::UnitId(1)]);
+        let (hp, max) = view.unit_hp(sim::UnitId(1)).unwrap();
+        assert!(hp < max);
+        assert_eq!(
+            selection_text(&view, &rules, &s, &selection),
+            format!("Yeoman x1\nHP {hp} / {max}")
+        );
+        // The enemy Skirmisher (the Seat shoots it): read-only, with its
+        // Arms maximum.
+        selection.set([sim::UnitId(11)]);
+        let (hp, max) = view.unit_hp(sim::UnitId(11)).unwrap();
+        assert_eq!(max, view.unit_stats(p1, sk).max_hp);
+        assert!(max > 80, "Arms I raised it: {max}");
+        assert_eq!(
+            selection_text(&view, &rules, &s, &selection),
+            format!("Skirmisher x1\nHP {hp} / {max}")
+        );
+        assert!(
+            card_actions(&view, &rules, &selection).is_empty(),
+            "no orders for it"
+        );
+        // Two units: counts only.
+        selection.set([sim::UnitId(1), sim::UnitId(2)]);
+        assert_eq!(selection_text(&view, &rules, &s, &selection), "Yeoman x2");
+    }
+
+    /// The Attack-move button: for own units with no builder and at least
+    /// one armed unit; never for builders (their card is full of Build
+    /// buttons), unarmed units or an enemy selection. A click enters
+    /// attack-move mode, as A does.
+    #[test]
+    fn attack_move_button_only_for_armed_selections() {
+        let mut sim = standard();
+        let rules = sim.rules().clone();
+        let p1 = sim::PlayerId(1);
+        let kind_of = |id: &str| {
+            UnitKindId(u16::try_from(rules.units.iter().position(|u| u.id == id).unwrap()).unwrap())
+        };
+        let spawn = |owner, seq, kind, x| {
+            sim::PlayerCommand::new(
+                owner,
+                seq,
+                Command::DebugSpawn {
+                    owner,
+                    kind,
+                    at: sim::FxVec2::from_ints(x, 40),
+                    count: 1,
+                },
+            )
+        };
+        // P0: a Skirmisher (11) and a Scribe (12); P1: a Bowman (13).
+        let cmds = [
+            spawn(LOCAL_PLAYER, 0, kind_of("skirmisher"), 20),
+            spawn(LOCAL_PLAYER, 1, kind_of("scribe"), 24),
+            spawn(p1, 0, kind_of("bowman"), 60),
+        ];
+        sim.step(&cmds);
+        for _ in 0..sim.setup().cmd_delay {
+            sim.step(&[]);
+        }
+        let view = sim.view();
+        let actions = |ids: &[u32]| {
+            let mut selection = Selection::default();
+            selection.set(ids.iter().copied().map(sim::UnitId));
+            card_actions(&view, &rules, &selection)
+        };
+        assert_eq!(actions(&[11]), [CardAction::AttackMove]);
+        assert_eq!(
+            actions(&[11, 12]),
+            [CardAction::AttackMove],
+            "one armed unit is enough"
+        );
+        assert_eq!(
+            actions(&[11, 13]),
+            [CardAction::AttackMove],
+            "the enemy is ignored"
+        );
+        assert!(actions(&[12]).is_empty(), "a Scribe has no attack");
+        assert!(actions(&[13]).is_empty(), "an enemy selection has no card");
+        assert!(actions(&[]).is_empty());
+        let builders = actions(&[1, 11]);
+        assert_eq!(builders.len(), rules.buildings.len());
+        assert!(builders.iter().all(|a| matches!(a, CardAction::Build(_))));
+        // Enabled, no cost, the strings' label and tooltip.
+        let (state, cost) = card_state(&view, &rules, &strings(), CardAction::AttackMove);
+        assert!(state.enabled);
+        assert_eq!(cost, "");
+        assert_eq!(state.tooltip, strings().hud("tooltip.attack_move"));
+        assert!(strings().0.hud("button.attack_move").is_some());
+
+        // The click: an app with the card's click observer.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<OrderMode>()
+            .init_resource::<PendingCommands>()
+            .init_resource::<MessageState>();
+        let button = app
+            .world_mut()
+            .spawn((
+                CardButton(CardAction::AttackMove),
+                CardState {
+                    enabled: true,
+                    tooltip: String::new(),
+                },
+            ))
+            .observe(on_card_click)
+            .id();
+        app.update();
+        app.world_mut().trigger(Pointer::new(
+            bevy::picking::pointer::PointerId::Mouse,
+            bevy::picking::pointer::Location {
+                target: bevy::camera::NormalizedRenderTarget::None {
+                    width: 1,
+                    height: 1,
+                },
+                position: Vec2::ZERO,
+            },
+            Click {
+                button: PointerButton::Primary,
+                hit: bevy::picking::backend::HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+                duration: std::time::Duration::ZERO,
+                count: 1,
+            },
+            button,
+        ));
+        assert_eq!(*app.world().resource::<OrderMode>(), OrderMode::AttackMove);
+        assert!(
+            app.world().resource::<PendingCommands>().is_empty(),
+            "no command"
         );
     }
 

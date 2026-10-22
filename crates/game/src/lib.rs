@@ -15,7 +15,9 @@
 //! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals (M4b:
 //!   one low-poly, flat-shaded look per unit kind and its height).
 //! - [`selection`]: picking, click/box/group selection, rings and markers.
-//! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`.
+//! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`,
+//!   the contextual right click (M4b: `Attack` on an enemy) and the
+//!   attack-move cursor; orders name only the local player's units.
 //! - [`health_bars`]: team-coloured health bars over damaged or selected
 //!   units and buildings, flat entities keyed by `TargetId` (M4b), and the
 //!   dev-only hierarchy check.

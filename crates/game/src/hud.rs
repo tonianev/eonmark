@@ -43,7 +43,7 @@ use bevy::text::FontSize;
 use bevy::window::{PrimaryWindow, WindowRef};
 use sim::{Command, UnitId, scenarios};
 
-use crate::orders::issue_stop;
+use crate::orders::{issue_stop, own_selected_units};
 use crate::palette;
 use crate::selection::Selection;
 use crate::sim_driver::{LOCAL_PLAYER, PendingCommands, SimHandle, SimSystems};
@@ -345,20 +345,20 @@ pub fn update_pointer_over_ui(
 }
 
 /// A primary `Pointer<Click>` on the Stop button issues `orders::issue_stop`
-/// for the selection (observer attached by [`spawn_hud`]).
+/// for the local player's selected units (observer attached by
+/// [`spawn_hud`]).
 fn on_stop_click(
     click: On<Pointer<Click>>,
+    sim: NonSend<SimHandle>,
     selection: Res<Selection>,
     mut pending: ResMut<PendingCommands>,
 ) {
     if click.event().event.button != PointerButton::Primary {
         return;
     }
-    if let Some(seq) = issue_stop(&mut pending, &selection) {
-        info!(
-            "stop button: Stop seq {seq} for {} units",
-            selection.units.len()
-        );
+    let own = own_selected_units(&sim.view(), &selection);
+    if let Some(seq) = issue_stop(&mut pending, &own) {
+        info!("stop button: Stop seq {seq} for {} units", own.len());
     }
 }
 

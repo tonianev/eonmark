@@ -225,15 +225,23 @@ pub struct MoveMarker {
     pub expires_at: f32,
 }
 
-/// The two `GizmoAsset`s shared by every ring and marker (one circle each,
-/// unit radius; entities scale their `Transform`).
+/// The `GizmoAsset`s shared by every ring and marker (unit radius;
+/// entities scale their `Transform`).
 #[derive(Resource, Debug, Clone)]
 pub struct RingAssets {
     /// Unit-radius circle in `palette::SELECTION_RING`.
     pub selection: Handle<GizmoAsset>,
     /// Unit-radius circle in `palette::MOVE_MARKER`.
     pub marker: Handle<GizmoAsset>,
+    /// The attack marker (M4b): the move marker's circle with two lines
+    /// crossing inside it, in the same `palette::MOVE_MARKER`, so the
+    /// shape, not a new hue, says "attack".
+    pub attack: Handle<GizmoAsset>,
 }
+
+/// Half the length of each of the attack marker's two crossing lines, as a
+/// fraction of the circle's radius along each axis (the ends stay inside).
+pub const ATTACK_CROSS_HALF: f32 = 0.6;
 
 /// Picking, selection input, rings and markers.
 pub struct SelectionPlugin;
@@ -295,8 +303,9 @@ fn mark_picking_camera(
     }
 }
 
-/// Builds the two shared ring assets: a unit circle laid flat
-/// (`present::flat_on_ground()`), [`RING_RESOLUTION`] segments.
+/// Builds the shared ring assets: unit circles laid flat
+/// (`present::flat_on_ground()`), [`RING_RESOLUTION`] segments, and the
+/// attack marker's circle with a flat X inside ([`attack_marker_asset`]).
 fn create_ring_assets(mut commands: Commands, mut gizmo_assets: ResMut<Assets<GizmoAsset>>) {
     let flat = Isometry3d::new(Vec3::ZERO, flat_on_ground());
     let mut selection = GizmoAsset::new();
@@ -310,7 +319,30 @@ fn create_ring_assets(mut commands: Commands, mut gizmo_assets: ResMut<Assets<Gi
     commands.insert_resource(RingAssets {
         selection: gizmo_assets.add(selection),
         marker: gizmo_assets.add(marker),
+        attack: gizmo_assets.add(attack_marker_asset()),
     });
+}
+
+/// The attack marker: a unit circle laid flat plus two lines crossing at
+/// its centre on the ground plane, all in `palette::MOVE_MARKER`.
+pub fn attack_marker_asset() -> GizmoAsset {
+    let flat = Isometry3d::new(Vec3::ZERO, flat_on_ground());
+    let mut asset = GizmoAsset::new();
+    asset
+        .circle(flat, 1.0, palette::MOVE_MARKER)
+        .resolution(RING_RESOLUTION);
+    let a = ATTACK_CROSS_HALF;
+    asset.line(
+        Vec3::new(-a, 0.0, -a),
+        Vec3::new(a, 0.0, a),
+        palette::MOVE_MARKER,
+    );
+    asset.line(
+        Vec3::new(-a, 0.0, a),
+        Vec3::new(a, 0.0, -a),
+        palette::MOVE_MARKER,
+    );
+    asset
 }
 
 /// Spawns the hidden drag-box node; [`draw_drag_box`] shows and sizes it.
@@ -766,13 +798,30 @@ fn ring_line_config() -> GizmoLineConfig {
 /// Spawn a move marker ring at `at` (world) that expires after
 /// [`MOVE_MARKER_SECS`]. Called by `orders.rs` on a successful ground order.
 pub fn spawn_move_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3, now_secs: f32) {
+    spawn_marker(commands, "Move marker", &assets.marker, at, now_secs);
+}
+
+/// Spawn the attack marker (a ring with a cross) at `at` (world): the
+/// target of an `Attack` or the point of an `AttackMove`. Expires like the
+/// move marker ([`expire_move_markers`]), and is never a child of a unit.
+pub fn spawn_attack_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3, now_secs: f32) {
+    spawn_marker(commands, "Attack marker", &assets.attack, at, now_secs);
+}
+
+fn spawn_marker(
+    commands: &mut Commands,
+    name: &'static str,
+    handle: &Handle<GizmoAsset>,
+    at: Vec3,
+    now_secs: f32,
+) {
     commands.spawn((
-        Name::new("Move marker"),
+        Name::new(name),
         MoveMarker {
             expires_at: now_secs + MOVE_MARKER_SECS,
         },
         Gizmo {
-            handle: assets.marker.clone(),
+            handle: handle.clone(),
             line_config: ring_line_config(),
             ..default()
         },
@@ -1110,6 +1159,41 @@ mod tests {
         let selection = app.world().resource::<Selection>();
         assert_eq!(selection.building, None);
         assert!(selection.groups[0].is_empty());
+    }
+
+    #[test]
+    fn the_attack_marker_is_the_move_ring_with_a_flat_cross() {
+        let attack = attack_marker_asset();
+        // The ring: the move marker's unit circle on the ground.
+        let ring: Vec<Vec3> = attack
+            .strip_positions
+            .iter()
+            .copied()
+            .filter(|p| p.is_finite())
+            .collect();
+        assert!(ring.len() >= RING_RESOLUTION as usize, "{}", ring.len());
+        for p in &ring {
+            assert!((p.length() - 1.0).abs() < 1e-4 && p.y.abs() < 1e-5, "{p}");
+        }
+        // The cross: two lines through the centre, flat and inside the ring.
+        assert_eq!(attack.list_positions.len(), 4, "two line segments");
+        for p in &attack.list_positions {
+            assert_eq!(p.y, 0.0);
+            assert!(p.xz().length() < 1.0, "{p}");
+        }
+        let [a, b, c, d] = attack.list_positions[..] else {
+            unreachable!()
+        };
+        assert!(((a + b) / 2.0).length() < 1e-6 && ((c + d) / 2.0).length() < 1e-6);
+        assert!(
+            (b - a).dot(d - c).abs() < 1e-6,
+            "the lines cross at right angles"
+        );
+        // One hue for every vertex: the move marker's.
+        let hue = LinearRgba::from(palette::MOVE_MARKER);
+        for color in attack.list_colors.iter().chain(&attack.strip_colors) {
+            assert!(color.red.is_nan() || *color == hue, "{color:?}");
+        }
     }
 
     #[test]

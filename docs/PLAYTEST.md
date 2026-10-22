@@ -55,6 +55,22 @@ Run `cargo run -p game --features dev` from `main` (the standard start: a Seat, 
 | Period (.) | Selects the next idle Yeoman, cycling by id, and centres the camera on it | `selection` unit test | | | | | |
 | Esc in placement mode | Leaves the mode, keeps the selection | owner | | | | | |
 
+## Combat controls checklist (M4b)
+
+Run `cargo run -p game --features dev -- --scenario enemy_outpost` from `main`: a 200 vs 200 prologue fights east of the river (do not command your vanguard; it is meant to fall), and Period jumps home to an idle Yeoman. Sign rows as in the M2 table. The research panel and the age rows join this table with the rest of M4b.
+
+| Control | Expected | Proxy | Pass/Fail | Date | Commit | Signed | Notes |
+|---|---|---|---|---|---|---|---|
+| Watch the prologue | Every damaged unit carries a flat bar above it: its team colour (blue or red) on a dark grey track, shrinking from the right as it loses hit points; units that were never hit carry none; a bar goes with its unit | `health_bars` unit tests; the lavapipe prologue screenshot | | | | | |
+| Click a unit (own or enemy) | It is selected; its bar shows even at full hit points; the panel adds "HP n / m" | `health_bars` and `command_card` unit tests | | | | | |
+| With only an enemy unit selected: right-click, A, S, the card | Nothing is ordered; the card is empty | `orders` and `command_card` unit tests | | | | | |
+| Right-click an enemy unit or building with armed units selected | The armed units attack it; the attack marker (a ring with a cross) flashes on the target; Yeomen in the selection stay put | `orders` unit tests | | | | | |
+| Right-click an enemy unit with only Yeomen selected | A plain Move to the point under the cursor, with the move marker | `orders` unit tests | | | | | |
+| A with armed units selected, then left click on the ground | The cursor is a crosshair until the click (or Esc, or a right click); the click attack-moves and leaves the attack marker; the cursor returns to the arrow | `orders` cursor test | | | | | |
+| Attack-move button | Shown on the card for own armed units with no Yeoman among them; a click arms attack-move as A does | `command_card` unit test | | | | | |
+| Mangonels right-click the Watchtower | They stop at their 8-tile range, outside the tower's reach, and fire; the tower's bar appears and drops by 120 a hit; the tower is gone after its last hit | `enemy_outpost_walkthrough` golden (scripted Attack); the lavapipe tower screenshot | | | | | |
+| W, A, S, D with units selected | Still pan the camera; A also arms attack-move and S also stops (kept for M4b, ROADMAP M4b Notes, decision 4) | owner | | | | | |
+
 ## Cmd-Q (M2)
 
 What the menu item does. `crates/game/src/macos_menu.rs` replaces winit's default application menu with a muda menu whose Quit item is a custom `MenuItem` (id `quit`, label `Quit Eonmark`, accelerator Cmd+Q). Activating it only emits a `MenuEvent`; the `drain_menu_events` system reads it on the AppKit main thread and writes `AppExit::Success`. On that same frame `finish_recorder_on_exit` (in `Last`) records a final hash checkpoint, sends `Finish` to the replay writer thread and joins it, so the file ends with the `EONRDONE` trailer and `sim-cli verify` prints `OK` without a `warning:`. The red close button takes the same `AppExit` route (`bevy_window::exit_on_all_closed`, also in `Last`).

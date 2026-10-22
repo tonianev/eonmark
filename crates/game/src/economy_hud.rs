@@ -11,6 +11,8 @@
 //! words of `data/rules/strings/en.ron`, or a short notice (a building of
 //! theirs completed), for [`MESSAGE_SECONDS`]. Rejections arrive as
 //! `SimEventMsg` from the sim driver, `cmd_delay` ticks after the command.
+//! An `InvalidTarget` for a right-click `Attack` whose target died in those
+//! ticks is not shown (`orders::IssuedAttacks`, M4b).
 //! Every text and number comes from data or the sim; nothing is hard-coded
 //! but the layout.
 
@@ -21,6 +23,7 @@ use rules::strings::{Strings, fill};
 use sim::{RejectReason, SimEvent};
 
 use crate::hud::{BOTTOM_BAR_HEIGHT_PX, HUD_FONT_PX, HudRoot, PADDING_PX, TopBar, spawn_hud};
+use crate::orders::{IssuedAttacks, target_gone};
 use crate::palette;
 use crate::sim_driver::{LOCAL_PLAYER, SimEventMsg, SimHandle};
 
@@ -290,11 +293,13 @@ pub fn update_resource_bar(
 }
 
 /// Turn the local player's rejections, and completions of their buildings,
-/// into the message line's text.
+/// into the message line's text. A rejection [`IssuedAttacks::hides`] (an
+/// attack on a target that died before it applied) is skipped.
 pub fn collect_messages(
     mut events: MessageReader<SimEventMsg>,
     sim: NonSend<SimHandle>,
     strings: Option<Res<UiStrings>>,
+    attacks: Option<Res<IssuedAttacks>>,
     time: Res<Time>,
     mut state: ResMut<MessageState>,
 ) {
@@ -305,7 +310,18 @@ pub fn collect_messages(
     let rules = sim.rules();
     for msg in events.read() {
         let text = match &msg.event {
-            SimEvent::CommandRejected { player, reason, .. } if *player == LOCAL_PLAYER => {
+            SimEvent::CommandRejected {
+                player,
+                seq,
+                reason,
+            } if *player == LOCAL_PLAYER => {
+                let view = sim.view();
+                if attacks
+                    .as_ref()
+                    .is_some_and(|a| a.hides(*seq, reason, |t| target_gone(&view, t)))
+                {
+                    continue;
+                }
                 reject_text(&strings, rules, reason)
             }
             SimEvent::BuildingCompleted { building } => {
@@ -411,6 +427,58 @@ mod tests {
             s.0.reject.len(),
             all_reasons().len(),
             "no stale reject keys"
+        );
+    }
+
+    /// The message line drops an `InvalidTarget` for a remembered attack
+    /// whose target is gone, and shows every other rejection.
+    #[test]
+    fn invalid_target_for_a_dead_target_is_not_shown() {
+        use sim::{TargetId, UnitId};
+        let rules = rules();
+        let setup = sim::MatchSetup::scenario(&rules, 1);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<SimEventMsg>()
+            .insert_resource(strings())
+            .init_resource::<MessageState>()
+            .init_resource::<IssuedAttacks>()
+            .add_systems(Update, collect_messages);
+        app.world_mut()
+            .insert_non_send(SimHandle::from_setup(setup, rules));
+        {
+            let mut attacks = app.world_mut().resource_mut::<IssuedAttacks>();
+            // No unit exists in this empty match: both targets are gone.
+            attacks.record(4, TargetId::Unit(UnitId(7)));
+            attacks.record(5, TargetId::Unit(UnitId(8)));
+        }
+        let rejected = |seq, reason| SimEventMsg {
+            tick: 3,
+            event: SimEvent::CommandRejected {
+                player: LOCAL_PLAYER,
+                seq,
+                reason,
+            },
+        };
+        app.world_mut()
+            .write_message(rejected(4, RejectReason::InvalidTarget));
+        app.update();
+        assert_eq!(app.world().resource::<MessageState>().text, "", "hidden");
+        // Not a remembered attack: shown.
+        app.world_mut()
+            .write_message(rejected(6, RejectReason::InvalidTarget));
+        app.update();
+        assert_eq!(
+            app.world().resource::<MessageState>().text,
+            "Cannot attack that"
+        );
+        // A remembered attack rejected for another reason: shown.
+        app.world_mut()
+            .write_message(rejected(5, RejectReason::NoValidUnits));
+        app.update();
+        assert_eq!(
+            app.world().resource::<MessageState>().text,
+            "No selected unit can do that"
         );
     }
 

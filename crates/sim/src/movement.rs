@@ -39,7 +39,10 @@
 //! A unit that `combat::think` engaged this tick (step 5a) replaces step 1
 //! with its [`Engage`]: hold (no desired velocity, idle push cap, facing
 //! the target) or chase (straight at the target's point, moving push cap);
-//! steps 2 to 4 apply as to any unit.
+//! steps 2 to 4 apply as to any unit. A path chaser that `think` lists as
+//! awaiting (a path request outstanding) follows its path as usual but
+//! does not arrive at the final waypoint: it keeps steering at it and keeps
+//! its order until the new path lands.
 //!
 //! Units never enter a blocked tile. Repath triggers (each re-issues a
 //! `PathRequest` through `Pathing::request`, unless one is still
@@ -57,7 +60,7 @@ use crate::ids::UnitId;
 use crate::map::Map;
 use crate::state::{MoveOrder, Post, SimEvent, Unit};
 use rules::Rules;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Side of one spatial-grid cell in tiles.
 pub const CELL_TILES: u16 = 2;
@@ -273,8 +276,11 @@ fn slide(map: &Map, from: FxVec2, v: FxVec2) -> (FxVec2, bool) {
 /// of its order or post: [`Engage::Hold`] has no desired velocity, the idle
 /// push cap and faces its target; [`Engage::Chase`] steers straight at its
 /// point at full speed with the moving push cap. Neither follows a path,
-/// consumes waypoints, arrives, returns to a post or asks for a repath;
-/// every other unit moves exactly as without combat. Emits
+/// consumes waypoints, arrives, returns to a post or asks for a repath. A
+/// unit in `awaiting` (a path chaser whose path request is outstanding,
+/// step 5a) does not arrive at its final waypoint: it keeps its order and
+/// steers at the waypoint until step 4 writes the new path. Every other
+/// unit moves exactly as without combat. Emits
 /// [`SimEvent::UnitArrived`] when an order completes. Repath requests are
 /// not issued here; the function returns the ids of units that need one
 /// (blocked next waypoint, `tick >= repath_at`, or a unit whose every
@@ -323,12 +329,14 @@ fn slide(map: &Map, from: FxVec2, v: FxVec2) -> (FxVec2, bool) {
 /// - Circle correction is one pass over every unit (orders or not) in
 ///   `(a, b)` id order with `a < b`; coincident pairs separate along the x
 ///   axis. More passes were measured to slow the crowd, not help it.
+#[allow(clippy::too_many_arguments)]
 pub fn step(
     units: &mut BTreeMap<UnitId, Unit>,
     map: &Map,
     grid: &SpatialGrid,
     rules: &Rules,
     engage: &BTreeMap<UnitId, Engage>,
+    awaiting: &BTreeSet<UnitId>,
     tick: u32,
     events: &mut Vec<SimEvent>,
 ) -> Vec<UnitId> {
@@ -390,7 +398,7 @@ pub fn step(
                 let target = map.center_of(order.path[i]);
                 let slowdown = if i == last { p.slowdown } else { Fx::ZERO };
                 let (v, dist) = arrival_steer(u.pos, target, u.speed, slowdown);
-                if i == last && dist <= p.arrive {
+                if i == last && dist <= p.arrive && !awaiting.contains(id) {
                     let u = units.get_mut(id).expect("exists");
                     u.order = None;
                     u.post = Some(Post {
@@ -687,7 +695,16 @@ mod tests {
         let mut repath = Vec::new();
         for t in 0..ticks {
             grid.rebuild(units);
-            repath = step(units, map, &grid, rules, &BTreeMap::new(), t, &mut events);
+            repath = step(
+                units,
+                map,
+                &grid,
+                rules,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                t,
+                &mut events,
+            );
         }
         (events, repath)
     }
@@ -841,6 +858,50 @@ mod tests {
                 returning: false
             })
         );
+    }
+
+    /// A path chaser waiting for a new path (`awaiting`) walks to the end
+    /// of its current path and holds there with its order instead of
+    /// arriving; once it no longer waits, it arrives as usual.
+    #[test]
+    fn awaiting_units_hold_the_end_of_their_path_instead_of_arriving() {
+        use crate::ids::Tile;
+        let rules = rules();
+        let map = Map::open(16, 16);
+        let mut units = BTreeMap::new();
+        let mut u = unit(1, 2, 2);
+        u.pos = map.center_of(Tile::new(2, 2));
+        u.order = Some(order(vec![Tile::new(2, 2), Tile::new(4, 2)], &map));
+        units.insert(UnitId(1), u);
+        let awaiting = BTreeSet::from([UnitId(1)]);
+        let mut grid = SpatialGrid::new(&map);
+        let mut events = Vec::new();
+        for t in 0..60 {
+            grid.rebuild(&units);
+            let repath = step(
+                &mut units,
+                &map,
+                &grid,
+                &rules,
+                &BTreeMap::new(),
+                &awaiting,
+                t,
+                &mut events,
+            );
+            assert!(repath.is_empty());
+        }
+        assert!(events.is_empty(), "{events:?}");
+        let u = &units[&UnitId(1)];
+        assert!(u.order.is_some() && u.post.is_none(), "{u:?}");
+        let end = map.center_of(Tile::new(4, 2));
+        let arrive = Fx::from_ratio(25, 100);
+        assert!(
+            u.pos.dist_sq_i64(end) <= (arrive * arrive).to_bits(),
+            "at the end"
+        );
+        let (events, _) = run(&mut units, &map, &rules, 1);
+        assert_eq!(events, vec![SimEvent::UnitArrived { unit: UnitId(1) }]);
+        assert!(units[&UnitId(1)].order.is_none());
     }
 
     #[test]

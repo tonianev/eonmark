@@ -14,12 +14,26 @@
 //!   unit's own or a building with no hit points left ends the order. A
 //!   target in weapon range is held ([`Engage::Hold`]). One within the
 //!   unit's reach (the longer of `acquire_range_tiles` and its range) with
-//!   a clear tile line is chased directly ([`Engage::Chase`]), no path and
-//!   no request. Otherwise the unit walks a path toward it: a new order to
-//!   the target's tile (a ring tile for a building), re-goaled once the
-//!   target has drifted more than `chase_regoal_tiles` from the goal; a
-//!   unit whose path chase has arrived (no order, a post) and still cannot
-//!   reach its target gives up. There is no leash.
+//!   a clear tile line, or a building whose footprint the unit stands
+//!   beside, is chased directly ([`Engage::Chase`]), no path and no
+//!   request. Otherwise the unit walks a path toward it (a path chase),
+//!   which ends on the tile `chase_end` gives: the target's tile when the
+//!   unit can walk there; else the tile of the unit's component nearest to
+//!   it, as pathing corrects the goal, when the target is in weapon range
+//!   from anywhere within the unit's arrive radius of that tile's centre;
+//!   for a building, the reachable ring tile nearest to the unit. A target
+//!   with no such tile cannot be reached and the order ends: at once, with
+//!   no path, and on any later tick of the walk (a wall can close behind
+//!   the target), so every attacker of a group gives up together. A new
+//!   path chase is a move order to the target's tile (to the ring tile for
+//!   a building). Once a unit target has drifted more than
+//!   `chase_regoal_tiles` from the goal (or a building's ring tile is cut
+//!   off), the order is re-goaled like a repath: the unit keeps its path
+//!   until step 4 writes the new one, and while a request is outstanding it
+//!   does not arrive at the end of its path (`Plan::awaiting`). A path
+//!   chase that has arrived (no order, a post) walks again when its end
+//!   tile is no longer the tile it arrived at (the target moved), and
+//!   otherwise gives up. There is no leash.
 //! - 5b `movement::step` takes the engagements: a holding unit stands and
 //!   faces its target, a chasing one steers straight at it.
 //! - 5c `resolve`: every attacker whose target is still valid and in
@@ -47,6 +61,7 @@ use crate::construction::{self, Rect, builder_stand, building_rect, order_move};
 use crate::fx::{Fx, FxVec2};
 use crate::ids::{BuildingId, PlayerId, TargetId, Tile, UnitId, UnitKindId};
 use crate::map::Map;
+use crate::pathing::PathRequest;
 use crate::state::{Intent, RejectReason, SimEvent, State, Unit, fx_from_x100};
 use crate::tech;
 use crate::town;
@@ -174,6 +189,12 @@ pub enum Engage {
 pub(crate) struct Plan {
     /// Engaged units; every other unit moves as it would without combat.
     pub engage: BTreeMap<UnitId, Engage>,
+    /// Path chasers with a path request outstanding (a re-goal or a
+    /// repath). They keep following their path but do not arrive at its
+    /// end: arriving would end the order, step 4 would then drop the new
+    /// path, and the arrived chase would give up or ask again from the back
+    /// of the queue. They wait at the end until the new path lands.
+    pub awaiting: BTreeSet<UnitId>,
 }
 
 /// A target as seen by an attacker.
@@ -385,11 +406,87 @@ fn engage_directly(state: &mut State, id: UnitId) {
     }
 }
 
+/// Whether a unit standing on `a` can walk to `b`: `a` is passable and
+/// `b` is in its component (blocked tiles are in none).
+fn walkable(map: &Map, a: Tile, b: Tile) -> bool {
+    map.passable(a) && map.component_of(a) == map.component_of(b)
+}
+
+/// Whether `u`, with weapon `range`, has the unit target at `pos` with
+/// radius `rt` in weapon range from anywhere within `u`'s arrive radius of
+/// the centre of `stand`: so a unit that walks to `stand` and arrives
+/// there can hit.
+fn hittable_from(
+    rules: &Rules,
+    map: &Map,
+    u: &Unit,
+    range: Fx,
+    pos: FxVec2,
+    rt: Fx,
+    stand: Tile,
+) -> bool {
+    let kind = rules.unit_kind(u.kind.0).expect("validated unit kind");
+    let edge = range + u.radius + rt - fx_from_x100(kind.arrive_radius_tiles_x100);
+    edge > Fx::ZERO && map.center_of(stand).dist_sq_i64(pos) <= reach_sq(edge)
+}
+
+/// Where a path chase by `u` (weapon `range`) on `aim` ends, or `None` when
+/// the target cannot be reached:
+///
+/// - a building: the reachable ring tile nearest to the unit, as a
+///   builder's (`builder_stand`);
+/// - a unit on a tile the attacker can walk to: that tile;
+/// - a unit anywhere else (walled off, another component): the tile of the
+///   attacker's component nearest to it, the tile pathing corrects the goal
+///   to (`Map::nearest_passable`), provided the target is in weapon range
+///   from anywhere within the attacker's arrive radius of that tile's
+///   centre (`hittable_from`). A melee attacker never hits a target
+///   walled off by a whole tile; a Bowman shoots over the wall.
+///
+/// It depends only on the map, the two positions and the stats, so every
+/// attacker of a group decides alike, and an unreachable target costs no
+/// path.
+fn chase_end(map: &Map, rules: &Rules, u: &Unit, range: Fx, aim: &Aim) -> Option<Tile> {
+    match *aim {
+        Aim::Building { rect } => builder_stand(map, rect, u.pos).ok(),
+        Aim::Unit {
+            pos, radius: rt, ..
+        } => {
+            let (here, there) = (map.tile_of(u.pos), map.tile_of(pos));
+            if !map.passable(here) || walkable(map, here, there) {
+                // Units never stand on a blocked tile; should one, pathing
+                // corrects its start, so nothing is judged from there.
+                return Some(there);
+            }
+            let stand = map.nearest_passable(there, Some(map.component_of(here)))?;
+            hittable_from(rules, map, u, range, pos, rt, stand).then_some(stand)
+        }
+    }
+}
+
+/// Re-goal `id`'s path chase to `goal` like a repath: its path and next
+/// waypoint are kept until step 4 writes the new path, so a saturated
+/// budget delays the chaser instead of parking it, and the request joins
+/// the queue with `requested_tick = tick`. The periodic timer restarts.
+fn regoal(state: &mut State, rules: &Rules, id: UnitId, goal: FxVec2, tick: u32) {
+    let u = state.units.get_mut(&id).expect("unit exists");
+    let from = state.map.tile_of(u.pos);
+    let order = u.order.as_mut().expect("a path chase has an order");
+    order.goal = goal;
+    order.repath_at = tick + rules.repath_interval_ticks();
+    state.pathing.request(PathRequest {
+        requested_tick: tick,
+        unit: id,
+        from,
+        to: state.map.tile_of(goal),
+    });
+}
+
 /// Step 5a: decide how every unit with an explicit `Attack` engages this
 /// tick (see the module docs), from the start-of-tick positions. Issues and
-/// cancels path-chase requests; returns the direct engagements for
-/// `movement::step`. Acquisition by idle and attack-moving units arrives in
-/// the M4a combat behaviour slice.
+/// cancels path-chase requests; returns the direct engagements and the
+/// path chasers waiting for a path for `movement::step`. Acquisition by
+/// idle and attack-moving units arrives in the M4a combat behaviour slice.
 pub(crate) fn think(state: &mut State, rules: &Rules, stats: &Stats, tick: u32) -> Plan {
     let mut plan = Plan::default();
     let attackers: Vec<UnitId> = state
@@ -413,46 +510,97 @@ pub(crate) fn think(state: &mut State, rules: &Rules, stats: &Stats, tick: u32) 
             continue;
         }
         let map = &state.map;
-        let ignore = match aim {
-            Aim::Building { rect } => Some(rect),
-            Aim::Unit { .. } => None,
+        let here = map.tile_of(u.pos);
+        // On a tile beside a footprint the nearest point of the footprint
+        // lies on that tile's own edge or corner, so the straight steer
+        // never leaves the tile, whatever blocks the tiles around it. The
+        // tile line cannot see that: on the east and south faces the point
+        // floors to a tile outside the footprint, and a corner crossing
+        // needs both tiles beside the corner. A building's path chase ends
+        // on such a tile, out of melee range when it is a corner one.
+        let clear = match aim {
+            Aim::Building { rect } => {
+                rect.chebyshev(here) <= 1 || line_clear(map, here, map.tile_of(point), Some(rect))
+            }
+            Aim::Unit { .. } => line_clear(map, here, map.tile_of(point), None),
         };
-        if within(u.pos, u.radius, attack.reach, &aim)
-            && line_clear(map, map.tile_of(u.pos), map.tile_of(point), ignore)
-        {
+        if within(u.pos, u.radius, attack.reach, &aim) && clear {
             engage_directly(state, id);
             plan.engage.insert(id, Engage::Chase(point));
             continue;
         }
-        // A path chase. The goal is the target's tile, or for a building
-        // the reachable ring tile nearest to the unit.
+        // A path chase. Its order's goal is the target's tile (pathing
+        // corrects it to the end tile), or a building's ring tile.
+        let goal = |end: Tile| match aim {
+            Aim::Unit { pos, .. } => map.center_of(map.tile_of(pos)),
+            Aim::Building { .. } => map.center_of(end),
+        };
         match (&u.order, u.post) {
+            // Walking. Whether the target can still be reached is checked
+            // every tick, so a wall closing round it ends the chase at once
+            // and no group is left jostling for a corrected goal tile it
+            // cannot all reach. The cheap checks come first: a unit target
+            // the unit can walk to, or one it can hit from the end of its
+            // path, or a building whose ring tile it can still walk to;
+            // `chase_end` searches only when they fail.
             (Some(order), _) => {
-                let Aim::Unit { pos, .. } = aim else {
-                    continue;
-                };
-                let drift = chebyshev(map.tile_of(order.goal), map.tile_of(pos));
-                if u32::from(drift) > rules.chase_regoal_tiles && !state.pathing.has_request(id) {
-                    let goal = map.center_of(map.tile_of(pos));
-                    order_move(state, rules, id, goal, tick);
-                }
-            }
-            (None, None) => {
-                let goal = match aim {
-                    Aim::Unit { pos, .. } => map.center_of(map.tile_of(pos)),
-                    Aim::Building { rect } => match builder_stand(map, rect, u.pos) {
-                        Ok(stand) => map.center_of(stand),
-                        Err(_) => {
+                let goal_tile = map.tile_of(order.goal);
+                let to = match aim {
+                    Aim::Unit {
+                        pos, radius: rt, ..
+                    } => {
+                        let there = map.tile_of(pos);
+                        let reachable = walkable(map, here, there)
+                            || order.path.last().is_some_and(|&end| {
+                                walkable(map, here, end)
+                                    && hittable_from(rules, map, u, attack.range, pos, rt, end)
+                            })
+                            || chase_end(map, rules, u, attack.range, &aim).is_some();
+                        if !reachable {
+                            give_up(state, id);
+                            continue;
+                        }
+                        let drift = chebyshev(goal_tile, there);
+                        (u32::from(drift) > rules.chase_regoal_tiles).then(|| map.center_of(there))
+                    }
+                    Aim::Building { .. } if walkable(map, here, goal_tile) => None,
+                    Aim::Building { .. } => match chase_end(map, rules, u, attack.range, &aim) {
+                        Some(end) => Some(goal(end)),
+                        None => {
                             give_up(state, id);
                             continue;
                         }
                     },
                 };
-                order_move(state, rules, id, goal, tick);
+                if let Some(to) = to
+                    && !state.pathing.has_request(id)
+                {
+                    regoal(state, rules, id, to, tick);
+                }
+                if state.pathing.has_request(id) {
+                    plan.awaiting.insert(id);
+                }
             }
-            // The path chase arrived and the target is still out of reach:
-            // it cannot be reached (another component, or walled off).
-            (None, Some(_)) => give_up(state, id),
+            (None, None) => match chase_end(map, rules, u, attack.range, &aim) {
+                Some(end) => {
+                    let to = goal(end);
+                    order_move(state, rules, id, to, tick);
+                }
+                None => give_up(state, id),
+            },
+            // The path chase arrived and the target is still out of reach.
+            // When the end tile is no longer the tile it arrived at (a unit
+            // target walked on, by up to `chase_regoal_tiles`, round an
+            // obstacle), walk again: each walk needs the target to have
+            // moved, so this is no request storm. Otherwise it cannot be
+            // reached from here: give up.
+            (None, Some(post)) => match chase_end(map, rules, u, attack.range, &aim) {
+                Some(end) if end != map.tile_of(post.goal) => {
+                    let to = goal(end);
+                    order_move(state, rules, id, to, tick);
+                }
+                _ => give_up(state, id),
+            },
         }
     }
     plan

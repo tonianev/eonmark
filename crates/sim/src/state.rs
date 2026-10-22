@@ -963,7 +963,8 @@ impl Sim {
 
         // 5. Movement and combat. 5a: explicit attackers decide whether to
         //    hold, chase directly, walk a path or give up (from the
-        //    start-of-tick positions). 5b: movement, with those engagements.
+        //    start-of-tick positions). 5b: movement, with those engagements;
+        //    a path chaser waiting for a path does not arrive.
         //    A unit that still has a request outstanding (queued or
         //    suspended) is not re-requested: a replacement would move it to
         //    the back of the queue and could starve it under a saturated
@@ -977,6 +978,7 @@ impl Sim {
             &self.grid,
             &self.rules,
             &plan.engage,
+            &plan.awaiting,
             tick,
             &mut self.events,
         );

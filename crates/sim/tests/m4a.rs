@@ -2480,6 +2480,13 @@ struct Trace {
     always_passable: bool,
     /// Largest x reached.
     max_x: Fx,
+    /// Ticks that ended with an order whose path was empty although that
+    /// order had a path at the end of an earlier tick: a re-goal threw the
+    /// path away and parked the unit until the new one landed.
+    stalled: u32,
+    /// Ticks that ended with a re-goal's path request still outstanding on
+    /// which the unit moved: it kept walking its old path meanwhile.
+    walked_regoaling: u32,
 }
 
 /// Step `n` ticks, tracing unit `id` (while it lives).
@@ -2489,6 +2496,9 @@ fn trace(m: &mut M, id: u32, n: u32) -> (Trace, Vec<(u32, SimEvent)>) {
         ..Trace::default()
     };
     let mut had_request = m.view().pathing().has_request(UnitId(id));
+    // The current order has had a path; a re-goal's request is pending.
+    let (mut had_path, mut regoaling) = (false, false);
+    let mut last_pos = m.unit(id).map(|u| u.pos);
     let mut events = Vec::new();
     for _ in 0..n {
         events.extend(m.step_tagged(1));
@@ -2500,17 +2510,32 @@ fn trace(m: &mut M, id: u32, n: u32) -> (Trace, Vec<(u32, SimEvent)>) {
             Some(o) => {
                 t.with_order += 1;
                 if t.goals.last() != Some(&o.goal) {
+                    // A new goal on an order that already had a path.
+                    regoaling = had_path;
                     t.goals.push(o.goal);
                 }
+                if o.path.is_empty() && had_path {
+                    t.stalled += 1;
+                }
+                had_path |= !o.path.is_empty();
             }
-            None if u.intent == Intent::Attack => t.direct += 1,
-            None => {}
+            None => {
+                had_path = false;
+                if u.intent == Intent::Attack {
+                    t.direct += 1;
+                }
+            }
         }
         let request = view.pathing().has_request(UnitId(id));
         if request && !had_request {
             t.requests += 1;
         }
         had_request = request;
+        regoaling &= request;
+        if regoaling && last_pos != Some(u.pos) {
+            t.walked_regoaling += 1;
+        }
+        last_pos = Some(u.pos);
         t.always_passable &= view.map().passable(view.map().tile_of(u.pos));
         t.max_x = t.max_x.max(u.pos.x);
     }
@@ -2559,6 +2584,10 @@ fn combat_attack_chases_an_ordered_target() {
     assert!(died_at(&events, 2).is_some(), "caught and killed: {t:?}");
     assert!(t.with_order > 0, "walked a path first: {t:?}");
     assert!(t.goals.len() >= 2, "re-goaled as the target moved: {t:?}");
+    assert_eq!(
+        t.stalled, 0,
+        "a re-goal keeps the old path until the new one lands: {t:?}"
+    );
     assert!(t.direct > 0, "then chased directly: {t:?}");
     assert!(
         t.requests <= 2 * u32::try_from(t.goals.len()).unwrap() + 4,
@@ -2599,9 +2628,10 @@ fn combat_attack_paths_across_the_ford_when_the_line_is_blocked() {
     eprintln!("ford: {t:?}");
 }
 
-/// A target walled in by eight Watchtowers cannot be reached: the attacker
-/// walks one path toward it, arrives beside the wall and gives up, with no
-/// further requests.
+/// A target walled in by eight Watchtowers cannot be reached: it is in
+/// another component, and a melee attacker cannot hit it from the nearest
+/// tile it can walk to. The attacker gives up at once, with no path and no
+/// request, and makes none later.
 #[test]
 fn combat_attack_on_an_unreachable_target_gives_up_without_a_request_storm() {
     let rules = load_rules();
@@ -2630,6 +2660,10 @@ fn combat_attack_on_an_unreachable_target_gives_up_without_a_request_storm() {
     }
     m.run_as(1, walls);
     m.ok(vec![attack(&[1], unit_t(2))]);
+    assert!(
+        m.unit(1).unwrap().order.is_none() && m.view().pathing().is_idle(),
+        "no path asked for in the tick the order applied"
+    );
     let (t, events) = trace(&mut m, 1, 400);
     assert!(hits(&events.iter().map(|e| e.1.clone()).collect::<Vec<_>>()).is_empty());
     let u = m.unit(1).unwrap();
@@ -2638,12 +2672,270 @@ fn combat_attack_on_an_unreachable_target_gives_up_without_a_request_storm() {
         (None, Intent::Plain),
         "gave up: {t:?}"
     );
-    assert!(t.with_order > 0, "it tried a path: {t:?}");
-    assert!(t.requests <= 3, "one path and its periodic repaths: {t:?}");
+    assert_eq!(
+        (t.with_order, t.requests),
+        (0, 0),
+        "another component costs no path: {t:?}"
+    );
     let quiet = trace(&mut m, 1, 200).0;
     assert_eq!(quiet.requests, 0, "no more requests once given up");
     assert!(m.view().pathing().is_idle());
     eprintln!("unreachable: {t:?}");
+}
+
+/// The eight tiles round `(20, 30)`.
+const RING: [(i16, i16); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+];
+
+/// P1's complete Watchtower on the tile `d` away from `(20, 30)`.
+fn ring_tower(rules: &Rules, d: (i16, i16)) -> Command {
+    place_for(
+        P1,
+        bkind(rules, "watchtower"),
+        20u16.wrapping_add_signed(d.0),
+        30u16.wrapping_add_signed(d.1),
+        true,
+    )
+}
+
+/// Every attacker of a group decides alike whether a target can be
+/// reached, so none is left behind: six Skirmishers ordered onto a Yeoman
+/// ringed by eight Watchtowers all give up in the tick the order applies,
+/// with no path and no request (on one path each they would all walk to
+/// the one corrected goal tile beside the wall, which not all of them can
+/// come within the arrive radius of, and the rest would jostle there for
+/// ever). When the ring closes while the group walks toward its last gap,
+/// all six give up in that tick. No hit lands either way and the pathing
+/// queue stays idle.
+#[test]
+fn combat_group_attack_on_an_unreachable_target_gives_up() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let group = [1, 2, 3, 4, 5, 6];
+    let given_up = |m: &M| {
+        group.iter().all(|&id| {
+            let u = m.unit(id).unwrap();
+            (u.target, u.intent, u.order.is_some()) == (None, Intent::Plain, false)
+                && !m.view().pathing().has_request(UnitId(id))
+        })
+    };
+    let quiet = |m: &mut M| {
+        let events = m.step_tagged(200);
+        assert!(hits(&events.into_iter().map(|e| e.1).collect::<Vec<_>>()).is_empty());
+        assert!(given_up(m) && m.view().pathing().is_idle());
+    };
+
+    // Walled off from the start.
+    let mut m = M::new(rules.clone(), 37);
+    m.ok(vec![spawn(skirm, 10, 30, 6)]); // UnitId(1..=6)
+    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)]; // UnitId(7)
+    walls.extend(RING.iter().map(|&d| ring_tower(&rules, d)));
+    m.run_as(1, walls);
+    m.issue_tagged(vec![attack(&group, unit_t(7))], vec![], 0);
+    assert!(given_up(&m), "in the tick the order applied");
+    assert!(m.view().pathing().is_idle(), "no path asked for");
+    quiet(&mut m);
+
+    // The ring closes behind the target while the group walks to its gap.
+    let mut m = M::new(rules.clone(), 37);
+    m.ok(vec![spawn(skirm, 10, 30, 6)]);
+    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)];
+    walls.extend(RING[..7].iter().map(|&d| ring_tower(&rules, d)));
+    m.run_as(1, walls);
+    m.issue_tagged(vec![attack(&group, unit_t(7))], vec![], 20);
+    for id in group {
+        let u = m.unit(id).unwrap();
+        assert!(
+            u.intent == Intent::Attack && u.order.as_ref().is_some_and(|o| !o.path.is_empty()),
+            "unit {id} walks toward the gap: {u:?}"
+        );
+    }
+    m.run_as(1, vec![ring_tower(&rules, RING[7])]);
+    assert!(given_up(&m), "in the tick the ring closed");
+    quiet(&mut m);
+}
+
+/// A Bowman shoots over a wall: three ordered onto the Yeoman ringed by
+/// eight Watchtowers walk a path toward the nearest tile they can reach,
+/// which is in range of it, and kill it from beyond the wall instead of
+/// giving up.
+#[test]
+fn combat_ranged_attack_on_a_walled_off_target_shoots_over_the_wall() {
+    let rules = load_rules();
+    let (bow, yeoman) = (ukind(&rules, "bowman"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 37);
+    m.ok(vec![spawn(bow, 4, 30, 3)]); // UnitId(1..=3), 15 tiles off
+    let mut walls = vec![spawn_for(P1, yeoman, 20, 30, 1)]; // UnitId(4)
+    walls.extend(RING.iter().map(|&d| ring_tower(&rules, d)));
+    m.run_as(1, walls);
+    m.ok(vec![attack(&[1, 2, 3], unit_t(4))]);
+    let (t, events) = trace(&mut m, 1, 400);
+    assert!(died_at(&events, 4).is_some(), "shot over the wall: {t:?}");
+    assert!(t.with_order > 0, "walked a path first: {t:?}");
+    assert!(!hits_by(&events, unit_t(1)).is_empty());
+}
+
+/// A path chase on a building ends on the reachable ring tile nearest to
+/// the attacker, here a corner tile, whose centre is 0.71 tiles from the
+/// footprint's corner: out of melee range (0.60 for a Skirmisher). From
+/// that tile the attacker closes in directly even when a second Croft
+/// flush against the target blocks the tile the corner point floors to
+/// (NE, SW) or a tile beside the corner crossing (NW), and it hits. The SE
+/// case is the control: its corner point floors to the attacker's own tile.
+#[test]
+fn combat_attack_on_a_building_closes_in_from_a_corner_tile() {
+    let rules = load_rules();
+    let (skirm, croft) = (ukind(&rules, "skirmisher"), bkind(&rules, "croft"));
+    // Target: BuildingId(1) at (20, 30), tiles 20..=21 x 30..=31 (all
+    // grass). Per case: the second Croft's NW tile, the spawn tile and the
+    // corner ring tile the path chase walks to.
+    for (other, from, corner) in [
+        ((22, 30), (28, 25), (22, 29)), // NE
+        ((20, 32), (14, 36), (19, 32)), // SW
+        ((20, 28), (14, 24), (19, 29)), // NW
+        ((22, 30), (28, 37), (22, 32)), // SE
+    ] {
+        let mut m = M::new(rules.clone(), 41);
+        m.run_as(
+            1,
+            vec![
+                place_for(P1, croft, 20, 30, true),
+                place_for(P1, croft, other.0, other.1, true),
+            ],
+        );
+        m.ok(vec![spawn(skirm, from.0, from.1, 1)]);
+        let corner = m.view().map().center_of(Tile::new(corner.0, corner.1));
+        let mut events = m.ok(vec![attack(&[1], building_t(1))]);
+        let mut walked_to_corner = false;
+        for _ in 0..300 {
+            events.extend(m.step(1));
+            walked_to_corner |= m
+                .unit(1)
+                .and_then(|u| u.order)
+                .is_some_and(|o| o.goal == corner);
+        }
+        assert!(
+            walked_to_corner,
+            "{other:?} from {from:?}: the path chase went to the corner"
+        );
+        assert!(
+            hits(&events)
+                .iter()
+                .any(|(a, t, _)| (*a, *t) == (unit_t(1), building_t(1))),
+            "{other:?} from {from:?}: no hit, {:?}",
+            m.unit(1)
+        );
+        let u = m.unit(1).unwrap();
+        assert_eq!(
+            (u.target, u.intent),
+            (Some(building_t(1)), Intent::Attack),
+            "{other:?} from {from:?}: still attacking"
+        );
+    }
+}
+
+/// A target that stops within `chase_regoal_tiles` of the path chase's
+/// goal but round a corner can still be reached: the attacker arrives at
+/// the stale goal, walks on round the corner and kills it instead of
+/// giving up.
+#[test]
+fn combat_attack_walks_round_a_corner_to_a_target_near_its_goal() {
+    let rules = load_rules();
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let hall = bkind(&rules, "muster_hall");
+    let mut m = M::new(rules.clone(), 39);
+    m.ok(vec![spawn(skirm, 6, 30, 1)]); // UnitId(1)
+    // P1's Muster Halls block x 12..=20 on rows 31..=33.
+    m.run_as(
+        1,
+        vec![
+            spawn_for(P1, yeoman, 20, 30, 1), // UnitId(2)
+            place_for(P1, hall, 12, 31, true),
+            place_for(P1, hall, 15, 31, true),
+            place_for(P1, hall, 18, 31, true),
+        ],
+    );
+    // The path chase goes to (20, 30); the Yeoman walks round the corner
+    // to (21, 32): 2 tiles from that goal (no re-goal), with no clear line
+    // from any tile of the approach along row 30.
+    let mut events = m.issue_tagged(
+        vec![attack(&[1], unit_t(2))],
+        vec![Command::Move {
+            units: vec![UnitId(2)],
+            target: FxVec2::from_ints(21, 32),
+            queue: false,
+        }],
+        0,
+    );
+    let (t, more) = trace(&mut m, 1, 400);
+    events.extend(more);
+    assert!(
+        events
+            .iter()
+            .any(|(_, e)| *e == SimEvent::UnitArrived { unit: UnitId(1) }),
+        "the path chase arrived at the stale goal: {t:?}"
+    );
+    assert!(
+        died_at(&events, 2).is_some(),
+        "walked round and killed it: {t:?}"
+    );
+    assert!(t.goals.len() >= 2, "walked again after arriving: {t:?}");
+    assert!(t.always_passable);
+}
+
+/// With the path budget saturated (2 expansions a tick, set in memory),
+/// every path request waits several ticks. A path chase that re-goals
+/// keeps walking its old path meanwhile instead of standing until the new
+/// one lands, never arrives and never gives up before the kill, and
+/// catches and kills the target. (That a chaser waiting for a path holds
+/// the end of its old path rather than arriving there is
+/// `movement::tests::awaiting_units_hold_the_end_of_their_path_instead_of_arriving`.)
+#[test]
+fn combat_path_chase_keeps_walking_while_pathing_is_saturated() {
+    let mut rules = load_rules();
+    rules.path_budget_expansions = 2;
+    let (skirm, yeoman) = (ukind(&rules, "skirmisher"), ukind(&rules, "yeoman"));
+    let mut m = M::new(rules.clone(), 35);
+    m.ok(vec![spawn(skirm, 6, 26, 1)]);
+    m.run_as(1, vec![spawn_for(P1, yeoman, 26, 26, 1)]);
+    m.run_as(
+        1,
+        vec![Command::Move {
+            units: vec![UnitId(2)],
+            target: FxVec2::from_ints(40, 40),
+            queue: false,
+        }],
+    );
+    m.ok(vec![attack(&[1], unit_t(2))]);
+    let start = m.sim.tick();
+    let (t, events) = trace(&mut m, 1, 1200);
+    let killed = died_at(&events, 2).expect("caught and killed");
+    assert!(t.goals.len() >= 2, "re-goaled as the target moved: {t:?}");
+    assert_eq!(t.stalled, 0, "never parked by a re-goal: {t:?}");
+    assert!(
+        t.walked_regoaling > 0,
+        "walked on while a re-goal waited: {t:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(at, e)| *at < killed && *e == SimEvent::UnitArrived { unit: UnitId(1) }),
+        "never arrived before the kill: {t:?}"
+    );
+    assert_eq!(
+        t.direct + t.with_order,
+        killed - start + 1,
+        "attacking on every tick until the kill, then given up: {t:?}"
+    );
+    eprintln!("saturated: {t:?}");
 }
 
 /// P1's Mangonels destroy P0's complete Watchtower, one of the five

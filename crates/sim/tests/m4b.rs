@@ -515,9 +515,13 @@ fn enemy_outpost_walkthrough_issues_only_real_commands_after_setup() {
 /// The walkthrough's bill, rebuilt from the commands its stream issues
 /// (each Build at its kind's ramp, each Research at the quote the techs
 /// researched before it give, with the `ResearchCost` rows resolved here,
-/// the age's cost, each Train at its trainer kind's military ramp
-/// position), equals `enemy_outpost_bill`; the grants are 1.5x it clamped
-/// to the stockpile caps, so they cover it.
+/// the age's cost, each Train at both ramp inputs the sim's
+/// `unit_cost_for` reads: `n`, the units of its kind trained or queued
+/// before it, which a `PerUnit` ramp reads (P0 has none of these kinds
+/// alive at either Train beat), and `k`, its position in its trainer
+/// kind's queue, which the `Military` ramp reads), equals
+/// `enemy_outpost_bill`; the grants are 1.5x it clamped to the stockpile
+/// caps, so they cover it.
 #[test]
 fn enemy_outpost_grants_cover_the_walkthrough_bill() {
     let rules = load_rules();
@@ -534,6 +538,8 @@ fn enemy_outpost_grants_cover_the_walkthrough_bill() {
     // the tower; queued entries per trainer kind.
     let mut placed: BTreeMap<BuildingId, BuildingKindId> = BTreeMap::new();
     let mut queued: BTreeMap<BuildingKindId, u32> = BTreeMap::new();
+    // Units of each kind trained or queued so far: the `n` of `unit_cost`.
+    let mut same_kind: BTreeMap<UnitKindId, u32> = BTreeMap::new();
     let mut researched: Vec<u16> = Vec::new();
     let mut age = 0usize;
     for (_, cmds) in stream.iter().filter(|(t, _)| *t > 0) {
@@ -574,7 +580,9 @@ fn enemy_outpost_grants_cover_the_walkthrough_bill() {
                     let trainer = placed[building];
                     let k = queued.entry(trainer).or_insert(0);
                     *k += 1;
-                    add(rules.unit_cost(rules.unit_kind(kind.0).unwrap(), 0, *k));
+                    let n = same_kind.entry(*kind).or_insert(0);
+                    add(rules.unit_cost(rules.unit_kind(kind.0).unwrap(), *n, *k));
+                    *n += 1;
                 }
                 _ => {}
             }

@@ -68,8 +68,11 @@ use crate::palette;
 use crate::selection::Selection;
 use crate::sim_driver::{LOCAL_PLAYER, PendingCommands, SimHandle};
 
-/// Card button size, logical px.
-pub const CARD_BUTTON_PX: Vec2 = Vec2::new(112.0, 36.0);
+/// Card button size, logical px. Every line a button can show fits one
+/// line of it at [`CARD_FONT_PX`] (7.2 px a character): the longest are
+/// "Needs Statecraft II" (19 characters) and the Bowman at the military
+/// ramp's cap, "45 Grain 90 Lumber" (18).
+pub const CARD_BUTTON_PX: Vec2 = Vec2::new(140.0, 36.0);
 /// Gap between card buttons, logical px.
 pub const CARD_GAP_PX: f32 = 4.0;
 /// Buttons per card row.
@@ -2057,6 +2060,104 @@ mod tests {
             "{text}"
         );
         assert_fits_the_panel(&text);
+    }
+
+    /// Every line a card button can show fits one line of the button:
+    /// every name on the first line; on the second every cost at its
+    /// highest (research at full price, before any Letters discount; each
+    /// military unit at the ramp's cap, five entries queued at its trainer;
+    /// every single-resource cost up to five digits, which covers the
+    /// building and Yeoman ramps) and every blocker a Research button shows.
+    #[test]
+    fn every_card_line_fits_its_button() {
+        let width = chars_per_line(CARD_BUTTON_PX.x, CARD_FONT_PX);
+        let mut lab = Lab::new(standard());
+        let rules = lab.sim.rules().clone();
+        let s = strings();
+        let id = |i: usize| u16::try_from(i).unwrap();
+        let b = BuildingId(3);
+        let mut lines: Vec<String> = Vec::new();
+        let mut actions = vec![CardAction::CancelSite(b), CardAction::AttackMove];
+        actions
+            .extend((0..rules.buildings.len()).map(|i| CardAction::Build(BuildingKindId(id(i)))));
+        actions.extend((0..rules.units.len()).map(|i| CardAction::Train(b, UnitKindId(id(i)))));
+        actions.extend((0..rules.techs.len()).map(|i| CardAction::Research(b, TechId(id(i)))));
+        lines.extend(actions.iter().map(|a| card_label(&rules, &s, *a)));
+        let view = lab.sim.view();
+        for i in 0..rules.techs.len() {
+            let (cost, _) = view.research_quote(LOCAL_PLAYER, TechId(id(i)));
+            lines.push(cost_text(&rules, &cost));
+        }
+        for i in 0..rules.buildings.len() {
+            lines.push(cost_text(
+                &rules,
+                &view.building_cost(LOCAL_PLAYER, BuildingKindId(id(i))),
+            ));
+        }
+        for r in 0..rules.resources.resources.len() {
+            let mut cost = vec![0; rules.resources.resources.len()];
+            cost[r] = 99_999;
+            lines.push(cost_text(&rules, &cost));
+        }
+        lines.extend(rules.ages[1..].iter().map(|a| a.name.clone()));
+        lines.extend((0..rules.techs.len()).filter_map(|i| {
+            let prev = rules.tech(rules.tech_predecessor(id(i))?)?;
+            Some(fill(s.hud("button.needs"), &[("name", &prev.name)]))
+        }));
+        lines.push(fill(s.hud("button.researching"), &[("count", "99")]));
+        lines.push(s.hud("button.researched").to_string());
+        lines.push(reject_text(&s, &rules, &RejectReason::QueueFull));
+
+        // Five entries queued at the Muster Hall (3) and the Engine Yard
+        // (4) put every military unit at the ramp's cap.
+        let t = |id: &str| tech(&rules, id);
+        let building = |which, x| Command::DebugPlaceBuilding {
+            owner: LOCAL_PLAYER,
+            kind: kind(&rules, which),
+            tile: sim::Tile::new(x, 67),
+            complete: true,
+        };
+        let events = lab.run([
+            building("muster_hall", 28),
+            building("engine_yard", 19),
+            debug_research(t("letters_1")),
+            debug_research(t("trade_1")),
+            debug_research(t("arms_1")),
+            grant(res(&rules, "grain"), 650),
+            grant(res(&rules, "lumber"), 600),
+            grant(res(&rules, "lore"), 100),
+            Command::AdvanceAge {
+                player: LOCAL_PLAYER,
+            },
+        ]);
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let train = |building, kind| Command::Train {
+            building: BuildingId(building),
+            kind: unit(&rules, kind),
+        };
+        let events = lab.run(
+            (0..5)
+                .map(|_| train(3, "skirmisher"))
+                .chain((0..5).map(|_| train(4, "supply_wain"))),
+        );
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let view = lab.sim.view();
+        let capped: Vec<String> = (0..rules.units.len())
+            .map(|i| cost_text(&rules, &view.unit_cost(LOCAL_PLAYER, UnitKindId(id(i)))))
+            .collect();
+        assert!(
+            capped.contains(&"45 Grain 90 Lumber".to_string()),
+            "the Bowman at the cap: {capped:?}"
+        );
+        lines.extend(capped);
+
+        for line in &lines {
+            assert!(
+                line.chars().count() <= width,
+                "{} characters, {width} fit on a button: {line}",
+                line.chars().count()
+            );
+        }
     }
 
     /// The command each button sends, and the click: an enabled Research

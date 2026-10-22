@@ -71,8 +71,9 @@ use crate::sim_driver::{LOCAL_PLAYER, PendingCommands, SimHandle};
 
 /// Card button size, logical px. Every line a button can show fits one
 /// line of it at [`CARD_FONT_PX`] (7.2 px a character): the longest are
-/// "Needs Statecraft II" (19 characters) and the Bowman at the military
-/// ramp's cap, "45 Grain 90 Lumber" (18).
+/// "Needs Statecraft II" (19 characters; [`research_actions`] never offers
+/// a level whose level before is missing, but the blocker exists) and the
+/// Bowman at the military ramp's cap, "45 Grain 90 Lumber" (18).
 pub const CARD_BUTTON_PX: Vec2 = Vec2::new(140.0, 36.0);
 /// Gap between card buttons, logical px.
 pub const CARD_GAP_PX: f32 = 4.0;

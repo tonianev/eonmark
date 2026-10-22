@@ -173,6 +173,9 @@ pub fn run(cli: &Cli) -> AppExit {
         let (_, stream) = scenarios::units200_auto(&rules);
         (scenarios::EAST, spawn_total(&stream))
     });
+    // The walkthrough's director beats come from the rules too (M4b).
+    let director_beats = (cli.scenario.as_deref() == Some("enemy_outpost_walkthrough"))
+        .then(|| crate::director::walkthrough_beats(&rules));
     let strings = match rules::strings::Strings::load(cli.resolve_data_dir(), "en") {
         Ok(s) => s,
         Err(err) => {
@@ -248,6 +251,11 @@ pub fn run(cli: &Cli) -> AppExit {
         OrdersPlugin,
         HudPlugin { hud_click_check },
     ));
+
+    // Presentation only: frames and selects the walkthrough's beats.
+    if let Some(beats) = director_beats {
+        app.add_plugins(crate::director::DirectorPlugin { beats });
+    }
 
     #[cfg(target_os = "macos")]
     app.add_plugins(crate::macos_menu::MacosMenuPlugin {

@@ -31,6 +31,8 @@
 //!   (`--scenario units200_auto`, the `enemy_outpost` scenarios, `--max-fps`);
 //!   for the `enemy_outpost` scenarios also the 200 vs 200 fight window
 //!   (M4b).
+//! - [`director`]: camera and selection beats for
+//!   `--scenario enemy_outpost_walkthrough` (M4b); never issues a command.
 //! - `macos_menu`: muda menu with the custom Cmd-Q item (macOS only).
 //! - `dev_tools`: FPS overlay, egui inspector (F12) and sim panel (`dev` only).
 #![forbid(unsafe_code)]
@@ -44,6 +46,7 @@ pub mod cli;
 pub mod command_card;
 #[cfg(feature = "dev")]
 pub mod dev_tools;
+pub mod director;
 pub mod economy_hud;
 pub mod field;
 pub mod frame_stats;

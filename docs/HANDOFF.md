@@ -61,10 +61,11 @@ The exact commands are in `docs/PLAYTEST.md`, "Owner's Mac checklist (M4b)":
 
 Next is M5a, the simulation half of attrition, supply, annexation and
 victory. The owner answered the 15 open questions of its implementation
-plan on 2026-10-22, taking the plan's default on every one. Until M5a
-starts this list is their only record in the repository; they are then
-copied into the ROADMAP's M5a Notes with these numbers, as M4a's and M4b's
-were:
+plan on 2026-10-22, taking the plan's default on every one. M5a has
+started: its first slice (`rules_version` 18, `SIM_VERSION` 14) copied
+these decisions into the ROADMAP's M5a Notes with the same numbers, as
+M4a's and M4b's were, and put decision 9's starting data and decision 12's
+sets into `data/rules/`:
 
 1. An exact territory tie at tick 54000 is `Outcome::Draw` (M5b's CSV
    writes `draw`).

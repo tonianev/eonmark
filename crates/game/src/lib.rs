@@ -12,7 +12,8 @@
 //!   (display sleep, screen lock), which Bevy 0.19.1 would treat as closed.
 //! - [`sim_driver`]: `SimHandle`, the `FixedUpdate` driver, `InputSource`
 //!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
-//! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals.
+//! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals (M4b:
+//!   one low-poly, flat-shaded look per unit kind and its height).
 //! - [`selection`]: picking, click/box/group selection, rings and markers.
 //! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`.
 //! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.

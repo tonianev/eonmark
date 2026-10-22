@@ -74,12 +74,27 @@ Primitive silhouettes (M2 to M7):
 
 | Kind | Primitive | Notes |
 |---|---|---|
-| Units | `Capsule` | Height per kind from M4b; five distinct looks for the military kinds |
+| Units | One shape per kind (table below) | Since M4b each kind has its own silhouette and height, low-poly and flat-shaded; M2 drew every unit as a smooth `Capsule` |
 | Buildings | `Cuboid` | Footprint from `buildings.ron` |
 | Town | `Cylinder` | Larger when it reaches the second radius tier |
 | Resource node | `Sphere` | Grain gold, timber, ore colours |
 | Selection ring, rally marker, move marker | Retained gizmo lines | Separate entities keyed by id, never children of moving units |
 | Health bar | Flat quad entity | Same rule |
+
+Unit looks (M4b, `data/visuals.ron`), one silhouette per kind. Width is the kind's collision diameter from `units.ron`; each mesh has 10 facets around (a 6-latitude capsule, an icosphere of 80 faces) and flat face normals, at most 600 vertices, one mesh per kind and one material per kind and team:
+
+| Kind | Look | Silhouette |
+|---|---|---|
+| Yeoman | `Primitive(Capsule)` | Upright pill, 0.7 m wide, 1.19 m tall |
+| Scribe | `Primitive(Cylinder)` | Drum, 0.7 x 0.7 m |
+| Skirmisher | `Body(shape: Cone, height_tiles_x100: 150)` | Spike, 1.5 m |
+| Shieldbearer | `Body(shape: Cuboid, height_tiles_x100: 130)` | Block, 0.8 x 1.3 x 0.8 m |
+| Bowman | `Body(shape: Cylinder, height_tiles_x100: 190)` | Tall post, 1.9 m |
+| Outrider | `Body(shape: Capsule, height_tiles_x100: 180, lying: true)` | Pill lying along its facing, 1.8 m long, 0.9 m tall |
+| Mangonel | `Primitive(Sphere)` | Ball, 1.0 m |
+| Supply Wain | `Body(shape: Cuboid, height_tiles_x100: 60)` | Low box, 1.0 x 0.6 x 1.0 m |
+
+Two kinds share a shape only when they differ by at least 1.4 times on some axis (the Scribe's drum and the Bowman's post, the Shieldbearer's block and the Wain's low box, the Yeoman's upright pill and the Outrider's lying one); `present::tests::every_unit_kind_has_its_own_silhouette` checks it. The owner signed off on single-shape silhouettes on 2026-10-22 (ROADMAP M4b, Notes); multi-part looks wait for the art pass.
 
 Motion is procedural (bob, swing, scale pulse), not animation clips, in v0.1.
 
@@ -109,11 +124,13 @@ wgpu on a wide-gamut display can render colours more saturated than authored. Ev
 Every unit and building kind is drawn through one `Visual` value from `data/visuals.ron`:
 
 ```ron
-Yeoman: Primitive(Capsule),
-Town: Scene(path: "models/town.glb", scale: 1000, y_offset: 0, yaw: 0),
+"yeoman": Primitive(Capsule),
+"skirmisher": Body(shape: Cone, height_tiles_x100: 150),
+"outrider": Body(shape: Capsule, height_tiles_x100: 180, lying: true),
+"town": Scene(path: "models/town.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0),
 ```
 
-`Visual::Primitive(kind)` draws a team-coloured primitive. `Visual::Scene(path, scale, y_offset, yaw)` loads a glTF scene; `scale` is permille, `y_offset` is in millimetres, `yaw` is in integer degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change. M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive as the fallback.
+`Visual::Primitive(shape)` draws a team-coloured primitive sized from the kind's radius (`Capsule`, `Cuboid`, `Cylinder`, `Sphere` or `Cone`). `Visual::Body(shape, height_tiles_x100, lying)` (M4b) draws the same primitive two radii wide with its own height in hundredths of a metre (20 to 400; never a `Sphere`); `lying: true` lays a `Capsule` or `Cylinder` along the unit's facing, that long and two radii tall. `Visual::Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` loads a glTF scene; the scale and offset are in hundredths and the yaw in whole degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change. M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive look as the fallback. Anything drawn above a unit (the M4b health bar) takes its height from `present::look_top_y`, computed from the `Visual`, so the art pass changes that one function. Unit kinds are in `visuals.ron` today; buildings are drawn by `crates/game/src/buildings.rs`.
 
 ## glTF import rules
 

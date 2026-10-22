@@ -22,6 +22,12 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-22 at `rules_version` 17, `SIM_VERSION` 14 with
+`just rerecord` (M4b unit looks: `data/visuals.ron` gave each kind its own
+look with the new `Body` visual and `Cone` shape; the file stays in
+`rules_hash`, but the sim never reads it). Every final hash and every
+`.hash` file is unchanged; only the headers differ.
+
 Recorded 2026-10-22 at `rules_version` 16, `SIM_VERSION` 14 with
 `just rerecord` (M4a combat behaviour: idle armed units and attack-movers
 acquire targets, `AttackMove` engages, complete Watchtowers and Towns

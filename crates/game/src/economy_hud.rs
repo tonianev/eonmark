@@ -8,9 +8,9 @@
 //! `docs/design/economy.md`). The pop readout is `SimView::pop`, at the
 //! right end of the top bar; since M4b the age readout and the Advance
 //! button hang under it on `age_hud`'s age strip, so the top bar's room
-//! goes to the readouts. Its texts never wrap: a bar too full for the
-//! window runs off its right end instead of splitting every readout onto a
-//! second line over the world.
+//! goes to the readouts. The top bar's texts never wrap: a bar too full
+//! for the window runs off its right end instead of splitting every
+//! readout onto a second line over the world.
 //!
 //! The message line shows the local player's last command rejection, in the
 //! words of `data/rules/strings/en.ron`, or a short notice, for

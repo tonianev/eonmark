@@ -79,6 +79,8 @@ pub struct FrameStats {
     occluded: bool,
     /// Focus and occlusion changes as `(label, seconds)`.
     window_events: Vec<(&'static str, f64)>,
+    /// The exit lines were printed.
+    printed: bool,
 }
 
 /// Mean, 95th percentile and maximum of the samples (milliseconds).
@@ -173,6 +175,11 @@ impl FrameStats {
         )
     }
 
+    /// `true` once the exit lines were printed.
+    pub fn printed(&self) -> bool {
+        self.printed
+    }
+
     /// The `frames=... fps=...` line.
     pub fn rate_line(&self) -> String {
         let seconds = self.samples_ms.iter().sum::<f64>() / 1000.0;
@@ -259,7 +266,11 @@ impl Plugin for FrameStatsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameStats>()
             .add_systems(Update, (window_events, sample_frame).chain())
-            .add_systems(Last, print_on_exit);
+            // After `bevy::window::ExitSystems`: the red close button's
+            // `AppExit` is written there by `exit_on_all_closed`, in `Last`,
+            // and the winit runner exits right after that frame, as for the
+            // recorder (`sim_driver::finish_recorder_on_exit`).
+            .add_systems(Last, print_on_exit.after(bevy::window::ExitSystems));
         if let Some((goal, total)) = self.arrival {
             app.insert_resource(ArrivalProxy::new(goal, total))
                 .add_systems(FixedPostUpdate, observe_arrivals);
@@ -312,9 +323,12 @@ fn observe_arrivals(sim: NonSend<SimHandle>, mut proxy: ResMut<ArrivalProxy>) {
     proxy.observe(view.units().map(|u| (u.pos, u.post.is_some())), sim.tick());
 }
 
-fn print_on_exit(
+/// Runs in `Last`, after `bevy::window::ExitSystems`: on the frame an
+/// `AppExit` was written (Cmd-Q, `--exit-after-seconds`, the red close
+/// button, a failed dev hierarchy check), print the summary lines.
+pub(crate) fn print_on_exit(
     mut exits: MessageReader<AppExit>,
-    stats: Res<FrameStats>,
+    mut stats: ResMut<FrameStats>,
     driver: Res<DriverStats>,
     arrival: Option<Res<ArrivalProxy>>,
     sim: NonSend<SimHandle>,
@@ -323,6 +337,7 @@ fn print_on_exit(
         return;
     }
     exits.clear();
+    stats.printed = true;
     // Every line carries the `frame_stats: ` prefix that
     // `scripts/m2_checks.sh` (check 6) and docs/PLAYTEST.md grep for.
     println!("{STDOUT_PREFIX}{}", stats.frame_line());
@@ -400,6 +415,35 @@ mod tests {
             s.window_line(),
             "window focused=1/3 occluded=1/3 events=unfocused@0.15s,occluded@0.20s,visible@0.30s"
         );
+    }
+
+    /// The red close button: `bevy_window::exit_on_all_closed` writes
+    /// `AppExit` in `Last`, inside `ExitSystems`, and the winit runner
+    /// exits right after that frame, so the lines must print in that same
+    /// frame. A `WindowPlugin` with no window stands in for the closed one.
+    #[test]
+    fn prints_when_the_window_closes() {
+        use crate::sim_driver::{LocalInput, SimPlugin};
+        let rules =
+            rules::Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .expect("rules load");
+        let handle = SimHandle::from_setup(sim::MatchSetup::scenario(&rules, 1), rules);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins((
+            bevy::window::WindowPlugin {
+                primary_window: None,
+                ..default()
+            },
+            SimPlugin::new(handle, Box::new(LocalInput)),
+            FrameStatsPlugin { arrival: None },
+        ));
+        app.update();
+        assert_eq!(
+            app.should_exit(),
+            Some(AppExit::Success),
+            "no window open: exit_on_all_closed exits"
+        );
+        assert!(app.world().resource::<FrameStats>().printed());
     }
 
     #[test]

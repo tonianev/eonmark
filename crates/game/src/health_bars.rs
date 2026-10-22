@@ -522,6 +522,14 @@ impl HierarchyCheck {
 /// found logs an error naming the entities and writes
 /// `AppExit::from_code(1)` (not a panic, so the replay still gets its
 /// trailer); on any exit the `hierarchy_check:` line is printed.
+///
+/// Both systems run after `bevy::window::ExitSystems`: the red close
+/// button's `AppExit` is written there by `exit_on_all_closed`, in `Last`,
+/// and the winit runner exits right after that frame, so a report that ran
+/// earlier would never see it (the recorder has the same ordering). They
+/// also run before `frame_stats`' exit lines, so a failing check's frame
+/// still prints them. Without `WindowPlugin` (tests) the set is only a
+/// label.
 #[cfg(any(test, feature = "dev"))]
 pub struct BarHierarchyCheckPlugin;
 
@@ -532,6 +540,8 @@ impl Plugin for BarHierarchyCheckPlugin {
             Last,
             (check_bar_hierarchy, report_bar_hierarchy)
                 .chain()
+                .after(bevy::window::ExitSystems)
+                .before(crate::frame_stats::print_on_exit)
                 .before(crate::sim_driver::finish_recorder_on_exit),
         );
     }
@@ -851,6 +861,63 @@ mod tests {
             HierarchyCheck::default()
                 .line()
                 .starts_with("hierarchy_check: ok frames=0")
+        );
+    }
+
+    /// The red close button: `bevy_window::exit_on_all_closed` writes
+    /// `AppExit` in `Last`, inside `ExitSystems`, and the winit runner
+    /// exits right after that frame, so the check must print in that same
+    /// frame. A `WindowPlugin` with no window stands in for the closed one:
+    /// `exit_on_all_closed` exits on the first update.
+    #[test]
+    fn hierarchy_check_reports_when_the_window_closes() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::window::WindowPlugin {
+                primary_window: None,
+                ..default()
+            })
+            .add_plugins(BarHierarchyCheckPlugin);
+        app.update();
+        assert_eq!(
+            app.should_exit(),
+            Some(AppExit::Success),
+            "no window open: exit_on_all_closed exits"
+        );
+        let check = app.world().resource::<HierarchyCheck>();
+        assert_eq!(check.frames, 1);
+        assert!(check.reported, "the line was printed: {}", check.line());
+    }
+
+    /// A failed check ends the session; the frame-time lines still print on
+    /// that frame, after the check wrote its `AppExit`.
+    #[test]
+    fn a_failed_check_still_prints_the_frame_stats_lines() {
+        let rules = rules();
+        let handle = SimHandle::from_setup(sim::MatchSetup::scenario(&rules, 7), rules);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins((
+            // The window messages frame_stats reads, and no exit of its own.
+            bevy::window::WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            },
+            SimPlugin::new(handle, Box::new(crate::sim_driver::LocalInput)),
+            BarHierarchyCheckPlugin,
+            crate::frame_stats::FrameStatsPlugin { arrival: None },
+        ));
+        let parent = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .spawn((SelectionRing(UnitId(1)), ChildOf(parent)));
+        app.update();
+        assert_eq!(app.should_exit(), Some(AppExit::from_code(1)));
+        assert!(app.world().resource::<HierarchyCheck>().reported);
+        assert!(
+            app.world()
+                .resource::<crate::frame_stats::FrameStats>()
+                .printed(),
+            "frame_stats printed on the failing frame"
         );
     }
 

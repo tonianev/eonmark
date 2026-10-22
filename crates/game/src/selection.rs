@@ -802,12 +802,15 @@ pub fn spawn_move_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3,
 }
 
 /// Spawn the attack marker (a ring with a cross) at `at` (world): the
-/// target of an `Attack` or the point of an `AttackMove`. Expires like the
-/// move marker ([`expire_move_markers`]), and is never a child of a unit.
+/// target of an `Attack` (a building's roof, `orders::target_point`) or the
+/// point of an `AttackMove`. Expires like the move marker
+/// ([`expire_move_markers`]), and is never a child of a unit.
 pub fn spawn_attack_marker(commands: &mut Commands, assets: &RingAssets, at: Vec3, now_secs: f32) {
     spawn_marker(commands, "Attack marker", &assets.attack, at, now_secs);
 }
 
+/// A marker [`RING_Y`] above `at`: on the ground for a ground point or a
+/// unit, on the roof for a building.
 fn spawn_marker(
     commands: &mut Commands,
     name: &'static str,
@@ -825,7 +828,7 @@ fn spawn_marker(
             line_config: ring_line_config(),
             ..default()
         },
-        Transform::from_translation(Vec3::new(at.x, RING_Y, at.z))
+        Transform::from_translation(at + Vec3::Y * RING_Y)
             .with_scale(Vec3::splat(MOVE_MARKER_RADIUS)),
     ));
 }
@@ -1194,6 +1197,42 @@ mod tests {
         for color in attack.list_colors.iter().chain(&attack.strip_colors) {
             assert!(color.red.is_nan() || *color == hue, "{color:?}");
         }
+    }
+
+    /// A marker stands at the height it is given plus the ring lift: on the
+    /// ground for a ground point or a unit, on the roof for an attack on a
+    /// building (`orders::target_point`), never inside the opaque box.
+    #[test]
+    fn markers_keep_the_height_they_are_given() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(RingAssets {
+            selection: Handle::default(),
+            marker: Handle::default(),
+            attack: Handle::default(),
+        });
+        world
+            .run_system_once(|mut commands: Commands, assets: Res<RingAssets>| {
+                spawn_attack_marker(&mut commands, &assets, Vec3::new(4.0, 1.3, -6.0), 0.0);
+                spawn_move_marker(&mut commands, &assets, Vec3::new(1.0, 0.0, 2.0), 0.0);
+            })
+            .unwrap();
+        let mut q = world.query::<(&Name, &Transform)>();
+        let mut placed: Vec<(String, Vec3)> = q
+            .iter(&world)
+            .map(|(n, t)| (n.as_str().to_string(), t.translation))
+            .collect();
+        placed.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            placed,
+            [
+                (
+                    "Attack marker".to_string(),
+                    Vec3::new(4.0, 1.3 + RING_Y, -6.0)
+                ),
+                ("Move marker".to_string(), Vec3::new(1.0, RING_Y, 2.0)),
+            ]
+        );
     }
 
     #[test]

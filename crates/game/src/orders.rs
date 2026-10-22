@@ -31,7 +31,8 @@
 //! Feedback (M4b): attack-move mode shows the crosshair cursor
 //! ([`sync_attack_cursor`]); an `Attack` or `AttackMove` leaves the attack
 //! marker (a ring with a cross, `selection::spawn_attack_marker`) at its
-//! target, other ground orders the plain move marker. The command card has
+//! target (a building's roof, [`target_point`]), other ground orders the
+//! plain move marker. The command card has
 //! an Attack-move button for armed selections.
 //!
 //! [`OrderMode::Place`] is the build-placement mode the command card enters;
@@ -386,14 +387,18 @@ pub fn context_order(
     })
 }
 
-/// Where an attack marker for `target` goes: the unit's position or the
-/// building's footprint centre, on the ground.
+/// Where an attack marker for `target` goes: a unit's position on the
+/// ground, or the roof of a building's box over its footprint centre (a
+/// site's box at its current height). A building is an opaque box standing
+/// on the ground, so a marker at its ground centre would be drawn inside it
+/// and depth-tested away.
 pub fn target_point(view: &SimView<'_>, rules: &Rules, target: TargetId) -> Option<Vec3> {
     match target {
         TargetId::Unit(id) => view.unit(id).map(|u| world_from_sim(u.pos, 0.0)),
-        TargetId::Building(id) => view
-            .building(id)
-            .map(|b| building_transform(rules, b).translation),
+        TargetId::Building(id) => view.building(id).map(|b| {
+            let t = building_transform(rules, b);
+            t.translation + Vec3::Y * t.scale.y
+        }),
     }
 }
 
@@ -877,6 +882,40 @@ mod tests {
             None
         );
         assert!(pending.is_empty());
+    }
+
+    /// Where the attack marker goes: a unit's position on the ground, a
+    /// building's roof over its footprint centre. Buildings are opaque
+    /// boxes standing on the ground, so a marker at their ground centre
+    /// would be drawn inside the box and never seen.
+    #[test]
+    fn attack_marker_points_sit_on_the_target() {
+        let sim = arena();
+        let (view, rules) = (sim.view(), sim.rules());
+        let unit = view.unit(UnitId(13)).unwrap();
+        assert_eq!(
+            target_point(&view, rules, TargetId::Unit(UnitId(13))),
+            Some(world_from_sim(unit.pos, 0.0))
+        );
+        // P1's 1 x 1 Watchtower, P0's rising Scriptorium site, P1's Seat.
+        for id in [5, 3, 2] {
+            let b = view.building(BuildingId(id)).unwrap();
+            let t = building_transform(rules, b);
+            let p = target_point(&view, rules, TargetId::Building(BuildingId(id))).unwrap();
+            assert_eq!(
+                (p.x, p.z),
+                (t.translation.x, t.translation.z),
+                "over the footprint centre of {id}"
+            );
+            assert!(
+                p.y >= t.translation.y + t.scale.y,
+                "on the roof of {id}: {p} vs {t:?}"
+            );
+        }
+        assert_eq!(
+            target_point(&view, rules, TargetId::Building(BuildingId(99))),
+            None
+        );
     }
 
     #[test]

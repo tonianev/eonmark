@@ -35,7 +35,11 @@
 //! and research queue). One selected unit of either player, or the
 //! selected own building, also shows its hit points (M4b); another
 //! player's building is not selectable yet (`selection::on_building_click`),
-//! so its hit points show only on its bar once it is damaged.
+//! so its hit points show only on its bar once it is damaged. The panel
+//! takes the room left of the card, up to [`INFO_WIDTH_PX`]: each line a
+//! Scriptorium shows fits one row of that, so its five lines (name, hit
+//! points, workers, researched, queue) fit the bar and the queue line stays
+//! on screen.
 //!
 //! Buttons issue commands from a `Pointer<Click>` observer, like the Stop
 //! button, never from `Interaction::Pressed` (a click would fire twice);
@@ -72,8 +76,14 @@ pub const CARD_GAP_PX: f32 = 4.0;
 pub const CARD_COLUMNS: usize = 4;
 /// Card button label size, logical px.
 pub const CARD_FONT_PX: f32 = 12.0;
-/// Width of the selection panel on the left of the bar, logical px.
-pub const INFO_WIDTH_PX: f32 = 300.0;
+/// Width of the selection panel on the left of the bar, logical px, when
+/// the window leaves that much room before the card (the default 1280 px
+/// window does). Every line a Scriptorium shows fits one row of it, the
+/// longest being its queue of the four level III researches and a Scribe,
+/// "Queue: Statecraft III 99%, Letters III, Trade III, Arms III, Scribe"
+/// (67 characters of 8.4 px at the 14 px HUD font): its five lines then
+/// fit the 88 px between the bar's top padding and the window's bottom.
+pub const INFO_WIDTH_PX: f32 = 580.0;
 
 /// What a card button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,20 +189,34 @@ pub fn spawn_card(
     root: Query<Entity, With<HudRoot>>,
 ) {
     if let Ok(bar) = bar.single() {
+        // The panel fills the room left of the card from the bar's top
+        // padding down, so the card and the Stop button stay at the right
+        // end; its text is at most INFO_WIDTH_PX wide, and a window too
+        // narrow for that narrows it (the text wraps) instead of laying it
+        // over the card. (Not an auto margin: taffy 0.10.1 still applies the
+        // bar's `FlexEnd` after giving the free space to the margin.)
         let info = commands
             .spawn((
                 Name::new("Selection panel"),
                 Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(PADDING_PX),
-                    top: Val::Px(PADDING_PX),
-                    width: Val::Px(INFO_WIDTH_PX),
+                    flex_grow: 1.0,
+                    flex_basis: Val::Px(0.0),
+                    min_width: Val::Px(0.0),
+                    align_self: AlignSelf::FlexStart,
                     ..default()
                 },
                 Pickable::IGNORE,
             ))
             .with_children(|panel| {
-                panel.spawn((SelectionInfo, text("", HUD_FONT_PX), Pickable::IGNORE));
+                panel.spawn((
+                    SelectionInfo,
+                    text("", HUD_FONT_PX),
+                    Node {
+                        max_width: Val::Px(INFO_WIDTH_PX),
+                        ..default()
+                    },
+                    Pickable::IGNORE,
+                ));
             })
             .id();
         let width =
@@ -209,16 +233,14 @@ pub fn spawn_card(
                     align_content: AlignContent::Center,
                     column_gap: Val::Px(CARD_GAP_PX),
                     row_gap: Val::Px(CARD_GAP_PX),
-                    margin: UiRect::right(Val::Px(PADDING_PX)),
+                    margin: UiRect::horizontal(Val::Px(PADDING_PX)),
                     ..default()
                 },
                 Pickable::IGNORE,
             ))
             .id();
-        // The grid goes before the Stop button, which stays at the right
-        // end; the panel is absolutely positioned, so its place is moot.
-        commands.entity(bar).insert_children(0, &[grid]);
-        commands.entity(bar).add_children(&[info]);
+        // The panel, then the grid, then the Stop button at the right end.
+        commands.entity(bar).insert_children(0, &[info, grid]);
     }
     if let Ok(root) = root.single() {
         commands.entity(root).with_children(|root| {
@@ -1889,6 +1911,152 @@ mod tests {
             lines[lines.len() - 1].starts_with("Queue: Trade II "),
             "{text}"
         );
+    }
+
+    /// Bevy 0.19.1's default font, the only one the game uses until M7
+    /// (`bevy_text-0.19.1/src/FiraMono-subset.ttf`), is monospace: every
+    /// glyph advances 600 of its 1000 units per em.
+    const GLYPH_ADVANCE_EM: f32 = 0.6;
+    /// Bevy 0.19.1's default line height, `LineHeight::RelativeToFont(1.2)`.
+    const LINE_HEIGHT_EM: f32 = 1.2;
+
+    /// How many characters of `font_px` text fit on one line `width_px` wide.
+    fn chars_per_line(width_px: f32, font_px: f32) -> usize {
+        (width_px / (GLYPH_ADVANCE_EM * font_px)).floor() as usize
+    }
+
+    /// How many rows of HUD text fit in the selection panel: from the
+    /// bottom bar's top padding to the bottom of the window.
+    fn panel_rows() -> usize {
+        ((BOTTOM_BAR_HEIGHT_PX - PADDING_PX) / (LINE_HEIGHT_EM * HUD_FONT_PX)).floor() as usize
+    }
+
+    /// The selection panel's text fits the bottom bar: every line on one
+    /// row of `INFO_WIDTH_PX`, and the lines within the rows from the bar's
+    /// top padding to the bottom of the window.
+    fn assert_fits_the_panel(text: &str) {
+        let (rows, width) = (panel_rows(), chars_per_line(INFO_WIDTH_PX, HUD_FONT_PX));
+        assert!(
+            text.lines().count() <= rows,
+            "{} lines, {rows} fit:\n{text}",
+            text.lines().count()
+        );
+        for line in text.lines() {
+            assert!(
+                line.chars().count() <= width,
+                "{} characters, {width} fit on a row: {line}",
+                line.chars().count()
+            );
+        }
+    }
+
+    /// A Scriptorium's panel at its longest fits the bottom bar, its queue
+    /// line included: with every tech line at level III, and with every
+    /// line at level II and a full queue of the four level III researches
+    /// (the longest name first, at two-digit progress) and a Scribe. The
+    /// panel, the card and the Stop button fit the default window side by
+    /// side.
+    #[test]
+    fn the_scriptoriums_longest_panel_fits_the_bottom_bar() {
+        assert_eq!(panel_rows(), 5);
+        let card = CARD_COLUMNS as f32 * CARD_BUTTON_PX.x + (CARD_COLUMNS - 1) as f32 * CARD_GAP_PX;
+        // The bar's padding, the panel, the card with its margins, the
+        // Stop button and the bar's padding.
+        let row: f32 = [
+            PADDING_PX,
+            INFO_WIDTH_PX,
+            PADDING_PX,
+            card,
+            PADDING_PX,
+            crate::hud::BUTTON_SIZE_PX.x,
+            PADDING_PX,
+        ]
+        .iter()
+        .sum();
+        assert!(
+            row <= crate::app::WINDOW_SIZE.0 as f32,
+            "the bottom bar needs {row} px"
+        );
+        let rules = rules();
+        let s = strings();
+        let b = BuildingId(3);
+        let t = |id: &str| tech(&rules, id);
+        let scribe = || Command::Train {
+            building: b,
+            kind: unit(&rules, "scribe"),
+        };
+        let levels = |top: u8| {
+            rules
+                .techs
+                .iter()
+                .filter(|x| x.level <= top)
+                .map(|x| debug_research(t(&x.id)))
+                .collect::<Vec<_>>()
+        };
+
+        // Every line at level III, five Scribes queued.
+        let mut lab = with_scriptorium();
+        let events = lab.run(levels(3).into_iter().chain(to_charter(&rules)));
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let events = lab.run(
+            [grant(res(&rules, "grain"), 150)]
+                .into_iter()
+                .chain((0..5).map(|_| scribe())),
+        );
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let text = selection_text(&lab.sim.view(), &rules, &s, &selected(b));
+        assert_eq!(
+            text.lines().nth(3),
+            Some("Researched: Arms III, Statecraft III, Trade III, Letters III"),
+            "{text}"
+        );
+        assert_fits_the_panel(&text);
+
+        // Every line at level II, the four level III researches and a
+        // Scribe queued, the head past 10%.
+        let mut lab = with_scriptorium();
+        let events = lab.run(levels(2).into_iter().chain(to_charter(&rules)));
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let research = |id| Command::Research {
+            building: b,
+            tech: t(id),
+        };
+        let events = lab.run([
+            grant(res(&rules, "lore"), 800),
+            grant(res(&rules, "ore"), 150),
+            grant(res(&rules, "grain"), 30),
+            research("statecraft_3"),
+            research("letters_3"),
+            research("trade_3"),
+            research("arms_3"),
+            scribe(),
+        ]);
+        assert!(rejections(&events).is_empty(), "{events:?}");
+        let Some(QueueItem::Research { ticks, .. }) = lab
+            .sim
+            .view()
+            .building(b)
+            .and_then(|b| b.queue.first())
+            .map(|e| e.item)
+        else {
+            panic!("Statecraft III leads the queue");
+        };
+        for _ in 0..ticks / 8 {
+            lab.sim.step(&[]);
+        }
+        let view = lab.sim.view();
+        let pct = research_percent(&view, LOCAL_PLAYER, t("statecraft_3")).unwrap();
+        assert!((10..100).contains(&pct), "{pct}");
+        let text = selection_text(&view, &rules, &s, &selected(b));
+        assert_eq!(
+            text.lines().skip(3).collect::<Vec<_>>(),
+            [
+                "Researched: Arms II, Statecraft II, Trade II, Letters II".to_string(),
+                format!("Queue: Statecraft III {pct}%, Letters III, Trade III, Arms III, Scribe"),
+            ],
+            "{text}"
+        );
+        assert_fits_the_panel(&text);
     }
 
     /// The command each button sends, and the click: an enabled Research

@@ -46,7 +46,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 14 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 16 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -178,7 +178,8 @@ validator also forbids a `Military` ramp on a `Civilian`. `vision_tiles` is
 read in M7. The combat fields and the counter table are validated, and the
 sim reads `hp`, the `attack` damage, range and cooldown and the counter
 table since the M4a combat core slice (`rules_version` 15); `prefer` is
-read from the combat behaviour slice, with target acquisition.
+read since the combat behaviour slice (`rules_version` 16), by target
+acquisition.
 
 | Field | Meaning |
 |-------|---------|
@@ -224,7 +225,10 @@ the Skirmisher's counter hit (10 x 2.5 = 25) kills it in two hits at every
 Arms level (46 HP grows to 50, 55 and 60, the hit to 27, 30 and 32), and 51
 to 73 HP would take three. The stats and counters are starting values that
 the seeded counter tests of `docs/design/combat.md` must accept; propose a
-change as a hits-to-kill table per Arms level.
+change as a hits-to-kill table per Arms level. The M4a combat behaviour
+slice ran those tests on them (`cargo test -p sim counters`): each of the
+four 10 vs 10 matchups wins 20 of 20 seeds with the values above (the
+tables are in `docs/design/combat.md`, "Counter tests"), so none changed.
 
 The costs come from the pure functions in `crates/rules/src/costs.rs`
 (`unit_cost`, `building_cost`), which the sim, the HUD and the bot share.
@@ -292,8 +296,8 @@ Watchtower only through `DebugPlaceBuilding` until a `Build` of one is
 tested). Gathering (`rules_version` 9) reads the rest of `gather`:
 `resource`, `worker` (which unit kind may take the slots and seeks them
 when idle) and `rate_per_worker` (credited per worked slot). `vision_tiles`
-is read in M7, `attack` from the M4a combat behaviour slice (the Watchtower
-and Town shooters). `hp` is a building's and a site's hit points from
+is read in M7, `attack` since the M4a combat behaviour slice
+(`rules_version` 16: the Watchtower and Town shooters). `hp` is a building's and a site's hit points from
 placement; since the M4a combat core slice it takes damage, and every
 building or site at 0 HP is destroyed except a complete Town, which stays
 at 0.
@@ -508,7 +512,7 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=15 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`
+`OK rules_version=16 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 factions=1 maps=plains_1v1 strings=en`
 (the repository is at 14; the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`

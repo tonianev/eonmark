@@ -21,7 +21,7 @@ M0, M1, M2, M3a and M3b are merged (M3a as PR #26, M3b as PR #31). M4a, the
 simulation half of tech, ages and combat, is merged as PR #35 at
 `SIM_VERSION` 14 and `rules_version` 16.
 
-M4b, the game half, is complete on PR #38 at `SIM_VERSION` 14 and
+M4b, the game half, is on PR #38 at `SIM_VERSION` 14 and
 `rules_version` 17 (the bump is the unit looks: `data/visuals.ron` is in
 `rules_hash`), with eight golden fixtures. It adds a low-poly look per unit
 kind, health bars as flat top-level entities with a dev-only hierarchy
@@ -61,20 +61,46 @@ The exact commands are in `docs/PLAYTEST.md`, "Owner's Mac checklist (M4b)":
 
 Next is M5a, the simulation half of attrition, supply, annexation and
 victory. The owner answered the 15 open questions of its implementation
-plan on 2026-10-22, taking the plan's default on every one (a territory tie at tick 54000 is a draw; a
-flipped Town keeps 250 permille of its hit points; queues are refunded to
-the old owner and sites lose their payment at a flip; Muster Halls and
-Engine Yards transfer while Watchtowers and sites stay; a contested Town
-pauses its queue and rejects Train and Research; the annex-hold guard rule
-is on; only complete Towns count for "owns no Towns"; a flip may exceed the
-town limit; the starting attrition, Harrying and Charter numbers; supply
-hatching waits for M7; Yeomen suffer attrition; the annexation attacker and
-defender sets; the Seat flag stays after capture; `just m5a-checks` stays a
-local proxy; the local m1 proptest cases may be lowered if
-`cargo test -p sim` goes over 10 s on the dev Mac, while CI keeps 256).
-The decisions are to be recorded in the ROADMAP's M5a Notes when M5a
-starts, as M4a's and M4b's were. Under decision 3, M5a may start while
-M4b's line 2 waits for that Mac session, as M3b's fps line does. A milestone is done when
+plan on 2026-10-22, taking the plan's default on every one. Until M5a
+starts this list is their only record in the repository; they are then
+copied into the ROADMAP's M5a Notes with these numbers, as M4a's and M4b's
+were:
+
+1. An exact territory tie at tick 54000 is `Outcome::Draw` (M5b's CSV
+   writes `draw`).
+2. A Town flips at 0 HP, and its HP is then set to
+   `annexation_town_hp_permille: 250` of its kind's maximum:
+   floor(2000 * 250 / 1000) = 500.
+3. At a flip, the queue entries of each transferred building are refunded
+   to the old owner, clamped like `Cancel`; each transferred site has its
+   `paid` set to 0, with no refund.
+4. Every building and site attributed to the Town transfers to the
+   attacker, Muster Halls and Engine Yards included. Only
+   `stays_on_annexation` kinds stay with the old owner: the Watchtower,
+   complete or a site, re-attributed to the old owner's nearest
+   uncontested Town, or to none.
+5. A contested Town pauses its queue and rejects new Train and Research.
+6. The annex-hold guard rule is on: adjacent Infantry and Cavalry at an
+   enemy Town at 0 HP hit only targets already in range and never chase.
+7. Only complete Towns count for "owns no Towns", checked at the flip.
+8. A flip may exceed the town limit; only new Town sites are gated.
+9. Starting data: attrition at age gap 1 is 2 HP per pulse; Harrying I
+   costs 75 Ore + 100 Lore and takes 40 s, Harrying II 150 Ore + 200 Lore
+   and 60 s; the Charter Age Harrying bonus is 0 until M6; the Yield Cap
+   decay is implemented with step 0 (off).
+10. Supply hatching in the field texture's A channel waits for M7, with
+    fog; M5a ships the selection ring.
+11. Yeomen are exposed to attrition.
+12. Annexation attackers are Infantry and Cavalry; defenders are every
+    non-Civilian kind, the Supply Wain and the Mangonel included.
+13. The Seat flag stays on the building after capture.
+14. `just m5a-checks` stays a local, PR-pasted proxy, not in CI's
+    game-linux job.
+15. The local m1 proptest cases may be lowered if `cargo test -p sim` goes
+    over 10 s on the dev Mac; CI keeps 256.
+
+Under the owner's M4b decision 3, M5a may start while M4b's line 2 waits
+for that Mac session, as M3b's fps line does. A milestone is done when
 every acceptance checkbox in `docs/ROADMAP.md` is ticked with pasted
 command output in a merged PR.
 
@@ -86,7 +112,7 @@ command output in a merged PR.
 | Per-system design | `docs/design/*.md` | Complete, with target numbers |
 | Dependency pins and policy | `docs/DEPENDENCIES.md`, `docs/adr/` | Complete |
 | Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b (PR #38) adds the `enemy_outpost` scenarios, their golden and `SimView::building_hp`; next, M5a (attrition, supply, annexation, victory); `crates/ai` holds the M0 bots until M5b |
-| Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b complete on PR #38: unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window (line 2 waits for the Mac) |
+| Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b on PR #38 (line 1 ticked; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window |
 | CI and release automation | `.github/workflows/`, `scripts/`, `justfile` | In use since M0: every PR runs check, headless, game-linux, deny and hash-parity |
 
 ## Read these first, in this order

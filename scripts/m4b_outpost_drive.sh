@@ -36,12 +36,19 @@
 # takes 1.5 s, about 30 ticks, so the later clicks of a step land later).
 #
 # Pass when the game exits 0 with no ERROR line, `sim-cli verify` prints
-# OK for the recorded replay, its ticks are past 6000, and the step
-# pictures show the sequence: the two sites, the research card, the Muster
-# Hall's queue, "Masonry Age", the Engine Yard's Mangonels, and at tick 6000
-# no tower and "Watchtower destroyed" on the message line. Under lavapipe
-# the sim keeps its 20 ticks a second, so a drive takes about five minutes.
-# Run it from the repository root (`sim-cli verify` reads `data/`).
+# OK for the recorded replay with no truncation warning, its ticks are past
+# 6000, and the step pictures show the sequence: the two sites, the research
+# card, the Muster Hall's queue, "Masonry Age", the Engine Yard's Mangonels,
+# and at tick 6000 no tower and "Watchtower destroyed" on the message line.
+# The script itself exits 1 when its Xvfb does not start, when the game
+# exits early, non-zero or with an ERROR line, when `verify` fails, and when
+# the replay lacks the `EONRDONE` clean-exit trailer (`verify` only warns
+# about that and still prints OK, and closing the window is the path that
+# once lost the trailer). Xvfb picks a free display itself (`-displayfd`),
+# so two drives, or a drive beside another windowed run, never share an X
+# server and each other's clicks. Under lavapipe the sim keeps its 20 ticks
+# a second, so a drive takes about five minutes. Run it from the repository
+# root (`sim-cli verify` reads `data/`).
 #
 # Needs Xvfb, xdotool, python3 (ctypes and libX11 for the close), Mesa's
 # lavapipe and the X libraries render_smoke.sh lists. Usage:
@@ -62,10 +69,12 @@ icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)
 
 mkdir -p "$out"
 log="$out/game.log"
-display=":$(( 90 + RANDOM % 9 ))"
-Xvfb "$display" -screen 0 1280x800x24 >"$out/xvfb.log" 2>&1 &
+say() { echo "drive: $*"; }
+# Xvfb takes the first free display and writes its number to fd 3 once it
+# accepts connections.
+rm -f "$out/display"
+Xvfb -displayfd 3 -screen 0 1280x800x24 3>"$out/display" >"$out/xvfb.log" 2>&1 &
 xvfb=$!
-export DISPLAY="$display"
 game=""
 cleanup() {
   if [ -n "$game" ]; then kill "$game" 2>/dev/null || true; fi
@@ -73,7 +82,17 @@ cleanup() {
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
-sleep 2
+for _ in $(seq 100); do
+  [ -s "$out/display" ] && break
+  kill -0 "$xvfb" 2>/dev/null || break
+  sleep 0.1
+done
+if ! [ -s "$out/display" ] || ! kill -0 "$xvfb" 2>/dev/null; then
+  echo "error: Xvfb did not start (see $out/xvfb.log)" >&2; exit 1
+fi
+display=":$(tr -d '[:space:]' <"$out/display")"
+export DISPLAY="$display"
+say "Xvfb $xvfb on $display"
 
 # One `--screenshot-at` per step: the log line is the step's tick signal.
 steps=(40 60 100 900 1250 2200 2240 3700 5600 5620 6000)
@@ -87,7 +106,6 @@ VK_ICD_FILENAMES="$icd" "$bin" --background --scenario enemy_outpost \
   >"$log" 2>&1 &
 game=$!
 
-say() { echo "drive: $*"; }
 # Wait until the game logs that the sim reached tick $1.
 at_tick() {
   local t="$1"
@@ -233,4 +251,12 @@ fi
 # The game prints the path it records to as `replay: <path>` at start-up.
 replay=$(sed -n 's/^replay: //p' "$log" | head -1)
 say "verify $replay"
-"$simcli" verify "$replay"
+verified=0
+"$simcli" verify "$replay" 2>"$out/verify.err" || verified=$?
+cat "$out/verify.err" >&2
+[ "$verified" -eq 0 ] || exit "$verified"
+# Only the truncation warning counts, as in scripts/m2_checks.sh step 3.
+if grep -q 'warning:.*no clean-exit trailer' "$out/verify.err" \
+  || [ "$(tail -c 8 "$replay")" != EONRDONE ]; then
+  say "the replay has no clean-exit trailer"; exit 1
+fi

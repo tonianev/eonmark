@@ -2301,6 +2301,58 @@ mod tests {
         );
     }
 
+    /// A disabled button is greyed and an enabled one follows the
+    /// pointer, card button or not: the Advance button carries a
+    /// `CardState` but no `CardButton` (owner decision 7: greyed, not
+    /// hidden).
+    #[test]
+    fn button_colours_follow_any_card_state() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, card_button_colors);
+        let button = app
+            .world_mut()
+            .spawn((
+                CardState {
+                    enabled: false,
+                    tooltip: String::new(),
+                },
+                Interaction::Hovered,
+                BackgroundColor(palette::HUD_BUTTON),
+            ))
+            .with_children(|b| {
+                b.spawn(TextColor(palette::HUD_TEXT));
+            })
+            .id();
+        let read = |app: &App| {
+            let world = app.world();
+            let label = world.get::<Children>(button).unwrap()[0];
+            (
+                world.get::<BackgroundColor>(button).unwrap().0,
+                world.get::<TextColor>(label).unwrap().0,
+            )
+        };
+        app.update();
+        assert_eq!(
+            read(&app),
+            (palette::HUD_BUTTON_PRESSED, palette::HUD_DISABLED),
+            "greyed"
+        );
+        app.world_mut()
+            .get_mut::<CardState>(button)
+            .unwrap()
+            .enabled = true;
+        app.update();
+        assert_eq!(
+            read(&app),
+            (palette::HUD_BUTTON_HOVER, palette::HUD_TEXT),
+            "hovered"
+        );
+        app.world_mut().entity_mut(button).insert(Interaction::None);
+        app.update();
+        assert_eq!(read(&app), (palette::HUD_BUTTON, palette::HUD_TEXT));
+    }
+
     /// The tooltip panel sits above the bottom bar for the card's buttons
     /// and under the age strip for a button placed there.
     #[test]

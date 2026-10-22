@@ -236,14 +236,16 @@ jobs:
       # Bevy compiles WGSL only when it builds a pipeline, and a shader that
       # fails is logged while the game runs on and exits 0; this renders the
       # walkthrough on lavapipe and fails on any ERROR line (render_watchdog.rs
-      # adds one for a pipeline that never becomes ready). winit loads
-      # libxkbcommon-x11 and the X libraries at run time; the runner image
-      # lacks the first. The screenshot is uploaded for review.
+      # adds one for a pipeline that never becomes ready). Since M4b it also
+      # renders `unit_looks`, one of every unit look per team at 40 m. winit
+      # loads libxkbcommon-x11 and the X libraries at run time; the runner
+      # image lacks the first. The screenshots are uploaded for review.
       - name: Render smoke test (Xvfb, lavapipe)
         run: |
           sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2
           cargo build -p game --locked --profile ci
           scripts/render_smoke.sh target/ci/eonmark "$RUNNER_TEMP/render-smoke"
+          scripts/render_smoke.sh target/ci/eonmark "$RUNNER_TEMP/render-smoke/unit_looks" unit_looks 20,32,40 100
 
       - uses: actions/upload-artifact@v7
         if: always()

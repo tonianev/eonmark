@@ -20,6 +20,9 @@
 //! [`counter_duel_setup`], [`combat_bench`]): its offsets come from the
 //! sim's own RNG, so a stream stays plain data.
 //!
+//! [`unit_looks`] (M4b) is the one scenario that only shows something: a
+//! lineup of every unit kind per player for the 40 m silhouette screenshot.
+//!
 //! Scenarios start empty ([`StartKind::Empty`]) except
 //! [`economy_second_town`] and [`economy_walkthrough`], which start from
 //! the standard start. On
@@ -117,8 +120,9 @@ pub const ECONOMY_WALKTHROUGH_TICKS: u32 = 2400;
 /// the game's `--scenario`. The first four are the M1 golden fixtures; the
 /// M2 names are windowed scenarios (they may be recorded too);
 /// `economy_second_town` is the M3a golden fixture, `economy_walkthrough`
-/// the M3b one and `combat_skirmish` the M4a one.
-pub const NAMES: [&str; 11] = [
+/// the M3b one and `combat_skirmish` the M4a one; `unit_looks` (M4b) is
+/// windowed only.
+pub const NAMES: [&str; 12] = [
     "move_500",
     "move_500_short",
     "group_spiral",
@@ -130,6 +134,7 @@ pub const NAMES: [&str; 11] = [
     "economy_second_town",
     "economy_walkthrough",
     "combat_skirmish",
+    "unit_looks",
 ];
 
 /// Spawn rows of [`bench_cross`]: a band along the west side from the
@@ -1009,6 +1014,50 @@ pub fn combat_bench(rules: &Rules, units: u16, seed: u64) -> (MatchSetup, Stream
     (setup, stream)
 }
 
+/// Length of [`unit_looks`] (informational: the windowed game runs until
+/// it exits).
+pub const UNIT_LOOKS_TICKS: u32 = 600;
+/// Rows of [`unit_looks`]: P0's lineup along y 25, P1's along y 40, both in
+/// the all-grass west rectangle of `plains_1v1` (x 0..43, y 24..41). The
+/// 15 tiles between them are beyond every kind's reach (6 tiles, the
+/// Mangonel's 8.5), so nothing fights.
+pub const UNIT_LOOKS_ROWS: [i32; 2] = [25, 40];
+/// Column of the first kind in [`unit_looks`]; kind `k` (in `units.ron`
+/// order) stands at `UNIT_LOOKS_FIRST_X + k * UNIT_LOOKS_STEP_X`.
+pub const UNIT_LOOKS_FIRST_X: i32 = 6;
+/// Columns between neighbours in [`unit_looks`].
+pub const UNIT_LOOKS_STEP_X: i32 = 4;
+
+/// The M4b looks lineup (`--scenario unit_looks`), the 40 m silhouette
+/// check of `docs/ART_STYLE.md`: on an empty start on `plains_1v1` (seed
+/// 1), during tick 0 each player `DebugSpawn`s one unit of every kind in
+/// `units.ron` order, P0 along row [`UNIT_LOOKS_ROWS`]`[0]` and P1 along
+/// row [`UNIT_LOOKS_ROWS`]`[1]`, kind `k` at column
+/// `UNIT_LOOKS_FIRST_X + k * UNIT_LOOKS_STEP_X`, so with the 8 kinds P0's
+/// units are `UnitId(1..=8)` and P1's `UnitId(9..=16)`. Nothing else is
+/// issued and nothing fights. Windowed only, never a fixture. Length
+/// [`UNIT_LOOKS_TICKS`].
+pub fn unit_looks(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, 1);
+    let mut spawns = Vec::new();
+    for (owner, row) in (0u8..).zip(UNIT_LOOKS_ROWS) {
+        for k in 0..u16::try_from(rules.units.len()).expect("validated unit count") {
+            let x = UNIT_LOOKS_FIRST_X + i32::from(k) * UNIT_LOOKS_STEP_X;
+            spawns.push(PlayerCommand::new(
+                PlayerId(owner),
+                u32::from(k),
+                Command::DebugSpawn {
+                    owner: PlayerId(owner),
+                    kind: UnitKindId(k),
+                    at: FxVec2::from_ints(x, row),
+                    count: 1,
+                },
+            ));
+        }
+    }
+    (setup, vec![(0, spawns)])
+}
+
 /// Look a scenario up by name: `(setup, stream, ticks)`.
 pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
     let (setup, stream, ticks) = match name {
@@ -1055,6 +1104,10 @@ pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
         "combat_skirmish" => {
             let (s, c) = combat_skirmish(rules);
             (s, c, COMBAT_SKIRMISH_TICKS)
+        }
+        "unit_looks" => {
+            let (s, c) = unit_looks(rules);
+            (s, c, UNIT_LOOKS_TICKS)
         }
         _ => return None,
     };
@@ -1123,6 +1176,62 @@ mod tests {
             assert_eq!(keys.len(), n, "{name}");
         }
         assert!(by_name("nope", &rules).is_none());
+    }
+
+    /// The M4b looks lineup: one unit of every kind per player on two rows
+    /// of grass, in `units.ron` order, too far apart for anything to fight.
+    #[test]
+    fn unit_looks_lines_up_every_kind_per_player_out_of_reach() {
+        let rules = rules();
+        let kinds = rules.units.len();
+        let map = crate::map::Map::from_def(rules.map(&rules.default_map).unwrap());
+        // The rows are farther apart than any kind reaches, radii included.
+        let gap_x100 = u32::try_from(UNIT_LOOKS_ROWS[1] - UNIT_LOOKS_ROWS[0]).unwrap() * 100;
+        let widest = rules
+            .units
+            .iter()
+            .map(|k| k.radius_tiles_x100)
+            .max()
+            .unwrap();
+        for kind in &rules.units {
+            if let Some(attack) = &kind.attack {
+                let reach = rules.acquire_reach(attack) + kind.radius_tiles_x100 + widest;
+                assert!(gap_x100 > reach, "{} reaches {reach}", kind.id);
+            }
+        }
+        let (setup, stream) = unit_looks(&rules);
+        assert_eq!(setup.seed, 1);
+        assert_eq!(stream.len(), 1, "only the tick-0 spawns");
+        assert_eq!(commands_at(&stream, 0).len(), 2 * kinds);
+        // 200 ticks: the spawns apply after cmd_delay and then nothing happens.
+        let sim = run(setup, rules.clone(), &stream, 200);
+        let view = sim.view();
+        assert_eq!(
+            view.unit_count(),
+            2 * kinds,
+            "every spawn applied, nobody died"
+        );
+        let mut seen = Vec::new();
+        for unit in view.units() {
+            let owner = usize::from(unit.owner.0);
+            let x = UNIT_LOOKS_FIRST_X + i32::from(unit.kind.0) * UNIT_LOOKS_STEP_X;
+            let tile = map.tile_of(FxVec2::from_ints(x, UNIT_LOOKS_ROWS[owner]));
+            assert!(map.passable(tile), "{tile:?}");
+            assert_eq!(
+                map.tile_of(unit.pos),
+                tile,
+                "{:?} stayed on its spot",
+                unit.id
+            );
+            assert_eq!(unit.damage_taken, 0, "{:?}", unit.id);
+            // P0's units first, each player's in kind order.
+            let expected_id = u32::try_from(owner * kinds).unwrap() + u32::from(unit.kind.0) + 1;
+            assert_eq!(unit.id, UnitId(expected_id));
+            seen.push((unit.owner, unit.kind));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 2 * kinds, "one of each kind per player");
     }
 
     /// The economy fixture's ids follow from the standard start: its own

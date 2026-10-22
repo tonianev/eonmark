@@ -94,7 +94,7 @@ Unit looks (M4b, `data/visuals.ron`), one silhouette per kind. Width is the kind
 | Mangonel | `Primitive(Sphere)` | Ball, 1.0 m |
 | Supply Wain | `Body(shape: Cuboid, height_tiles_x100: 60)` | Low box, 1.0 x 0.6 x 1.0 m |
 
-Two kinds share a shape only when they differ by at least 1.4 times on some axis (the Scribe's drum and the Bowman's post, the Shieldbearer's block and the Wain's low box, the Yeoman's upright pill and the Outrider's lying one); `present::tests::every_unit_kind_has_its_own_silhouette` checks it. The owner signed off on single-shape silhouettes on 2026-10-22 (ROADMAP M4b, Notes); multi-part looks wait for the art pass.
+Two kinds share a shape only when they differ by at least 1.4 times on some axis (the Scribe's drum and the Bowman's post, the Shieldbearer's block and the Wain's low box, the Yeoman's upright pill and the Outrider's lying one); `present::tests::every_unit_kind_has_its_own_silhouette` checks it. The 40 m view is `--scenario unit_looks`: one unit of each kind per team in two rows 15 m apart, framed at 40 m unless `--camera` is given (`target/ci/eonmark --background --scenario unit_looks --exit-after-seconds 40 --screenshot-at 100:looks.png`; CI's render smoke test renders it on every PR). The owner signed off on single-shape silhouettes on 2026-10-22 (ROADMAP M4b, Notes); multi-part looks wait for the art pass.
 
 Motion is procedural (bob, swing, scale pulse), not animation clips, in v0.1.
 

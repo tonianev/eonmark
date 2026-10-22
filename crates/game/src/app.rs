@@ -17,7 +17,7 @@ use bevy::window::{PresentMode, PrimaryWindow, WindowCloseRequested, WindowResol
 use rules::Rules;
 use sim::scenarios;
 
-use crate::cli::Cli;
+use crate::cli::{CameraStart, Cli};
 use crate::frame_stats::FrameStatsPlugin;
 use crate::hud::HudPlugin;
 use crate::monitor_loss::MonitorLossPlugin;
@@ -65,6 +65,22 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
                 Box::new(ScenarioInput::new(stream)),
             ))
         }
+    }
+}
+
+/// Where the camera starts for a scenario run without `--camera`: the
+/// `unit_looks` lineup is framed at the 40 m acceptance zoom of
+/// `docs/ART_STYLE.md` ("Readability at 40 m"), centred between its two
+/// rows. Every other scenario, and a skirmish, starts over the local
+/// player's first units (`present::focus_camera_on_first_units`).
+pub fn default_framing(scenario: Option<&str>) -> Option<CameraStart> {
+    match scenario? {
+        "unit_looks" => Some(CameraStart {
+            x: 20.0,
+            y: 32.0,
+            zoom: 40.0,
+        }),
+        _ => None,
     }
 }
 
@@ -190,7 +206,10 @@ pub fn run(cli: &Cli) -> AppExit {
     }
     app.insert_resource(ClearColor(palette::SKY));
     app.insert_resource(crate::economy_hud::UiStrings(strings));
-    if let Some(start) = cli.camera {
+    if let Some(start) = cli
+        .camera
+        .or_else(|| default_framing(cli.scenario.as_deref()))
+    {
         app.insert_resource(camera::StartFraming(start));
     }
     app.add_plugins(
@@ -414,6 +433,50 @@ mod tests {
         let (_, stream) = scenarios::units200_auto(&rules);
         assert_eq!(spawn_total(&stream), 200);
         assert_eq!(spawn_total(&Vec::new()), 0);
+    }
+
+    #[test]
+    fn unit_looks_is_framed_on_its_lineup_at_40_m() {
+        let rules =
+            Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .unwrap();
+        let framing = default_framing(Some("unit_looks")).expect("framed");
+        assert_eq!(framing.zoom, 40.0, "the ART_STYLE acceptance distance");
+        assert!(
+            CameraStart::parse(&format!("{},{},{}", framing.x, framing.y, framing.zoom)).is_ok(),
+            "a framing `--camera` would accept"
+        );
+        // Centred on the lineup: within a tile of the middle of its spawns.
+        let (_, stream) = scenarios::unit_looks(&rules);
+        let spawns: Vec<(f32, f32)> = stream
+            .iter()
+            .flat_map(|(_, cmds)| cmds.iter())
+            .filter_map(|c| match &c.cmd {
+                sim::Command::DebugSpawn { at, .. } => Some((
+                    crate::present::fx_to_f32(at.x),
+                    crate::present::fx_to_f32(at.y),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spawns.len(), 2 * rules.units.len());
+        let (min_x, max_x, min_y, max_y) = spawns.iter().fold(
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+            |(a, b, c, d), &(x, y)| (a.min(x), b.max(x), c.min(y), d.max(y)),
+        );
+        assert!(
+            (framing.x - (min_x + max_x) / 2.0).abs() <= 1.0,
+            "{min_x}..{max_x}"
+        );
+        assert!(
+            (framing.y - (min_y + max_y) / 2.0).abs() <= 1.0,
+            "{min_y}..{max_y}"
+        );
+        // Nothing else is framed by default.
+        for name in scenarios::NAMES.iter().filter(|n| **n != "unit_looks") {
+            assert_eq!(default_framing(Some(name)), None, "{name}");
+        }
+        assert_eq!(default_framing(None), None);
     }
 
     #[test]

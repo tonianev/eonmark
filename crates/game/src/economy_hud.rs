@@ -615,8 +615,9 @@ mod tests {
     /// Croft that P0's idle Mangonels destroy and the Scriptorium that P1's
     /// destroy; P1's own research and Croft get no notice. A Town held at
     /// 0 needs a long siege, so its event is written by hand: the local
-    /// player's Seat gets the notice, the other player's does not. The
-    /// message line shows the latest.
+    /// player's Seat gets the notice, the other player's does not. So is an
+    /// age reached by P1, which has no two techs here: only the local
+    /// player's age is named. The message line shows the latest.
     #[test]
     fn notices_name_research_age_and_destroyed_buildings() {
         use sim::{BuildingId, Command, PlayerCommand, PlayerId};
@@ -750,6 +751,13 @@ mod tests {
             Some("Town has fallen")
         );
         assert_eq!(notice_text(&view, &rules, &s, &down(2)), None);
+        // An age reached: only the local player's.
+        let aged = |player| SimEvent::AgeAdvanced { player, age: 1 };
+        assert_eq!(
+            notice_text(&view, &rules, &s, &aged(LOCAL_PLAYER)).as_deref(),
+            Some("Masonry Age reached")
+        );
+        assert_eq!(notice_text(&view, &rules, &s, &aged(p1)), None);
 
         // The message line: the latest notice of a frame wins.
         let mut app = App::new();

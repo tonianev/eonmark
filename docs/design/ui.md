@@ -35,9 +35,11 @@ M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`
 | Bottom left | Selection panel | One selected unit or building: name, HP, owner, current order; for a building, its training or research queue with progress and a Cancel per slot. Several units: a grid of kind icons with counts; clicking an icon narrows the selection to that kind. |
 | Bottom right | Command card | Buttons for what the selection can do: build (Yeomen), train (Muster Hall, Engine Yard, Town), research (Scriptorium, Watchtower), rally, stop, attack-move. Each button shows its cost. A button is disabled with a tooltip when the player cannot afford it, is pop-capped, lacks the age or tech, or has no building site; the tooltip text is the same reason string the sim uses in `CommandRejected`. |
 | Bottom centre | Minimap | A CPU-painted 128 x 128 `Image` in an `ImageNode` painted from the territory and fog grids plus unit and building dots each frame (M7, see [fog.md](fog.md)). Left click moves the camera. Right click orders the selection. |
-| Above the command card | Message line | The last rejection or notice for a few seconds: "Outside your borders", "Not enough Ore", "Population cap reached", "Town annexed". |
+| Above the command card | Message line | The last rejection or notice for a few seconds: "Outside your borders", "Not enough Ore", "Population cap reached", "Town annexed". Since M4b also "Letters I researched", "Masonry Age reached", "Watchtower destroyed" and "Muster Hall lost" (see Notices below). |
 
 Costs and names on buttons come from `data/rules/*.ron` and `data/rules/strings/en.ron`; the HUD never hard-codes a number.
+
+The infinite-queue toggle on training buildings repeats the last trained kind while resources allow. The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
 
 ## Research panel (M4b)
 
@@ -68,7 +70,19 @@ M4b (`age_hud.rs`, done): the top bar's right end is one row (`economy_hud::TopB
 | Click | `AdvanceAge { player }` for the local player from a `Pointer<Click>` observer; a greyed click puts the tooltip on the message line, as a greyed card button does |
 | Last age | The button is hidden (`Display::None`; the sim answers `FinalAge`), the readout stays (`the_button_is_hidden_in_the_final_age`) |
 
-The infinite-queue toggle on training buildings repeats the last trained kind while resources allow. The idle-Yeoman hotkey selects the next idle Yeoman and centres the camera on it.
+## Notices (M4b)
+
+M4b (`economy_hud::notice_text`, done): besides rejections and "Scriptorium complete" (M3b), the message line names, for `MESSAGE_SECONDS` (4 s), the latest of these `SimEventMsg` events:
+
+| Event | Notice |
+| --- | --- |
+| `ResearchCompleted` for the local player | "Letters I researched" |
+| `AgeAdvanced` for the local player | "Masonry Age reached" |
+| `BuildingDestroyed` of another player's building | "Watchtower destroyed" |
+| `BuildingDestroyed` of the local player's building or site | "Muster Hall lost" |
+| `TownAtZeroHp` of the local player's Town | "Town has fallen" |
+
+The building's name comes from the event's own `owner` and `kind` (M4a), since the building is gone by the time the event is read; another player's research and age stay silent. `economy_hud::HUD_KEYS` lists every `hud` string key the game reads with the placeholders it fills, and `every_hud_key_the_game_reads_exists_with_whitelisted_placeholders` holds `en.ron` to it (each key exists, its value uses only those placeholders, all on the strings file's whitelist) and checks that every literal key in the game's sources is listed.
 
 ## Menus
 

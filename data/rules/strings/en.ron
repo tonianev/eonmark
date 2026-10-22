@@ -79,5 +79,10 @@
     "info.researched": "Researched: {name}",
     "notice.placed": "{building} placed",
     "notice.completed": "{building} complete",
+    "notice.researched": "{name} researched",
+    "notice.age": "{name} reached",
+    "notice.destroyed": "{building} destroyed",
+    "notice.lost": "{building} lost",
+    "notice.town_down": "{building} has fallen",
   },
 )

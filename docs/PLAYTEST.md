@@ -46,7 +46,7 @@ Run `cargo run -p game --features dev` from `main` (the standard start: a Seat, 
 | Hover inside the border, click | The ghost turns green; the click places the site and the nearest selected Yeoman not already building walks over and builds it; the mode ends (Shift keeps it) | owner | | | | | |
 | Right-click an own unfinished site with Yeomen selected | The nearest selected Yeoman resumes building it | owner | | | | | |
 | Right-click an own Croft, Lumber Yard or Ore Pit with Yeomen selected | They go and work it | owner | | | | | |
-| Click the Seat | The panel reads "Town / Seat, tier 1"; a Train Yeoman button with its cost | `command_card` unit tests | | | | | |
+| Click the Seat | The panel reads "Town", "HP 2000 / 2000" and "Seat, tier 1" on three lines (the HP line since M4b); a Train Yeoman button with its cost | `command_card` unit tests | | | | | |
 | Click Train twice | Two Yeomen queue (the panel shows progress); Grain drops by the ramped cost | owner | | | | | |
 | Right-click the ground with the Seat selected | Sets the rally point; trained Yeomen walk there | owner | | | | | |
 | Found a second Town | The tinted territory and its soft border line grow around it; "Town complete" on the message line | `economy_walkthrough` tick 1400 screenshot | | | | | |

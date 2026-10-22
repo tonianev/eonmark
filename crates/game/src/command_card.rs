@@ -23,8 +23,11 @@
 //!
 //! The selection panel at the left of the bar names the selection: unit
 //! kinds and counts, or the building with its state (construction
-//! progress, Town tier, workers, training queue). One selected unit or
-//! building, another player's included, also shows its hit points (M4b).
+//! progress, Town tier, workers, training queue). One selected unit of
+//! either player, or the selected own building, also shows its hit points
+//! (M4b); another player's building is not selectable yet
+//! (`selection::on_building_click`), so its hit points show only on its
+//! bar once it is damaged.
 //!
 //! Buttons issue commands from a `Pointer<Click>` observer, like the Stop
 //! button, never from `Interaction::Pressed` (a click would fire twice);
@@ -741,10 +744,12 @@ mod tests {
         );
     }
 
-    /// One selected unit or building shows the sim's hit points, another
-    /// player's included; several units do not.
+    /// One selected unit shows the sim's hit points, another player's unit
+    /// included; several units do not. (The own Seat's line is checked in
+    /// `the_seat_trains_yeomen_and_names_itself`; another player's building
+    /// cannot be selected.)
     #[test]
-    fn one_unit_or_building_shows_its_hp_enemy_included() {
+    fn one_unit_shows_its_hp_enemy_included() {
         let mut sim = standard();
         let rules = sim.rules().clone();
         let p1 = sim::PlayerId(1);

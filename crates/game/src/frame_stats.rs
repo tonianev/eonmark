@@ -28,18 +28,23 @@
 //!
 //! With the fight window on (the `enemy_outpost` scenarios, M4b acceptance
 //! line 2), `fight frames=<n> seconds=<s> mean=<ms> p95=<ms> max=<ms>
-//! fps=<f> ticks=<a>..<b> on_screen_max=<n> units_at_first_hit=<p0>/<p1>`
-//! summarises only the frames of the 200 vs 200 fight: a frame counts when
-//! a `Hit` landed within the last [`FIGHT_HIT_WINDOW_TICKS`] ticks while
-//! both players still had at least [`FIGHT_MIN_ARMED`] armed units alive
-//! (the `sim-cli bench --combat` threshold), so start-up, the walk to
-//! contact and the mop-up are left out. `ticks` are the first and last such
-//! tick, `on_screen_max` the most units of either player projected inside
-//! the world view between the HUD bars during a fight frame (by the drag
-//! box's projection, [`crate::selection::units_in_rect`], not by
+//! fps=<f> ticks=<a>..<b> on_screen_max=<n> on_screen_min=<n>/<alive>
+//! units_at_first_hit=<p0>/<p1>` summarises only the frames of the 200 vs
+//! 200 fight: a frame counts when a `Hit` landed within the last
+//! [`FIGHT_HIT_WINDOW_TICKS`] ticks while both players still had at least
+//! [`FIGHT_MIN_ARMED`] armed units alive (the `sim-cli bench --combat`
+//! threshold), so start-up, the walk to contact and the mop-up are left
+//! out. `ticks` are the first and last such tick. `on_screen_max` is the
+//! most armed units (kinds with an attack) of either player projected
+//! inside the world view between the HUD bars during a fight frame (by the
+//! drag box's projection, [`crate::selection::units_in_rect`], not by
 //! `ViewVisibility`, which the shadow cascades set for every unit), and
-//! `units_at_first_hit` each player's armed units alive at the first
-//! `Hit` of the match.
+//! `on_screen_min` the fight frame that showed the smallest share of the
+//! armed units then alive, as `<on screen>/<alive>`: equal numbers mean
+//! every timed frame drew the whole battle, while a pan or zoom during the
+//! fight shows as a lower first number though `on_screen_max` keeps its
+//! best frame. `units_at_first_hit` is each player's armed units alive at
+//! the first `Hit` of the match.
 
 use std::time::Duration;
 
@@ -302,8 +307,11 @@ pub struct FightWindow {
     pub units_at_first_hit: Option<[u32; FIGHT_PLAYERS]>,
     /// Periods of the fight frames, milliseconds, in order.
     pub samples_ms: Vec<f64>,
-    /// Most units projected inside the world view in one fight frame.
+    /// Most armed units projected inside the world view in one fight frame.
     pub on_screen_max: usize,
+    /// The fight frame with the smallest share of the armed units alive
+    /// projected inside the world view, as `(on screen, alive)`.
+    pub on_screen_min: Option<(usize, usize)>,
 }
 
 impl FightWindow {
@@ -328,10 +336,20 @@ impl FightWindow {
             .is_some_and(|(_, last)| tick.saturating_sub(last) < FIGHT_HIT_WINDOW_TICKS)
     }
 
-    /// Record one fight frame: its period and the units on screen in it.
-    pub fn record_frame(&mut self, frame: Duration, on_screen: usize) {
+    /// Record one fight frame: its period, and how many of the `alive`
+    /// armed units were on screen in it.
+    pub fn record_frame(&mut self, frame: Duration, on_screen: usize, alive: usize) {
         self.samples_ms.push(frame.as_secs_f64() * 1000.0);
         self.on_screen_max = self.on_screen_max.max(on_screen);
+        // A smaller share `on_screen / alive`, compared without division; a
+        // frame with no armed unit alive has nothing to show.
+        if alive > 0
+            && self
+                .on_screen_min
+                .is_none_or(|(seen, of)| on_screen * of < seen * alive)
+        {
+            self.on_screen_min = Some((on_screen, alive));
+        }
     }
 
     /// The `fight ...` line.
@@ -350,8 +368,13 @@ impl FightWindow {
         let first_hit = self
             .units_at_first_hit
             .map_or("none".to_string(), |[p0, p1]| format!("{p0}/{p1}"));
+        let on_screen_min = self
+            .on_screen_min
+            .map_or("none".to_string(), |(seen, alive)| {
+                format!("{seen}/{alive}")
+            });
         format!(
-            "fight frames={} seconds={seconds:.2} mean={mean:.2} p95={p95:.2} max={max:.2} fps={fps:.1} ticks={ticks} on_screen_max={} units_at_first_hit={first_hit}",
+            "fight frames={} seconds={seconds:.2} mean={mean:.2} p95={p95:.2} max={max:.2} fps={fps:.1} ticks={ticks} on_screen_max={} on_screen_min={on_screen_min} units_at_first_hit={first_hit}",
             self.samples_ms.len(),
             self.on_screen_max
         )
@@ -460,6 +483,15 @@ fn observe_arrivals(sim: NonSend<SimHandle>, mut proxy: ResMut<ArrivalProxy>) {
     proxy.observe(view.units().map(|u| (u.pos, u.post.is_some())), sim.tick());
 }
 
+/// `true` for a unit of one of the fight's players whose kind has an
+/// attack: the units the fight window counts.
+fn fights(rules: &rules::Rules, unit: &sim::Unit) -> bool {
+    usize::from(unit.owner.0) < FIGHT_PLAYERS
+        && rules
+            .unit_kind(unit.kind.0)
+            .is_some_and(|k| k.attack.is_some())
+}
+
 /// After each stepped tick: count its `Hit` events and each player's armed
 /// units (kinds with an attack) still alive.
 fn observe_fight(
@@ -473,20 +505,14 @@ fn observe_fight(
         .count();
     let rules = sim.rules();
     let mut armed = [0u32; FIGHT_PLAYERS];
-    for u in sim.view().units() {
-        let has_attack = rules
-            .unit_kind(u.kind.0)
-            .is_some_and(|k| k.attack.is_some());
-        if let Some(n) = armed.get_mut(usize::from(u.owner.0))
-            && has_attack
-        {
-            *n += 1;
-        }
+    for u in sim.view().units().filter(|u| fights(rules, u)) {
+        armed[usize::from(u.owner.0)] += 1;
     }
     fight.observe_tick(sim.tick(), u32::try_from(hits).unwrap_or(u32::MAX), armed);
 }
 
-/// In a fight frame, record its period and count the units on screen.
+/// In a fight frame, record its period and count the armed units alive and
+/// those of them on screen.
 fn sample_fight(
     time: Res<Time<Real>>,
     sim: NonSend<SimHandle>,
@@ -496,17 +522,17 @@ fn sample_fight(
     if time.delta() == Duration::ZERO || !fight.is_fight_frame(sim.tick()) {
         return;
     }
+    let rules = sim.rules();
+    let view = sim.view();
+    let armed = || view.units().filter(|u| fights(rules, u));
     let on_screen = cameras.single().map_or(0, |(camera, transform)| {
         units_on_screen(
             camera,
             transform,
-            sim.view()
-                .units()
-                .filter(|u| usize::from(u.owner.0) < FIGHT_PLAYERS)
-                .map(|u| (u.id, world_from_sim(u.pos, 0.0))),
+            armed().map(|u| (u.id, world_from_sim(u.pos, 0.0))),
         )
     });
-    fight.record_frame(time.delta(), on_screen);
+    fight.record_frame(time.delta(), on_screen, armed().count());
 }
 
 /// Runs in `Last`, after `bevy::window::ExitSystems`: on the frame an
@@ -666,37 +692,53 @@ mod tests {
         let mut w = FightWindow::default();
         assert_eq!(
             w.line(),
-            "fight frames=0 seconds=0.00 mean=0.00 p95=0.00 max=0.00 fps=0.0 ticks=none on_screen_max=0 units_at_first_hit=none"
+            "fight frames=0 seconds=0.00 mean=0.00 p95=0.00 max=0.00 fps=0.0 ticks=none on_screen_max=0 on_screen_min=none units_at_first_hit=none"
         );
         let ms = |n: u64| Duration::from_millis(n);
         // `(tick, hits, armed)` after each tick, then a frame at that tick
-        // of the given length with this many units on screen; only fight
-        // frames are recorded, as `sample_fight` does.
+        // of the given length with this many of the armed units alive on
+        // screen; only fight frames are recorded, as `sample_fight` does.
         let frames: [(u32, u32, [u32; 2], u64, usize); 9] = [
             (100, 0, [200, 200], 10, 400), // start-up: no hit yet
             (150, 0, [200, 200], 11, 400), // walking to contact
             (151, 3, [200, 200], 20, 398), // first hit: the window opens
-            (160, 0, [190, 195], 30, 390), // 9 ticks after a hit
-            (170, 0, [185, 190], 40, 380), // 19 ticks after: still in
+            (160, 0, [190, 195], 30, 385), // 9 ticks after a hit, all shown
+            (170, 0, [185, 190], 40, 375), // 19 ticks after: still in
             (171, 0, [185, 190], 50, 999), // 20 ticks after: out
             (300, 2, [49, 150], 60, 999),  // P0 down to stragglers
-            (310, 1, [52, 140], 70, 360),  // both armies again: back in
+            (310, 1, [52, 140], 70, 96),   // back in, zoomed on half of it
             (400, 5, [0, 120], 80, 999),   // mop-up: never counts
         ];
         for (tick, hits, armed, frame_ms, on_screen) in frames {
             w.observe_tick(tick, hits, armed);
             if w.is_fight_frame(tick) {
-                w.record_frame(ms(frame_ms), on_screen);
+                let alive = usize::try_from(armed[0] + armed[1]).expect("small");
+                w.record_frame(ms(frame_ms), on_screen, alive);
             }
         }
         assert_eq!(w.units_at_first_hit, Some([200, 200]));
         assert_eq!(w.ticks, Some((151, 310)));
         assert_eq!(w.samples_ms, vec![20.0, 30.0, 40.0, 70.0]);
+        // The best frame still reads 398: only the smallest share (96 of
+        // the 192 alive, not the smallest count) shows the zoomed frame.
         assert_eq!(w.on_screen_max, 398);
+        assert_eq!(w.on_screen_min, Some((96, 192)));
         assert_eq!(
             w.line(),
-            "fight frames=4 seconds=0.16 mean=40.00 p95=70.00 max=70.00 fps=25.0 ticks=151..310 on_screen_max=398 units_at_first_hit=200/200"
+            "fight frames=4 seconds=0.16 mean=40.00 p95=70.00 max=70.00 fps=25.0 ticks=151..310 on_screen_max=398 on_screen_min=96/192 units_at_first_hit=200/200"
         );
+        // A share compares across frames: 375 of 375 shows more of the
+        // battle than 398 of 400, and a frame with no armed unit alive has
+        // nothing to show.
+        let mut shares = FightWindow::default();
+        shares.record_frame(ms(5), 375, 375);
+        shares.record_frame(ms(5), 398, 400);
+        shares.record_frame(ms(5), 0, 0);
+        shares.record_frame(ms(5), 380, 380);
+        assert_eq!(shares.on_screen_min, Some((398, 400)));
+        let mut empty = FightWindow::default();
+        empty.record_frame(ms(5), 0, 0);
+        assert_eq!(empty.on_screen_min, None);
         // A hit while one army is under the threshold opens nothing.
         let mut lopsided = FightWindow::default();
         lopsided.observe_tick(5, 9, [FIGHT_MIN_ARMED - 1, 400]);
@@ -772,9 +814,23 @@ mod tests {
         assert_eq!(units_on_screen(&Camera::default(), &transform, units), 0);
     }
 
+    /// The `<n>/<alive>` of the `on_screen_min=` field of a `fight` line.
+    fn coverage(line: &str) -> (usize, usize) {
+        let field = line
+            .split(' ')
+            .find_map(|f| f.strip_prefix("on_screen_min="))
+            .unwrap_or_else(|| panic!("no on_screen_min= field: {line}"));
+        let (seen, alive) = field
+            .split_once('/')
+            .unwrap_or_else(|| panic!("not <n>/<alive>: {line}"));
+        (seen.parse().expect("n"), alive.parse().expect("alive"))
+    }
+
     /// The `enemy_outpost` prologue through the real systems: the window
     /// opens at the first `Hit`, after the charge, with both armies whole
-    /// and every unit of the battle on screen at the default framing.
+    /// and every armed unit of the battle on screen at the default framing;
+    /// a camera move to a close-up during the fight shows in the line,
+    /// though the most units on screen still reads the default framing's.
     #[test]
     fn the_outpost_prologue_opens_the_fight_window() {
         use crate::sim_driver::{ScenarioInput, SimPlugin};
@@ -804,8 +860,10 @@ mod tests {
             ));
         let framing = crate::app::default_framing(Some("enemy_outpost")).expect("framed");
         let (camera, transform) = camera_at(framing.x, framing.y, framing.zoom);
-        app.world_mut()
-            .spawn((camera, transform, RtsCamera::default()));
+        let rts_camera = app
+            .world_mut()
+            .spawn((camera, transform, RtsCamera::default()))
+            .id();
         app.update();
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             Duration::from_millis(50),
@@ -837,6 +895,29 @@ mod tests {
             w.on_screen_max >= 350,
             "on screen at the default framing: {}",
             w.on_screen_max
+        );
+        let framed = w.line();
+        // The director's `battle_close` beat, mid-fight: the 30 m close-up
+        // shows only part of the battle from then on.
+        let close = crate::director::BATTLE_CLOSE;
+        let (camera, transform) = camera_at(close.x, close.y, close.zoom);
+        app.world_mut()
+            .entity_mut(rts_camera)
+            .insert((camera, transform));
+        let moved_at = app.world().non_send::<SimHandle>().tick();
+        while app.world().non_send::<SimHandle>().tick() < moved_at + 10 {
+            app.update();
+        }
+        let w = app.world().resource::<FightWindow>();
+        let after = w.line();
+        println!("{after}");
+        assert!(w.on_screen_max >= 350, "the maximum cannot tell: {after}");
+        let (seen, alive) = coverage(&after);
+        assert!(seen < alive, "the close-up shows in the line: {after}");
+        let (seen, alive) = coverage(&framed);
+        assert_eq!(
+            seen, alive,
+            "every armed unit alive on screen in every frame at the default framing: {framed}"
         );
     }
 }

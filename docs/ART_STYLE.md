@@ -123,16 +123,16 @@ wgpu on a wide-gamut display can render colours more saturated than authored. Ev
 
 ## Primitives first, models by data
 
-Every unit and building kind is drawn through one `Visual` value from `data/visuals.ron`:
+Every unit kind is drawn through one `Visual` value from `data/visuals.ron`, keyed by its `units.ron` id (buildings are drawn by `crates/game/src/buildings.rs` until M7 moves them into the file; a building key fails `data-check` today):
 
 ```ron
 "yeoman": Primitive(Capsule),
 "skirmisher": Body(shape: Cone, height_tiles_x100: 150),
 "outrider": Body(shape: Capsule, height_tiles_x100: 180, lying: true),
-"town": Scene(path: "models/town.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0),
+"mangonel": Scene(path: "models/mangonel.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0),
 ```
 
-`Visual::Primitive(shape)` draws a team-coloured primitive sized from the kind's radius (`Capsule`, `Cuboid`, `Cylinder`, `Sphere` or `Cone`). `Visual::Body(shape, height_tiles_x100, lying)` (M4b) draws the same primitive two radii wide with its own height in hundredths of a metre (20 to 400; never a `Sphere`); `lying: true` lays a `Capsule` or `Cylinder` along the unit's facing, that long and two radii tall. `Visual::Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` loads a glTF scene; the scale and offset are in hundredths and the yaw in whole degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change. M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive look as the fallback. Anything drawn above a unit (the M4b health bar) takes its height from `present::look_top_y`, computed from the `Visual`, so the art pass changes that one function. Unit kinds are in `visuals.ron` today; buildings are drawn by `crates/game/src/buildings.rs`.
+`Visual::Primitive(shape)` draws a team-coloured primitive sized from the kind's radius (`Capsule`, `Cuboid`, `Cylinder`, `Sphere` or `Cone`). `Visual::Body(shape, height_tiles_x100, lying)` (M4b) draws the same primitive two radii wide with its own height in hundredths of a metre (20 to 400; never a `Sphere`); `lying: true` lays a `Capsule` or `Cylinder` along the unit's facing, that long and two radii tall. `Visual::Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` loads a glTF scene; the scale and offset are in hundredths and the yaw in whole degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change. M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive look as the fallback. Anything drawn above a unit (the M4b health bar) takes its height from `present::look_top_y`, computed from the `Visual`, so the art pass changes that one function. Until M7 the presenter draws a `Scene` as the fallback `Primitive(Capsule)` (`present::FALLBACK_VISUAL`).
 
 ## glTF import rules
 

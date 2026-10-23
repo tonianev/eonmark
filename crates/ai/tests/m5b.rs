@@ -1,6 +1,10 @@
-//! M5b bot tests that run whole matches (`cargo test -p ai`). Long ones
-//! (more than 5000 ticks) are `#[ignore]`d and run in CI with
-//! `cargo test -p ai --locked -- --ignored m5b_`.
+//! M5b bot tests that run whole matches (`cargo test -p ai`). The costly
+//! ones (several games, or games longer than 5000 ticks) are `#[ignore]`d
+//! with an `m5b_` prefix and run in CI with
+//! `cargo test -p ai --locked -- --ignored m5b_`. One planned behaviour
+//! test stays in the default run although its game is longer:
+//! `no_unit_gets_the_same_order_twice_in_three_plans` (11000 ticks, about
+//! 0.4 s).
 
 mod common;
 
@@ -334,41 +338,83 @@ fn m5b_rejections_stay_under_20_per_36000_ticks_vs_passive() {
     }
 }
 
-/// The pop cap never locks the army out: at least 8 armed units by tick
-/// 18000, and after Masonry no plan sees a full pop with no armed unit at
-/// home.
-#[test]
-#[ignore = "long: an 18000-tick game; CI runs --ignored m5b_"]
-fn m5b_pop_never_deadlocks() {
-    let r = common::rules();
-    let setup = common::standard_vs_passive(&r);
-    let mut m = BotMatch::with_bots(setup, r.clone()).unwrap();
+/// Own armed units of `me`: non-civilian kinds with an attack.
+fn armed(r: &Rules, view: &SimView<'_>, me: PlayerId) -> usize {
+    view.units()
+        .filter(|u| u.owner == me)
+        .filter(|u| {
+            r.unit_kind(u.kind.0)
+                .is_some_and(|k| k.class != UnitClass::Civilian && k.attack.is_some())
+        })
+        .count()
+}
+
+/// Steps `m` to tick `until`, checking after every step from Masonry on
+/// that a full pop never comes with no armed unit at home (the units of
+/// the wave in memory are away). Returns the ticks with a full pop.
+fn full_pop_ticks(r: &Rules, m: &mut Sim, until: u32) -> u32 {
     let masonry = r.age_index("masonry").unwrap();
-    let armed = |view: &SimView<'_>| {
-        view.units()
-            .filter(|u| u.owner == P0)
-            .filter(|u| {
-                r.unit_kind(u.kind.0)
-                    .is_some_and(|k| k.class != UnitClass::Civilian && k.attack.is_some())
-            })
-            .count()
-    };
-    while m.sim.tick() < 18_000 {
-        m.step();
-        let view = m.sim.view();
+    let mut full = 0;
+    while m.tick() < until {
+        m.step(&[]);
+        let view = m.view();
         if view.age(P0) >= masonry {
             let (used, cap) = view.pop(P0);
             let mem = BotMemory::decode(view.ai_memory(P0));
             let away = mem.wave.map_or(0, |w| w.units.len());
             assert!(
-                used < cap || armed(&view) > away,
+                used < cap || armed(r, &view, P0) > away,
                 "tick {}: pop {used}/{cap} and no armed unit at home",
                 view.tick
             );
+            full += u32::from(used >= cap);
         }
     }
-    let n = armed(&m.sim.view());
-    assert!(n >= 8, "{n} armed units at 18000");
+    full
+}
+
+/// The pop cap never locks the army out: at least 8 armed units by tick
+/// 18000, and after Masonry no tick sees a full pop with no armed unit at
+/// home. The natural game (Standard P0 against Passive) never fills its
+/// pop before 18000 (52/75 at most), so a second game fills it: as soon
+/// as P0 reaches Masonry, P0 is given Yeomen up to two below its cap; the
+/// full-pop branch must then be met at least once, and the bot must still
+/// field at least 8 armed units by 18000. Until the waves of
+/// M5b slice 3 exist no unit is ever away, so the check reads "a full pop
+/// holds at least one armed unit"; slice 3 gives the wave a roster here.
+#[test]
+#[ignore = "long: two 18000-tick games; CI runs --ignored m5b_"]
+fn m5b_pop_never_deadlocks() {
+    let games: Vec<Box<dyn FnOnce() -> (u32, usize) + Send>> = [false, true]
+        .into_iter()
+        .map(|fill| {
+            Box::new(move || {
+                let r = common::rules();
+                let mut a = Arena::new(common::standard_vs_passive(&r), Vec::new());
+                if fill {
+                    let masonry = r.age_index("masonry").unwrap();
+                    while a.sim.view().age(P0) < masonry {
+                        a.run(1);
+                    }
+                    let (used, cap) = a.sim.view().pop(P0);
+                    let n = u16::try_from(cap.saturating_sub(used + 2)).unwrap();
+                    assert!(n > 0, "pop {used}/{cap} at Masonry");
+                    a.issue(P0, vec![common::spawn(&r, P0, "yeoman", 20, 70, n)]);
+                }
+                let full = full_pop_ticks(&r, &mut a.sim, 18_000);
+                (full, armed(&r, &a.sim.view(), P0))
+            }) as Box<_>
+        })
+        .collect();
+    let [(_, natural), (full, filled)] = par(games)[..] else {
+        unreachable!()
+    };
+    assert!(natural >= 8, "{natural} armed units at 18000");
+    assert!(full > 0, "the filled game never had a full pop");
+    assert!(
+        filled >= 8,
+        "{filled} armed units at 18000 in the filled game"
+    );
 }
 
 /// The bot never walls itself in: after 20000 ticks every one of its

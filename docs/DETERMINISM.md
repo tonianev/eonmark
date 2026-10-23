@@ -99,7 +99,7 @@ The field order of `SubHashes` is the comparison order: `SubHashes::first_differ
 
 Hashes are recorded every 20 ticks by default (`replay::DEFAULT_HASH_EVERY`) and every tick under `--hash-every-tick` (`sim-cli record` from M1; the game's writer thread from M2). From M5a `sim-cli record --hash-every <N>` sets any cadence, and a scenario may set its own default (`stalemate_45min` records every 1000 ticks); `verify` checks whatever records a file holds.
 
-The hashed state is the full `State` (`tick`, `seed`, `rng`, `ids`, `players`, `units`, `buildings`, `map`, `pathing` without its cache, `pending`, `commands_applied`, from M3a `economy` and `territory`, and from M4a `tech`) and `hash()` is xxh3 over its postcard bytes. The `MatchSetup` is not hashed; it is the replay header, and what it selects (seed, map, `start`) shows up in the state from tick 0. `sub_hashes()` hashes the pieces listed above separately.
+The hashed state is the full `State` (`tick`, `seed`, `rng`, `ids`, `players`, `units`, `buildings`, `map`, `pathing` without its cache, `pending`, `commands_applied`, from M3a `economy` and `territory`, from M4a `tech`, and from M5a `outcome`) and `hash()` is xxh3 over its postcard bytes. The `MatchSetup` is not hashed; it is the replay header, and what it selects (seed, map, `start`) shows up in the state from tick 0. `sub_hashes()` hashes the pieces listed above separately.
 
 ## Replays
 

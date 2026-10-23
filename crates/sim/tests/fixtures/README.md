@@ -30,13 +30,15 @@ Recorded 2026-10-23 at `rules_version` 20, `SIM_VERSION` 16 with
 `just rerecord` (M5a annexation and outcome: `TownState` gained the hashed
 `hold` and `State` the hashed `outcome`, in the `meta` sub-hash; step 5d
 annexes Towns at 0 HP, step 6e decides the match, and the annex-hold guard
-rule applies beside an enemy Town at 0 HP). No fixture's Town ever loses a
-hit point, so no timer starts, the hold rule never applies and nothing is
-decided: re-simulating the eight fixtures emits no `TownAtZeroHp`,
-annexation event or `MatchDecided`. A per-tick `sim-cli hash-dump --every
-1` of each fixture as recorded at `SIM_VERSION` 15, run by that binary
-with its own `data/`, against the re-recorded fixture run by the
-`SIM_VERSION` 16 binary with the current `data/`, differs in the whole hash
+rule applies beside an enemy Town at 0 HP). None of the eight re-recorded
+fixtures' Towns ever loses a hit point, so in them no timer starts, the
+hold rule never applies and nothing is decided (the two new recordings
+below are decided: `capture_seat` takes P1's Seat to 0 and annexes it,
+`stalemate_45min` ends at the cap): re-simulating the eight fixtures emits
+no `TownAtZeroHp`, annexation event or `MatchDecided`. A per-tick `sim-cli
+hash-dump --every 1` of each fixture as recorded at `SIM_VERSION` 15, run
+by that binary with its own `data/`, against the re-recorded fixture run by
+the `SIM_VERSION` 16 binary with the current `data/`, differs in the whole hash
 and the `meta` column on every tick, in the `buildings` column on every
 tick with a complete Town (the four fixtures with one) and in no other
 column, and the buildings and meta hashed without the new fields equal the

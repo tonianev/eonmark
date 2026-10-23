@@ -892,7 +892,8 @@ pub struct SubHashes {
     pub rng: u64,
     /// Cost grid and its generation.
     pub map: u64,
-    /// Tick, seed, id allocator, players, pending commands, counters.
+    /// Tick, seed, id allocator, players, pending commands, counters and,
+    /// since M5a, the match result (`State::outcome`).
     pub meta: u64,
 }
 

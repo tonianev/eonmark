@@ -108,7 +108,9 @@ Supply is per player: a Wain covers only its owner's units. Alliances are out of
 
 ## Acceptance checklist (from M5a)
 
-- [ ] `cargo test -p sim attrition`: an enemy unit in researched borders loses exactly 1 HP at ticks 64, 128, 192; with a friendly Supply Wain within 14 tiles it loses 0 HP over 1200 ticks; before Harrying I it loses 0 HP; Harrying II doubles the rate.
+- [x] `cargo test -p sim attrition`: an enemy unit in researched borders loses exactly 1 HP at ticks 64, 128, 192; with a friendly Supply Wain within 14 tiles it loses 0 HP over 1200 ticks; before Harrying I it loses 0 HP; Harrying II doubles the rate.
+
+  Observed on PR #43, 2026-10-23, with `cargo test -p sim --profile ci attrition -- --nocapture` (the `ci` profile inherits `dev`; the tests are the same): `test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out` in m5a and 4 passed in the lib. The unit lost 1 HP at ticks 64, 128 and 192 (`[(64, UnitId(1), 1), (128, UnitId(1), 1), (192, UnitId(1), 1)]`, no `Hit`); a Wain 14 tiles away kept it at 80 HP for 1200 ticks with 0 pulses (one 15 tiles away: 62 HP, 18 pulses); with no Harrying it kept 80 HP (Harrying I researched during tick 600: first pulse at 664); Harrying II lost exactly twice Harrying I's HP at every multiple of 64 (43 against 62 HP after 1200 ticks, intervals 32 and 64). The Harrying bench ("The Harrying bench" above) adds about 0.05 ms a step to the plain combat bench's mean. The good first issues below stay open for contributors.
 
 Good first issues from M5a:
 

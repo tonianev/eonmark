@@ -212,8 +212,13 @@ From M3a:
 
 From M5a:
 
-- [ ] `cargo test -p sim annexation`: a Town at 0 HP with enemy Skirmishers adjacent and no defender military within 6 tiles flips after 1200 ticks; a defender arriving at tick 600 resets the timer; during the timer `owner_at` returns neutral for its tiles and Train is rejected; capturing the Seat makes `outcome()` return `Victory { decisive: true }`; a 54000-tick scripted stalemate returns `Victory { decisive: false }` for the player with more territory.
-- [ ] `cargo run -p game --features dev -- --scenario capture_seat` shows the victory overlay with the final hash and the recorded replay verifies to it.
+- [x] `cargo test -p sim annexation`: a Town at 0 HP with enemy Skirmishers adjacent and no defender military within 6 tiles flips after 1200 ticks; a defender arriving at tick 600 resets the timer; during the timer `owner_at` returns neutral for its tiles and Train is rejected; capturing the Seat makes `outcome()` return `Victory { decisive: true }`; a 54000-tick scripted stalemate returns `Victory { decisive: false }` for the player with more territory.
+
+  Observed on PR #43, 2026-10-23, with `cargo test -p sim --profile ci annexation -- --nocapture`: `test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out` in m5a and 1 passed in the lib. Entry in step 1 and the flip in step 1201 (500 HP, P0 owning 1245 tiles); a defender arriving in step 601 reset the timer at 599, which restarted in step 651 and flipped in step 1851; during the timer the Town's 1245 tiles were neutral and `Train` was rejected `TownContested`; `capture_seat` ends `Victory { player: PlayerId(0), decisive: true }`, reason SeatCaptured, at tick 1628 with hash `0x2c9a9ef52a5184d0`; the 54000-step stalemate, run and not ignored, ends `Victory { player: PlayerId(0), decisive: false }`, reason Territory, at tick 54000 with 1248 tiles against 1245 (0.25 to 0.30 s).
+
+- [x] `cargo run -p game --features dev -- --scenario capture_seat` shows the victory overlay with the final hash and the recorded replay verifies to it.
+
+  Observed on PR #43, 2026-10-23, on a Linux VM under Xvfb with lavapipe (not the dev Mac), with background mode and `--exit-after-seconds 240` appended and `--profile ci`: exit 0, no ERROR line, `outcome: victory player=0 decisive=true reason=seat_captured tick=1628 hash=0x2c9a9ef52a5184d0` 82 s in and the game frozen at tick 1628 until the deadline; the screenshot at tick 1628 shows "Victory", "The Seat was captured", "1:21, tick 1628" and the final hash; `sim-cli verify` of its replay prints `OK final_hash=0x2c9a9ef52a5184d0 ticks=1628`, `capture_seat.hash`. `M5A_SECONDS=240 just m5a-checks` passes every step (docs/ROADMAP.md, M5a line 3, has the full output). The owner's Mac run is open ([../PLAYTEST.md](../PLAYTEST.md), "Controls checklist (M5a)").
 
 ```bash
 cargo test -p sim annexation

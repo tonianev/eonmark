@@ -257,7 +257,9 @@ Line 1 was observed on Linux (ROADMAP M4b, plan decision 21, the M3b precedent):
 
 M5a:
 
-- [ ] `cargo run -p game --features dev -- --scenario capture_seat` shows the victory overlay with the final hash and the recorded replay verifies to it.
+- [x] `cargo run -p game --features dev -- --scenario capture_seat` shows the victory overlay with the final hash and the recorded replay verifies to it.
+
+  Observed on PR #43, 2026-10-23, on Linux under Xvfb with lavapipe (the M3b and M4b precedent): the command with background mode and a deadline appended exits 0 with `outcome: victory player=0 decisive=true reason=seat_captured tick=1628 hash=0x2c9a9ef52a5184d0`, its screenshot shows the overlay with that hash, and `sim-cli verify` of its replay prints `OK final_hash=0x2c9a9ef52a5184d0 ticks=1628`; `just m5a-checks` passes (docs/ROADMAP.md, M5a line 3). The owner's run on the Mac and the [Controls checklist (M5a)](../PLAYTEST.md#controls-checklist-m5a) rows are open.
 
 M6:
 

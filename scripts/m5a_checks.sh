@@ -20,9 +20,12 @@
 #   4. No eonmark process is left (`pgrep -x eonmark`).
 #
 # On Linux without a display the game runs under `xvfb-run` on Mesa's
-# lavapipe (as scripts/render_smoke.sh does); there it runs about 15
-# ticks a second, so give it M5A_SECONDS=240. On the dev Mac the 1628
-# ticks take about 82 s and the default 150 s is enough.
+# lavapipe (as scripts/render_smoke.sh does). The sim keeps its 20 ticks
+# a second there while frames stay under 250 ms (`Time<Virtual>`'s
+# max_delta): on the 4-vCPU VM lavapipe drew about 5 frames a second at
+# 4 ticks a frame, so the 1628 ticks took about 82 s, as at full rate,
+# and the default 150 s is enough. Set M5A_SECONDS=240 only as a margin
+# on a slower or loaded host.
 #
 # Usage: scripts/m5a_checks.sh <eonmark binary> <sim-cli binary> [out-dir]
 # Env:   M5A_SECONDS=150  how long the game runs (--exit-after-seconds)

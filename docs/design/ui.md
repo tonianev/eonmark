@@ -282,7 +282,7 @@ cargo run -p game --features dev -- --scenario enemy_outpost
 cargo run --release -p game -- --scenario enemy_outpost
 scripts/m4b_outpost_drive.sh target/ci/eonmark target/release/sim-cli <out-dir>   # Linux, Xvfb + lavapipe
 cargo run -p game --features dev -- --scenario capture_seat
-just m5a-checks   # M5A_SECONDS=240 under lavapipe
+just m5a-checks   # also under lavapipe: the default 150 s is enough
 ```
 
 ## Open questions

@@ -1055,9 +1055,10 @@ pub const COMBAT_BENCH_WAINS: [FxVec2; 2] = [COMBAT_BENCH_P1_GOAL, COMBAT_BENCH_
 /// P0's units bleed on P1's land unless P0's Wain covers them. During tick
 /// 1 each side `DebugSpawn`s one Supply Wain at [`COMBAT_BENCH_WAINS`]
 /// before its attack-move, which then includes the Wain (a unit without an
-/// attack just moves): P0's Wain is `UnitId(units / 2 + 1)` and P1's
-/// `UnitId(units / 2 + 2)`, so every army id is [`combat_bench`]'s. Fewer
-/// than 8 units gives an empty stream.
+/// attack just moves): P0's Wain is `UnitId(units + 1)` and P1's
+/// `UnitId(units + 2)`, with `units` rounded down to a multiple of 8 (401
+/// and 402 at 400), so every army id is [`combat_bench`]'s. Fewer than 8
+/// units gives an empty stream.
 pub fn combat_bench_harrying(rules: &Rules, units: u16, seed: u64) -> (MatchSetup, Stream) {
     let (setup, mut stream) = combat_bench(rules, units, seed);
     if stream.is_empty() {

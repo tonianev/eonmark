@@ -171,8 +171,10 @@ pub enum Placement {
 /// When an attacking wave is called home to defend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecallWave {
-    /// While it is still staging, or when the threatened Town is contested
-    /// or at or below `recall_wave_town_hp_permille` (M5b owner decision 7).
+    /// While it is still staging and the defence still blocks launches
+    /// (for at most `defend_max_block_ds`), or when the threatened Town is
+    /// contested or at or below `recall_wave_town_hp_permille` (M5b owner
+    /// decision 7).
     WhileStaging,
     /// Whenever an own Town is threatened (docs/design/ai.md rule 6 as
     /// first written).
@@ -308,8 +310,14 @@ pub struct Personality {
     pub defend_regoal_tiles: u32,
     /// Defence ends after this long with no threat.
     pub defend_release_ds: u32,
-    /// Defence blocks launches for at most this long.
+    /// Defence blocks launches (and calls a staging wave home) for at
+    /// most this long.
     pub defend_max_block_ds: u32,
+    /// Past `defend_max_block_ds`, while a launch is due, the home guard
+    /// is the home armed units nearest the threat until their pop reaches
+    /// this many times the threat's pop (at least one unit); the rest are
+    /// left to the wave at the rally.
+    pub defend_guard_pop_ratio: u32,
     /// When a wave is called home to defend.
     pub recall_wave: RecallWave,
     /// An assaulting wave is recalled when the threatened Town is at or
@@ -727,6 +735,7 @@ fn check_personalities(path: &Path, ai: &AiRules, rules: &Rules) -> Check {
             ("clear_defenders_units", p.clear_defenders_units),
             ("continue_min_units", p.continue_min_units),
             ("recall_below_units", p.recall_below_units),
+            ("defend_guard_pop_ratio", p.defend_guard_pop_ratio),
         ] {
             in_range(path, &f(name), v, 1, MAX_AI_CAP)?;
         }
@@ -1264,6 +1273,15 @@ mod tests {
                     "max_queue_per_building: 6,",
                 )],
                 &["personalities[0].max_queue_per_building", "train_queue_max"],
+            ),
+            (
+                "p-guard0",
+                &[(
+                    PE,
+                    "defend_guard_pop_ratio: 2,",
+                    "defend_guard_pop_ratio: 0,",
+                )],
+                &["personalities[0].defend_guard_pop_ratio", "1..=64"],
             ),
             (
                 "p-radius0",

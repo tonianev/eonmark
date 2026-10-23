@@ -9,24 +9,35 @@
 //! production cannot spend it), waits (every trainer or host of the step
 //! is busy or stands in a contested Town, a predecessor tech is still
 //! queued, no worker is free, or the plan's `check_build` probes ran
-//! out), or is
-//! blocked (any other rejection, no trainer or host built yet, no site,
-//! which includes a `NearTown` building with no uncontested own Town to
-//! go beside): a blocked step is cooled down for
-//! `blocked_retry_ds` in `BotMemory::blocked` and then retried; it never
-//! becomes a permanent skip. An `Advance` is never cooled down: while the
-//! techs it needs are still missing it waits and reserves nothing (the
-//! army and the steps behind it spend the stock meanwhile), and once they
-//! are done it saves up its cost until the stock fills, except while the
-//! bot defends (`BotMemory::defend`): then it reserves nothing, so the
-//! stock goes to the army first.
+//! out), or is blocked (any other rejection, no trainer or host built
+//! yet, no site, which includes a `NearTown` building with no uncontested
+//! own Town to go beside, or, for a `BorderEdge` building, enemy military
+//! within [`site_danger_tiles`] of the site found, so a lost border
+//! Watchtower is not placed again in front of the army that took it: a
+//! border edge site faces the enemy outside the defence's radius, while
+//! the other policies place nearer the bot's Towns): a blocked step is
+//! cooled down for `blocked_retry_ds` in `BotMemory::blocked` and then
+//! retried; it never becomes a permanent skip.
+//!
+//! **An `Advance`** is never cooled down: while the techs it needs are
+//! still missing it waits and reserves nothing (the army and the steps
+//! behind it spend the stock meanwhile), and once they are done it saves
+//! up its cost until the stock fills, at the pace of its scarcest
+//! resource ([`paced`]: each resource is held at the share of its cost
+//! the scarcest one has reached, so the surplus of the others still pays
+//! for the army), except while the bot defends (`BotMemory::defend`):
+//! then it reserves nothing, so the stock goes to the army first. Plan
+//! 4.1 has a step that cannot afford its cost reserve all of it; for an
+//! `Advance` that held the Charter's 500 Grain and 300 Lumber for minutes
+//! while its 300 Lore came in, and no army was trained meanwhile.
 //!
 //! **The `Military` latch** is set once every non-optional step before
 //! the `Military` step is done, and never cleared.
 //!
 //! **The site keeper** gives one of the bot's construction sites with no
 //! builder per plan a builder, with a `Build` on the site's own tile (a
-//! free resume).
+//! free resume); a border building's site with enemy military in reach
+//! gets none.
 //!
 //! **The remembered site** (`BotMemory::site`) is the last site chosen for
 //! a `Build` step: tried first on the step's next plan, forgotten when a
@@ -34,11 +45,11 @@
 
 use super::ctx::Ctx;
 use super::economy;
-use super::facts::{Facts, kind_centre};
+use super::facts::{Facts, kind_centre, tiles_sq};
 use super::memory::BotMemory;
 use super::sites::{SiteSearch, site_for};
-use rules::{BuildOrder, Rules, Step};
-use sim::{BuildingId, BuildingKindId, Command, RejectReason, TechId, UnitId, UnitKindId};
+use rules::{BuildOrder, Placement, Rules, Step, UnitClass};
+use sim::{BuildingId, BuildingKindId, Command, FxVec2, RejectReason, TechId, UnitId, UnitKindId};
 use std::collections::BTreeSet;
 
 /// Whether the view (through `facts`) shows `step` as done:
@@ -356,6 +367,14 @@ fn execute(ctx: &mut Ctx<'_>, mem: &mut BotMemory, i: usize) -> StepOutcome {
             let pool = builder_pool(ctx, mem);
             let step_index = u16::try_from(i).expect("at most 64 steps");
             match site_for(ctx, mem, step_index, k, at, &pool) {
+                // A border building is not placed in front of an enemy
+                // army: the step cools down.
+                SiteSearch::Found { tile, .. }
+                    if at == Placement::BorderEdge
+                        && enemy_military_near(ctx, kind_centre(rules, k, tile)) =>
+                {
+                    StepOutcome::Blocked
+                }
                 SiteSearch::Found { builder, tile } => {
                     if ctx.ledger.try_spend(&cost) {
                         ctx.claim(builder);
@@ -410,6 +429,11 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             // its place but leaves the stock to production.
             StepOutcome::Saving(_)
                 if mem.defend.is_some() && matches!(ctx.order.steps[i], Step::Advance { .. }) => {}
+            // An age saves at the pace of its scarcest resource.
+            StepOutcome::Saving(cost) if matches!(ctx.order.steps[i], Step::Advance { .. }) => {
+                let held = paced(&cost, &ctx.ledger);
+                ctx.ledger.reserve(&held);
+            }
             StepOutcome::Saving(cost) => ctx.ledger.reserve(&cost),
             StepOutcome::Blocked => {
                 if !matches!(ctx.order.steps[i], Step::Advance { .. }) {
@@ -425,21 +449,92 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     site_keeper(ctx, mem);
 }
 
+/// What an `Advance` saving up for `cost` holds back: each resource at the
+/// share of its cost that the scarcest resource has reached in `ledger`,
+/// `cost_r × min_r(available_r / cost_r)`, at most `cost_r` (integer
+/// cross-multiplication, rounded down). The scarce resource is held in
+/// full and the others only in step with it, so their surplus still pays
+/// for the army; every share only grows as stock comes in, and the whole
+/// cost is held once every resource has reached it.
+pub fn paced(cost: &[i64], ledger: &super::Ledger) -> Vec<i64> {
+    // The scarcest share so far, as the fraction n / d (start: all of it).
+    let (mut n, mut d) = (1i64, 1i64);
+    for (r, c) in cost.iter().enumerate() {
+        if *c > 0 {
+            let a = ledger.available(r).min(*c);
+            if a.saturating_mul(d) < n.saturating_mul(*c) {
+                n = a;
+                d = *c;
+            }
+        }
+    }
+    cost.iter()
+        .map(|c| (c.saturating_mul(n) / d).min(*c))
+        .collect()
+}
+
+/// How near enemy military may come to a site before a `Build` backs off
+/// and the site keeper sends no builder to it: the farthest any unit kind
+/// acquires or shoots (`acquire_range_tiles`, the longest weapon range
+/// rounded up to whole tiles), plus `stage_margin_tiles`.
+pub fn site_danger_tiles(ctx: &Ctx<'_>) -> u32 {
+    let rules = ctx.view.rules();
+    let weapon = rules
+        .units
+        .iter()
+        .filter_map(|u| u.attack.as_ref())
+        .map(|a| a.range_tiles_x100.div_ceil(100))
+        .max()
+        .unwrap_or(0);
+    rules
+        .acquire_range_tiles
+        .max(weapon)
+        .saturating_add(ctx.knobs.stage_margin_tiles)
+}
+
+/// Whether another player's armed unit (non-civilian, with an attack)
+/// stands within [`site_danger_tiles`] of `centre`.
+pub fn enemy_military_near(ctx: &Ctx<'_>, centre: FxVec2) -> bool {
+    let rules = ctx.view.rules();
+    let r2 = tiles_sq(site_danger_tiles(ctx));
+    ctx.view.units().any(|u| {
+        u.owner != ctx.me
+            && u.pos.dist_sq_i64(centre) <= r2
+            && rules
+                .unit_kind(u.kind.0)
+                .is_some_and(|k| k.class != UnitClass::Civilian && k.attack.is_some())
+    })
+}
+
 /// One own site with no builder gets the nearest worker of the builder
-/// pool, with a `Build` on its own tile (a free resume).
+/// pool, with a `Build` on its own tile (a free resume); the site of a
+/// border building (a kind that projects a border, the Watchtower) with
+/// enemy military in reach ([`enemy_military_near`]) gets none.
 pub fn site_keeper(ctx: &mut Ctx<'_>, mem: &BotMemory) {
     if ctx.commands_left == 0 || ctx.probes_left == 0 {
         return;
     }
+    let rules = ctx.view.rules();
     let held: BTreeSet<BuildingId> = ctx.facts.builders.keys().copied().collect();
-    let Some(site) = ctx.facts.sites.iter().copied().find(|s| !held.contains(s)) else {
+    let border = |kind: BuildingKindId| {
+        rules
+            .building_kind(kind.0)
+            .is_some_and(|d| d.border_radius_tiles.is_some())
+    };
+    let Some((kind, tile)) = ctx
+        .facts
+        .sites
+        .iter()
+        .filter(|s| !held.contains(s))
+        .filter_map(|s| ctx.view.building(*s))
+        .map(|b| (b.kind, b.tile))
+        .find(|(kind, tile)| {
+            !(border(*kind) && enemy_military_near(ctx, kind_centre(rules, *kind, *tile)))
+        })
+    else {
         return;
     };
-    let Some(b) = ctx.view.building(site) else {
-        return;
-    };
-    let (kind, tile) = (b.kind, b.tile);
-    let centre = kind_centre(ctx.view.rules(), kind, tile);
+    let centre = kind_centre(rules, kind, tile);
     let pool = builder_pool(ctx, mem);
     let Some(builder) = pool
         .iter()
@@ -464,7 +559,6 @@ pub fn site_keeper(ctx: &mut Ctx<'_>, mem: &BotMemory) {
 mod tests {
     use super::*;
     use crate::testkit::{Arena, P0, P1, grant_all, place, standard_vs_passive, unit_kind};
-    use rules::Placement;
     use sim::{Command, SimEvent, TargetId};
 
     fn order(steps: Vec<Step>) -> BuildOrder {
@@ -605,7 +699,8 @@ mod tests {
     /// An `Advance` that cannot be made yet is never cooled down. While the
     /// techs it needs are missing it reserves nothing, so the steps behind
     /// it and production may spend the stock; once they are researched it
-    /// saves up its cost, and the Yeoman behind it saves up too.
+    /// saves up its cost (at its scarcest resource's pace, [`paced`]), and
+    /// the Yeoman behind it saves up too.
     #[test]
     fn advance_is_never_cooled_down() {
         let r = crate::testkit::rules();
@@ -639,11 +734,19 @@ mod tests {
                 "the Yeoman spends the Grain: {cmds:?}"
             );
         }
+        // The techs done and 100 Lore in stock: the 150 Grain is the
+        // scarcest share of Masonry's 250 Grain and 100 Lore (60%), so all
+        // of it and 60 Lore are held (`paced`).
         let a = Arena::frozen(
             standard_vs_passive(&r),
             vec![
                 crate::testkit::research(&r, P0, "arms_1"),
                 crate::testkit::research(&r, P0, "trade_1"),
+                Command::DebugGrant {
+                    owner: P0,
+                    resource: 3,
+                    amount: 100,
+                },
             ],
         );
         assert!(matches!(
@@ -657,13 +760,71 @@ mod tests {
             assert!(mem.blocked.is_empty(), "never cooled down");
             assert_eq!(
                 ctx.ledger.reserved,
-                [250 + yeoman, 0, 0, 100],
-                "the techs are done: Masonry's cost is saved, and the Yeoman saves up behind it"
+                [150 + yeoman, 0, 0, 60],
+                "the techs are done: Masonry's cost is saved at its scarcest resource's pace, and the Yeoman saves up behind it"
             );
             let cmds = ctx.into_commands();
             assert!(
                 cmds.is_empty(),
                 "the Yeoman cannot use the reserved Grain: {cmds:?}"
+            );
+        }
+    }
+
+    /// Once its techs are done an `Advance` saves up at the pace of its
+    /// scarcest resource: every resource of its cost is held at the share
+    /// the scarcest one has reached, so the plentiful ones still pay for
+    /// the army while the scarce one builds up (the Charter's 300 Lore
+    /// starved army production for minutes when its whole cost was held).
+    /// Masonry costs 250 Grain and 100 Lore; the start holds 150 Grain.
+    #[test]
+    fn an_advance_saves_at_the_pace_of_its_scarcest_resource() {
+        let r = crate::testkit::rules();
+        let o = order(vec![Step::Advance {
+            age: "masonry".into(),
+        }]);
+        let lore = |amount| Command::DebugGrant {
+            owner: P0,
+            resource: 3,
+            amount,
+        };
+        for (granted, held, trains) in [
+            // 40 of 100 Lore: 40% of the Grain is held, 50 Grain is free
+            // and a 40-Grain Skirmisher trains.
+            (40, [100, 0, 0, 40], true),
+            // 120 Lore: Grain is the scarcest now (150 of 250, 60%), all
+            // of it is held, and the army waits.
+            (120, [150, 0, 0, 60], false),
+        ] {
+            let a = Arena::frozen(
+                standard_vs_passive(&r),
+                vec![
+                    crate::testkit::research(&r, P0, "arms_1"),
+                    crate::testkit::research(&r, P0, "trade_1"),
+                    place(&r, P0, "muster_hall", 29, 66),
+                    lore(granted),
+                ],
+            );
+            assert!(matches!(
+                a.sim.view().check_advance_age(P0),
+                Err(RejectReason::CannotAfford { .. })
+            ));
+            let hall = a.buildings_of(P0, "muster_hall")[0];
+            let mut mem = BotMemory {
+                military: true,
+                ..BotMemory::default()
+            };
+            let mut ctx = a.ctx(P0);
+            ctx.order = &o;
+            step(&mut ctx, &mut mem);
+            assert_eq!(ctx.ledger.reserved, held, "{granted} Lore");
+            crate::standard::army::produce(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            assert_eq!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::Train { building, .. } if *building == hall)),
+                trains,
+                "{granted} Lore: {cmds:?}"
             );
         }
     }
@@ -779,6 +940,130 @@ mod tests {
         step(&mut ctx, &mut mem);
         assert!(ctx.into_commands().is_empty(), "the site has its builder");
         let _ = P1;
+    }
+
+    /// A border building's `Build` step (`BorderEdge`) backs off while
+    /// enemy military stands within reach of its site (the border
+    /// Watchtower was placed again and again in front of an enemy army,
+    /// losing its Ore and its builders): the step is blocked and cools
+    /// down, nothing is spent and the site is forgotten. An enemy Yeoman
+    /// there is no threat, and with no enemy the same step builds at once.
+    /// A `NearTown` building, beside a Town the defence covers, is placed
+    /// with the same enemies beside its site.
+    #[test]
+    fn a_build_backs_off_from_enemy_military_at_its_site() {
+        let r = crate::testkit::rules();
+        let o = order(vec![build("watchtower", 1, Placement::BorderEdge)]);
+        let arena = |enemy: Option<(&str, i32, i32)>| {
+            let mut setup = grant_all(&r, P0, 200);
+            if let Some((kind, x, y)) = enemy {
+                setup.push(crate::testkit::spawn(&r, P1, kind, x, y, 3));
+            }
+            Arena::frozen(standard_vs_passive(&r), setup)
+        };
+        // With no enemy: the tower is placed at the border edge.
+        let quiet = arena(None);
+        let mut mem = BotMemory::default();
+        let mut ctx = quiet.ctx(P0);
+        ctx.order = &o;
+        step(&mut ctx, &mut mem);
+        let cmds = ctx.into_commands();
+        let [Command::Build { tile, .. }] = cmds[..] else {
+            panic!("the tower is placed: {cmds:?}");
+        };
+        let (x, y) = (i32::from(tile.x) + 3, i32::from(tile.y) + 3);
+        // Enemy Skirmishers three tiles off the site: blocked.
+        let raided = arena(Some(("skirmisher", x, y)));
+        let mut mem = BotMemory::default();
+        let mut ctx = raided.ctx(P0);
+        ctx.order = &o;
+        step(&mut ctx, &mut mem);
+        let stock = ctx.ledger.stock.clone();
+        assert!(
+            ctx.into_commands().is_empty(),
+            "no tower in front of an army"
+        );
+        assert_eq!(stock, [200 + 150, 200 + 150, 200, 200], "nothing spent");
+        let tick = raided.sim.tick();
+        let retry = raided.ctx(P0).ticks(raided.ctx(P0).knobs.blocked_retry_ds);
+        assert_eq!(mem.blocked, [(0, tick + retry)], "cooled down");
+        assert_eq!(mem.site, None, "the site is forgotten");
+        // Enemy Yeomen there: placed all the same.
+        let civilians = arena(Some(("yeoman", x, y)));
+        let mut mem = BotMemory::default();
+        let mut ctx = civilians.ctx(P0);
+        ctx.order = &o;
+        step(&mut ctx, &mut mem);
+        assert!(
+            matches!(ctx.into_commands()[..], [Command::Build { .. }]),
+            "Yeomen are no threat"
+        );
+        // A Croft beside the Seat: placed though enemies stand by its site.
+        let croft = order(vec![build("croft", 1, Placement::NearTown)]);
+        let mut ctx = quiet.ctx(P0);
+        ctx.order = &croft;
+        step(&mut ctx, &mut BotMemory::default());
+        let cmds = ctx.into_commands();
+        let [Command::Build { tile, .. }] = cmds[..] else {
+            panic!("the Croft is placed: {cmds:?}");
+        };
+        let near = arena(Some((
+            "skirmisher",
+            i32::from(tile.x) + 3,
+            i32::from(tile.y) + 3,
+        )));
+        let mut ctx = near.ctx(P0);
+        ctx.order = &croft;
+        step(&mut ctx, &mut BotMemory::default());
+        assert!(
+            matches!(ctx.into_commands()[..], [Command::Build { .. }]),
+            "a NearTown site is the defence's to keep"
+        );
+    }
+
+    /// The site keeper sends no builder to a border building's site with
+    /// enemy military in reach (the builders walked into the army one by
+    /// one); a tower site with no enemy near gets one, and so does a Croft
+    /// site with the same enemies beside it.
+    #[test]
+    fn site_keeper_sends_no_builder_into_an_enemy_army() {
+        let r = crate::testkit::rules();
+        let tower = crate::testkit::building_kind(&r, "watchtower");
+        let croft = crate::testkit::building_kind(&r, "croft");
+        let o = order(vec![Step::Wait { until_ds: 72_000 }]);
+        for (kind, (x, y), raided, resumed) in [
+            (tower, (40, 64), false, true),
+            (tower, (40, 64), true, false),
+            (croft, (29, 66), true, true),
+        ] {
+            let mut setup = vec![Command::DebugPlaceBuilding {
+                owner: P0,
+                kind,
+                tile: sim::Tile::new(x, y),
+                complete: false,
+            }];
+            if raided {
+                setup.push(crate::testkit::spawn(
+                    &r,
+                    P1,
+                    "skirmisher",
+                    i32::from(x) + 4,
+                    i32::from(y) + 3,
+                    3,
+                ));
+            }
+            let a = Arena::frozen(standard_vs_passive(&r), setup);
+            let mut mem = BotMemory::default();
+            let mut ctx = a.ctx(P0);
+            ctx.order = &o;
+            step(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            assert_eq!(
+                matches!(cmds[..], [Command::Build { kind: k, .. }] if k == kind),
+                resumed,
+                "{kind:?} raided {raided}: {cmds:?}"
+            );
+        }
     }
 
     /// The site chosen for a `Build` step is remembered while the step is

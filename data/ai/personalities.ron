@@ -22,7 +22,8 @@
       ring_units: 4, clear_defenders_units: 4, continue_min_units: 4,
       recall_below_units: 3, wave_max_ds: 3600, all_in_after_ds: 18000,
       defend_radius_tiles: 16, defend_regoal_tiles: 4, defend_release_ds: 150,
-      defend_max_block_ds: 600, recall_wave: WhileStaging, recall_wave_town_hp_permille: 500,
+      defend_max_block_ds: 600, defend_guard_pop_ratio: 2,
+      recall_wave: WhileStaging, recall_wave_town_hp_permille: 500,
     ),
   ],
 )

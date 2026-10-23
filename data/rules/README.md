@@ -179,7 +179,10 @@ covers `../ai/`. M5b's economy slice (`rules_version` 22) changed only
 re-recorded fixtures differ in their headers only. Its waves slice
 (`rules_version` 23) again changed only `../ai/` (the Standard build
 order), with the same header-only re-record, and added the
-`m5_first_match` golden.
+`m5_first_match` golden; its review fixes (`rules_version` 24) added the
+`defend_guard_pop_ratio` knob to `../ai/personalities.ron`, again with a
+header-only re-record (only `m5_first_match`, new in that pull request,
+moved with the bot's code).
 
 ## resources.ron
 
@@ -556,7 +559,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (23 to 24), update the one-line
+2. Bump `rules_version` in `rules.ron` (24 to 25), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -568,8 +571,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=24 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
-(the repository is at 23, so before the edit it prints `rules_version=23`;
+`OK rules_version=25 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
+(the repository is at 24, so before the edit it prints `rules_version=24`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`

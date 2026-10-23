@@ -1155,7 +1155,7 @@ fn bot_takes_seat() {
 /// to the step that decides the match, verifies with the bots rebuilt
 /// from its header (`ai::controller_for`) to the hash in
 /// `m5_first_match.hash`, which `play-bots --seeds 1..5 --a standard --b
-/// standard` prints for seed 1. Long (about 27500 ticks), so verified by
+/// standard` prints for seed 1. Long (about 26000 ticks), so verified by
 /// `sim-cli verify --release` in CI (rule 18).
 #[test]
 #[ignore = "long golden; verified by sim-cli verify --release in CI"]

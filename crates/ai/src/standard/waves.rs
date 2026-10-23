@@ -300,23 +300,36 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     }
 }
 
+/// Whether a launch is due but for the defence and the units: no wave is
+/// out, the bot has reached `wave_requires_age`, and the tick has reached
+/// `next_wave_at` and `first_wave_not_before_ds` (always, during the
+/// all-in). Past its cap the defence sizes its guard by it
+/// ([`super::defend`]), so the assembled units are left to the wave.
+pub fn launch_due(ctx: &Ctx<'_>, mem: &BotMemory) -> bool {
+    if mem.wave.is_some() {
+        return false;
+    }
+    if let Some(age) = &ctx.knobs.wave_requires_age
+        && ctx
+            .view
+            .rules()
+            .age_index(age)
+            .is_none_or(|a| ctx.facts.age < a)
+    {
+        return false;
+    }
+    let not_before = mem
+        .next_wave_at
+        .max(ctx.ticks(ctx.knobs.first_wave_not_before_ds));
+    all_in(ctx) || ctx.tick() >= not_before
+}
+
 /// Launch a wave when every condition holds (see the module docs).
 fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     let tick = ctx.tick();
     let rules = ctx.view.rules();
     let all_in = all_in(ctx);
-    if launch_blocked(ctx, mem) || ctx.commands_left < 2 {
-        return;
-    }
-    if let Some(age) = &ctx.knobs.wave_requires_age
-        && rules.age_index(age).is_none_or(|a| ctx.facts.age < a)
-    {
-        return;
-    }
-    let not_before = mem
-        .next_wave_at
-        .max(ctx.ticks(ctx.knobs.first_wave_not_before_ds));
-    if !all_in && tick < not_before {
+    if launch_blocked(ctx, mem) || ctx.commands_left < 2 || !launch_due(ctx, mem) {
         return;
     }
     let home = home_armed(ctx, mem);

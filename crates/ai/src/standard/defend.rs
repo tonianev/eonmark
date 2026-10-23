@@ -5,24 +5,36 @@
 //! engaged Town is the one with the most threatening pop, the Seat first
 //! in a tie, then the lowest id. While a threat is seen the defend latch
 //! (`BotMemory::defend`) is set and refreshed, and the home guard (every
-//! home armed unit, claimed here) attack-moves to the threatening unit
-//! nearest each guard (so a parked raider is killed, not just watched);
-//! enemy siege in reach also gets an explicit `Attack` from up to
-//! [`SIEGE_GUARDS`] guards. Production runs while the latch is set
-//! (`army::producing`). A wave is called home while it is staging, or
-//! when a threatened Town (any Town with a threat, the engaged one or
-//! not) is contested or at or below
+//! home armed unit, claimed here, until the cap below) attack-moves to
+//! the threatening unit nearest each guard (so a parked raider is killed,
+//! not just watched); enemy siege in reach also gets an explicit `Attack`
+//! from up to [`SIEGE_GUARDS`] guards. Production runs while the latch is
+//! set (`army::producing`). A wave is called home while it is staging and
+//! the latch still blocks launches, or when a threatened Town (any Town
+//! with a threat, the engaged one or not) is contested or at or below
 //! `recall_wave_town_hp_permille` of its hit points (`recall_wave:
 //! WhileStaging`; `Always` recalls any wave), never once the all-in time
 //! is reached. After `defend_release_ds` with no threat the latch is
-//! released and the guard attack-moves back to the rally. Waves do not
-//! launch while the latch is set, for at most `defend_max_block_ds`
-//! ([`launch_blocked`]).
+//! released and the guard attack-moves back to the rally.
+//!
+//! **The cap** (M5b owner decision 7: a defence blocks launches for at
+//! most 60 s). Waves do not launch while the latch is set, for at most
+//! `defend_max_block_ds` ([`launch_blocked`]). Past that, while a launch
+//! is due ([`super::waves::launch_due`]), the guard is sized to the
+//! threat: the home armed units nearest it, siege last, until their pop
+//! reaches `defend_guard_pop_ratio` times the threats' pop (at least one
+//! unit). The rest away from the rally attack-move back to it, and the
+//! rest at the rally get no order and stay unclaimed, so the wave
+//! launches with them in the same plan; a wave launched so is not called
+//! home while it stages for the same defence. A raider kept on own land
+//! therefore holds launches back for `defend_max_block_ds` at most,
+//! however long it stays.
 
 use super::army::home_armed;
 use super::ctx::{Ctx, on_station};
 use super::facts::{kind_centre, tiles_sq};
 use super::memory::{BotMemory, Defend, WavePhase};
+use super::waves::launch_due;
 use rules::{RecallWave, UnitClass};
 use sim::{BuildingId, Command, FxVec2, Intent, TargetId, UnitId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,7 +128,9 @@ pub fn should_recall(ctx: &Ctx<'_>, mem: &BotMemory, town: BuildingId) -> bool {
                 i64::from(hp.max(0)) * 1000
                     <= i64::from(ctx.knobs.recall_wave_town_hp_permille) * i64::from(max.max(1))
             });
-            wave.phase == WavePhase::Stage || contested || low
+            // Past its cap the defence holds the army home no longer: a
+            // wave launched through it is not called back while staging.
+            (wave.phase == WavePhase::Stage && launch_blocked(ctx, mem)) || contested || low
         }
     }
 }
@@ -185,8 +199,13 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         .iter()
         .flat_map(|(_, u, _)| u.iter().copied())
         .collect();
-    let guard = home_armed(ctx, mem);
-    for g in &guard {
+    let home = home_armed(ctx, mem);
+    let (guard, back) = if launch_blocked(ctx, mem) || !launch_due(ctx, mem) {
+        (home, Vec::new())
+    } else {
+        sized_guard(ctx, home, &enemies)
+    };
+    for g in guard.iter().chain(back.iter()) {
         ctx.claim(*g);
     }
     let view = ctx.view;
@@ -252,6 +271,73 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         moves.push((*g, ep));
     }
     ctx.order_grouped(moves, |units, target| Command::AttackMove { units, target });
+    let rally = ctx.rally();
+    ctx.order(back, |units| Command::AttackMove {
+        units,
+        target: rally,
+    });
+}
+
+/// The guard past the cap while a launch is due: the home armed units
+/// nearest a threat, siege last (ties to the lowest id), until their pop
+/// reaches `defend_guard_pop_ratio` times the threats' pop, at least one
+/// unit.
+/// Returns it and the rest that are away from the rally and not already
+/// heading there (they go back to it). The rest at the rally get no order
+/// and stay unclaimed, so the wave can take them in the same plan.
+fn sized_guard(
+    ctx: &mut Ctx<'_>,
+    home: Vec<UnitId>,
+    enemies: &BTreeSet<UnitId>,
+) -> (Vec<UnitId>, Vec<UnitId>) {
+    let view = ctx.view;
+    let rules = view.rules();
+    let pop = |id: UnitId| {
+        view.unit(id)
+            .and_then(|u| rules.unit_kind(u.kind.0))
+            .map_or(1, |k| k.pop)
+    };
+    let threat = enemies.iter().fold(0u32, |p, e| p.saturating_add(pop(*e)));
+    let want = threat.saturating_mul(ctx.knobs.defend_guard_pop_ratio);
+    // Siege last: slow, and no match for the raiders a guard chases.
+    let mut near: Vec<(bool, i64, UnitId)> = home
+        .iter()
+        .filter_map(|g| {
+            let u = view.unit(*g)?;
+            let siege = rules
+                .unit_kind(u.kind.0)
+                .is_some_and(|k| k.class == UnitClass::Siege);
+            let d = enemies
+                .iter()
+                .filter_map(|e| Some(view.unit(*e)?.pos.dist_sq_i64(u.pos)))
+                .min()?;
+            Some((siege, d, *g))
+        })
+        .collect();
+    near.sort();
+    let mut guard = Vec::new();
+    let mut held = 0u32;
+    let mut rest = Vec::new();
+    for (_, _, g) in near {
+        if guard.is_empty() || held < want {
+            held = held.saturating_add(pop(g));
+            guard.push(g);
+        } else {
+            rest.push(g);
+        }
+    }
+    guard.sort();
+    let rally = ctx.rally();
+    let assembled = tiles_sq(ctx.knobs.assemble_radius_tiles);
+    let tol = ctx.knobs.goal_tolerance_tiles;
+    let back = rest
+        .into_iter()
+        .filter(|g| {
+            view.unit(*g)
+                .is_some_and(|u| u.pos.dist_sq_i64(rally) > assembled && !on_station(u, rally, tol))
+        })
+        .collect();
+    (guard, back)
 }
 
 /// No threat this plan: release the latch once `defend_release_ds` has
@@ -367,6 +453,194 @@ mod tests {
         assert_eq!(mem.defends, 1);
         assert!(!launch_blocked(&a.ctx(P0), &mem));
         assert_eq!(a.units_of(P0, "skirmisher").len(), 4, "no guard lost");
+    }
+
+    /// The arena of the launch-cap tests: P0 in the Masonry Age at tick
+    /// 1400 with 12 Skirmishers, a Mangonel and a Supply Wain at its rally
+    /// (36,64), and one P1 Outrider (pop 2) on P0's land at (24,51).
+    fn raided_rally(r: &rules::Rules) -> Arena {
+        let mut a = Arena::frozen(
+            standard_vs_passive(r),
+            vec![Command::DebugAdvanceAge { owner: P0 }],
+        );
+        a.run(1400);
+        a.issue(
+            P0,
+            vec![
+                spawn(r, P0, "skirmisher", 36, 64, 12),
+                spawn(r, P0, "mangonel", 36, 64, 1),
+                spawn(r, P0, "supply_wain", 36, 64, 1),
+                spawn(r, P1, "outrider", 24, 51, 1),
+            ],
+        );
+        a
+    }
+
+    /// A defence blocks launches for at most `defend_max_block_ds` (M5b
+    /// owner decision 7), though the raider stays on own land: past the
+    /// cap a guard still attack-moves to it, the units assembled at the
+    /// rally are left to the wave and the wave launches in the same plan.
+    /// Inside the cap the whole home army guards and nothing launches.
+    #[test]
+    fn a_defence_past_its_cap_lets_the_assembled_wave_launch() {
+        let r = crate::testkit::rules();
+        for (latch_age, launches) in [(100, false), (1300, true)] {
+            let a = raided_rally(&r);
+            let tick = a.sim.tick();
+            let raider = a.units_of(P1, "outrider")[0];
+            let raider_at = a.sim.view().unit(raider).unwrap().pos;
+            let mut armed = a.units_of(P0, "skirmisher");
+            armed.extend(a.units_of(P0, "mangonel"));
+            armed.sort();
+            let mut mem = BotMemory {
+                military: true,
+                defend: Some(Defend {
+                    town: a.seat(P0),
+                    last_threat: tick - 10,
+                    since: tick - latch_age,
+                }),
+                ..BotMemory::default()
+            };
+            let mut ctx = a.ctx(P0);
+            assert_eq!(launch_blocked(&ctx, &mem), !launches);
+            crate::standard::run_rules(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            let guard: Vec<UnitId> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    Command::AttackMove { units, target } if *target == raider_at => {
+                        Some(units.clone())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert!(
+                mem.defend.is_some(),
+                "{latch_age}: the raider is still seen"
+            );
+            assert_eq!(
+                mem.waves_launched,
+                u16::from(launches),
+                "{latch_age}: {cmds:?}"
+            );
+            if launches {
+                let w = mem.wave.expect("a wave");
+                assert!(w.units.len() >= 8, "{:?}", w.units);
+                assert!(w.units.contains(&a.units_of(P0, "mangonel")[0]));
+                assert!(
+                    !guard.is_empty(),
+                    "a guard still goes at the raider: {cmds:?}"
+                );
+                assert!(
+                    guard.iter().all(|g| !w.units.contains(g)),
+                    "the guard stays out of the wave"
+                );
+                assert!(
+                    guard.len() >= 2,
+                    "Skirmishers outweighing the raider's pop 2 guard: {guard:?}"
+                );
+            } else {
+                assert_eq!(guard, armed, "the whole home army guards: {cmds:?}");
+            }
+        }
+    }
+
+    /// Past the cap, with a launch due, the guard is sized to the threat:
+    /// the home armed units nearest the raider until their pop reaches
+    /// `defend_guard_pop_ratio` times its pop; units away from the rally go
+    /// back to it, and those at the rally get no order and stay unclaimed.
+    #[test]
+    fn past_the_cap_the_guard_is_sized_to_the_threat() {
+        let r = crate::testkit::rules();
+        let mut a = raided_rally(&r);
+        a.issue(P0, vec![spawn(&r, P0, "skirmisher", 36, 80, 3)]);
+        let tick = a.sim.tick();
+        let raider = a.units_of(P1, "outrider")[0];
+        let view = a.sim.view();
+        let raider_at = view.unit(raider).unwrap().pos;
+        let skirm = a.units_of(P0, "skirmisher");
+        let (at_rally, away) = skirm.split_at(12);
+        let mut by_distance: Vec<(i64, UnitId)> = at_rally
+            .iter()
+            .map(|u| (view.unit(*u).unwrap().pos.dist_sq_i64(raider_at), *u))
+            .collect();
+        by_distance.sort();
+        let mut mem = BotMemory {
+            military: true,
+            defend: Some(Defend {
+                town: a.seat(P0),
+                last_threat: tick - 10,
+                since: tick - 1300,
+            }),
+            ..BotMemory::default()
+        };
+        let mut ctx = a.ctx(P0);
+        let rally = ctx.rally();
+        // The Outrider's pop is 2; Skirmishers are pop 1 each.
+        let want = usize::try_from(2 * ctx.knobs.defend_guard_pop_ratio).unwrap();
+        let mut guard: Vec<UnitId> = by_distance.iter().take(want).map(|(_, u)| *u).collect();
+        guard.sort();
+        step(&mut ctx, &mut mem);
+        let rest: Vec<UnitId> = at_rally
+            .iter()
+            .chain(a.units_of(P0, "mangonel").iter())
+            .copied()
+            .filter(|u| !guard.contains(u))
+            .collect();
+        assert!(rest.iter().all(|u| !ctx.is_claimed(*u)), "left to the wave");
+        assert_eq!(
+            ctx.into_commands(),
+            [
+                Command::AttackMove {
+                    units: guard,
+                    target: raider_at
+                },
+                Command::AttackMove {
+                    units: away.to_vec(),
+                    target: rally
+                }
+            ]
+        );
+    }
+
+    /// A wave launched past the cap stages on while the same old defence
+    /// goes on (else the cap would not hold: the next plan would call it
+    /// home); a defence inside the cap still recalls a staging wave.
+    #[test]
+    fn a_staging_wave_is_recalled_only_inside_the_cap() {
+        let r = crate::testkit::rules();
+        for (latch_age, recalled) in [(100, true), (1300, false)] {
+            let mut a = Arena::frozen(
+                standard_vs_passive(&r),
+                vec![Command::DebugAdvanceAge { owner: P0 }],
+            );
+            a.run(1400);
+            a.issue(
+                P0,
+                vec![
+                    spawn(&r, P0, "skirmisher", 60, 64, 8),
+                    spawn(&r, P1, "outrider", 24, 51, 1),
+                ],
+            );
+            let tick = a.sim.tick();
+            let roster = a.units_of(P0, "skirmisher");
+            let mut w = wave(roster, a.seat(P1), WavePhase::Stage);
+            w.launched_at = tick - 50;
+            w.phase_at = tick - 50;
+            let mut mem = BotMemory {
+                wave: Some(w),
+                defend: Some(Defend {
+                    town: a.seat(P0),
+                    last_threat: tick - 10,
+                    since: tick - latch_age,
+                }),
+                ..BotMemory::default()
+            };
+            let mut ctx = a.ctx(P0);
+            step(&mut ctx, &mut mem);
+            assert_eq!(mem.wave.is_none(), recalled, "latch {latch_age} ticks old");
+        }
     }
 
     fn wave(units: Vec<UnitId>, target: BuildingId, phase: WavePhase) -> Wave {

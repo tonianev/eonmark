@@ -88,8 +88,13 @@ down, in order. For each, within the plan's caps:
   site per step and plan);
 - it **saves up** when the stock is short: the step's cost is reserved,
   so later steps and army production cannot spend it. An `Advance` saves
-  up only once the techs it needs are researched, and not while the bot
-  defends: then it keeps its place but reserves nothing, so the stock
+  up only once the techs it needs are researched, and at the pace of its
+  scarcest resource: each resource of its cost is held at the share of
+  that cost the scarcest one has reached (with 4 of the Charter's 300
+  Lore in stock it holds 6 of its 500 Grain), so the surplus of the
+  others still pays for the army while the scarce one comes in, and the
+  whole cost is held once every resource has reached it. While the bot
+  defends an `Advance` keeps its place but reserves nothing, so the stock
   goes to the army first;
 - it **waits** while every trainer or host of the step is busy or stands
   in a contested Town, a predecessor tech is still queued, every worker is
@@ -97,9 +102,13 @@ down, in order. For each, within the plan's caps:
   techs it needs are still missing;
 - it is **blocked** for any other reason (no trainer or host built yet,
   the age not reached, no site (a `NearTown` building with no uncontested
-  own Town to go beside has none), the pop cap): it reserves nothing and
-  leaves the window for `blocked_retry_ds`, then is tried again. It never
-  becomes a permanent skip, and an `Advance` is never blocked.
+  own Town to go beside has none), the pop cap, or, for a `BorderEdge`
+  building, enemy military near the site found: any other player's armed
+  unit within the farthest reach of any unit kind, `acquire_range_tiles`
+  or its longest weapon range, plus `stage_margin_tiles`; a border edge
+  site faces the enemy outside the defence's radius): it reserves nothing
+  and leaves the window for `blocked_retry_ds`, then is tried again. It
+  never becomes a permanent skip, and an `Advance` is never blocked.
 
 Builders are idle workers, or, when none is idle, the gatherers of the
 resource most over its share. Sites come from the `at` policy: `NearTown`
@@ -115,7 +124,9 @@ start, `tower_spacing_tiles` from other border buildings. Every site keeps
 a passable ring of `building_gap_tiles` free of other buildings, the sites
 chosen earlier in the same plan included (a yard or pit may touch its
 resource), has no unit on it, and passes `check_build`. A site without a
-builder gets one again (a free resume). Crossing the `Military` step
+builder gets one again (a free resume), unless it is a border
+building's (a kind with `border_radius_tiles`, the Watchtower) and enemy
+military stands that near it. Crossing the `Military` step
 (every non-optional step before it done) latches army production for
 good; a defence also starts it. Production keeps the army near the
 `army_mix` weights: each free trainer trains the kind it can train that
@@ -154,10 +165,16 @@ Engine Yard fill the army with Mangonels.
 | `siege_focus_tiles`, `wain_standoff_tiles`, `wain_leash_tiles` | Siege this close attacks the target; the Wain's margin outside every enemy shooter's range and its leash | 1 to 64 |
 | `ring_units`, `clear_defenders_units`, `continue_min_units`, `recall_below_units` | Units posted on a Town's ring to annex it, sent at its defenders, needed to go on to the next Town, below which a wave comes home | 1 to 64 |
 | `wave_max_ds`, `all_in_after_ds` | A wave ends after this long unless it is annexing; from this match time every armed unit joins and nothing is recalled | 1 to 72000; 0 to 72000 |
-| `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
-| `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave, or an assaulting one when any threatened Town, the engaged one or another, is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
+| `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches, and calls a staging wave home, for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
+| `defend_guard_pop_ratio` | Past `defend_max_block_ds`, while a launch is due, the home guard is the home armed units nearest the threat (siege last) until their pop reaches this many times the threat's pop, at least one unit; the rest go back to the rally, and those at the rally are left to the wave | 1 to 64 |
+| `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave while the defence still blocks launches, or an assaulting one when any threatened Town, the engaged one or another, is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
 
-Since M5b's waves slice the bot reads every knob. A **wave** launches when
+Since M5b's waves slice the bot reads every knob. A **defence** (enemy
+military on own land near an own Town) sends every home armed unit at the
+nearest threat and blocks launches for at most `defend_max_block_ds`;
+past that, while a launch is due, the guard shrinks to
+`defend_guard_pop_ratio` times the threat's pop and the units at the rally
+launch the wave though the raid goes on. A **wave** launches when
 no wave is out, the defence does not block launches, the bot has reached
 `wave_requires_age`, the tick has reached the last launch plus
 `wave_interval_ds` and `first_wave_not_before_ds`, and at least the

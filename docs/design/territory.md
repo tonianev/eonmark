@@ -118,7 +118,7 @@ The game mirrors the field into a map-sized RGBA8 texture (128 x 128 on `plains_
 | R | owner id (0 neutral, else player index + 1) | territory, M3b |
 | G | strength of the owning layer at the tile, clamped to 255 | territory, M3b |
 | B | fog state 0 / 1 / 2 (see [fog.md](fog.md)) | visibility, M7 |
-| A | supply coverage (see [attrition.md](attrition.md)) | supply grid, M5a |
+| A | supply coverage (see [attrition.md](attrition.md)) | deferred to M7 with fog (M5a owner decision 10); M5a's game slice draws a supply radius ring around a selected Supply Wain instead (attrition.md, "M5a implementation notes") |
 
 M3b drew a vertex-colored version first (tint plus a hard border band) and replaced it within the milestone with the `FieldExt` material that reads this texture (`crates/game/src/field.rs`, `field.wgsl`; required by M7 in any case). The shader tints owned land about 12% toward the team colour and draws a 1-tile soft isoline where R changes: each owner's membership is interpolated between the four nearest tile centres with smoothstep weights, and the line peaks where it crosses one half. The texture is rewritten after a stepped tick only when the field's sources change, since the sources determine every layer and owner. The CPU-painted minimap (M7) reads the same field. See [ui.md](ui.md) and `docs/ART_STYLE.md`.
 

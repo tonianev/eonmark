@@ -46,7 +46,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 18 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 19 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -79,7 +79,7 @@ when you can; the validator does not require it.
 | `annexation_defenders` | Unit selectors whose units defend their own Town; every `Kind` names a unit and the list reaches at least one kind | `[Military]` | M5a |
 | `annexation_town_hp_permille` | A flipped Town's HP in permille of its kind's `hp`; `0..=1000` (250 is 500 of 2000) | 250 | M5a |
 | `match_cap_ds` | The match ends at this time with the territory tiebreak (27000 = 45 min = 54000 ticks); longer than `annexation_ds` | 27000 | M5a |
-| `yield_cap_decay_after_ds` | The late-game Yield Cap decay starts at this match time (18000 = minute 30 = tick 36000) | 18000 | M5a |
+| `yield_cap_decay_after_ds` | The late-game Yield Cap decay starts at this match time (18000 = minute 30 = tick 36000); 0 or more (0 starts it at tick 0), and its tick count must fit `u32` | 18000 | M5a |
 | `yield_cap_decay_every_ds` | The decay steps once per this long from then on (3000 = 5 min); at least one tick | 3000 | M5a |
 | `yield_cap_decay_step` | How much each decay step lowers the Yield Cap, at most `yield_cap_base`; 0 turns the knob off until an M6 fun-gate iteration | 0 | M5a |
 | `path_budget_expansions` | A* expansions shared per tick | 4000 | M1 |
@@ -116,9 +116,10 @@ removed at `rules_version` 6: vision is now `vision_tiles` on every kind in
 fails to load naming `vision`.
 
 Validation: every plain count, radius and timer in the table is > 0
-(`rules_version` and `yield_cap_base` included) and `tick_rate_hz` is at
-most 1000; `town_radius_grown_tiles >= town_radius_tiles`; `default_map`
-resolves to a file; `town_growth_age` is not `Some("")`. The ramp, queue,
+(`rules_version` and `yield_cap_base` included; `yield_cap_decay_after_ds`
+may be 0) and `tick_rate_hz` is at most 1000;
+`town_radius_grown_tiles >= town_radius_tiles`; `default_map` resolves to a
+file; `town_growth_age` is not `Some("")`. The ramp, queue,
 idle-seek and combat fields have ranges instead:
 `building_ramp_step_permille` and `military_ramp_step_permille` in
 `0..=10000`, `military_ramp_cap_permille` in `1000..=100000`,

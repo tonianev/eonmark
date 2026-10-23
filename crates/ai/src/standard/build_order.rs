@@ -11,7 +11,9 @@
 //! no site, no host): a blocked step is cooled down for
 //! `blocked_retry_ds` in `BotMemory::blocked` and then retried; it never
 //! becomes a permanent skip. An `Advance` is never cooled down: while the
-//! techs it needs finish or the stock fills, it saves up its cost.
+//! techs it needs finish or the stock fills, it saves up its cost, except
+//! while the bot defends (`BotMemory::defend`): then it reserves nothing,
+//! so the stock goes to the army first.
 //!
 //! **The `Military` latch** is set once every non-optional step before
 //! the `Military` step is done, and never cleared.
@@ -394,6 +396,10 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         }
         match execute(ctx, mem, i) {
             StepOutcome::Issued | StepOutcome::Waiting => {}
+            // A defence outranks saving for an age: the `Advance` keeps
+            // its place but leaves the stock to production.
+            StepOutcome::Saving(_)
+                if mem.defend.is_some() && matches!(ctx.order.steps[i], Step::Advance { .. }) => {}
             StepOutcome::Saving(cost) => ctx.ledger.reserve(&cost),
             StepOutcome::Blocked => {
                 if !matches!(ctx.order.steps[i], Step::Advance { .. }) {
@@ -619,6 +625,36 @@ mod tests {
                 "the Yeoman cannot use the reserved Grain: {cmds:?}"
             );
         }
+    }
+
+    /// While the bot defends, an `Advance` that cannot be made yet keeps
+    /// its place in the window but reserves nothing, so production can
+    /// spend the stock; it is still never cooled down.
+    #[test]
+    fn an_advance_reserves_nothing_while_the_bot_defends() {
+        let r = crate::testkit::rules();
+        let a = Arena::frozen(standard_vs_passive(&r), Vec::new());
+        let o = order(vec![Step::Advance {
+            age: "masonry".into(),
+        }]);
+        let tick = a.sim.tick();
+        let mut mem = BotMemory {
+            defend: Some(crate::standard::memory::Defend {
+                town: a.seat(P0),
+                last_threat: tick,
+                since: tick,
+            }),
+            ..BotMemory::default()
+        };
+        let mut ctx = a.ctx(P0);
+        ctx.order = &o;
+        assert_eq!(window(&ctx, &mem), [0]);
+        step(&mut ctx, &mut mem);
+        assert_eq!(ctx.ledger.reserved, [0, 0, 0, 0]);
+        assert!(mem.blocked.is_empty(), "never cooled down");
+        let mut ctx = a.ctx(P0);
+        ctx.order = &o;
+        assert_eq!(window(&ctx, &mem), [0], "it keeps its place");
     }
 
     /// The `Military` latch is set once the steps before it are done and

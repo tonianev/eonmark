@@ -424,11 +424,21 @@ fn m5b_sites_keep_connectivity() {
     assert!(checked >= 15, "{checked} buildings");
 }
 
+/// Whether `cmd` trains a non-civilian unit.
+fn trains_army(r: &Rules, cmd: &Command) -> bool {
+    matches!(cmd, Command::Train { kind, .. } if r.unit_kind(kind.0).is_some_and(|k| k.class != UnitClass::Civilian))
+}
+
 /// The bot answers a raid at minute 5: Passive debug-spawns six
-/// Skirmishers 10 tiles north of the Standard bot's Seat (P1). Within 200
-/// ticks the defend latch is set and the bot trains army (before its own
-/// `Military` step would); it then kills the raiders, releases the latch,
-/// and keeps every Town.
+/// Skirmishers 10 tiles north of the Standard bot's Seat (P1) at tick
+/// 6000. In this game P1's `Military` step is already latched (tick 4906,
+/// its Muster Hall complete at 5729), so production is running before the
+/// raid; emergency production before the latch is covered by
+/// `standard::defend::tests::emergency_production_before_the_military_latch`.
+/// Within 200 ticks the defend latch is set and a guard engages: P1
+/// issues an `AttackMove` within `defend_regoal_tiles` of a living raider
+/// (or an `Attack` on one). Army production goes on through the raid; the
+/// bot then kills the raiders, releases the latch, and keeps every Town.
 #[test]
 #[ignore = "long: a 12000-tick game; CI runs --ignored m5b_"]
 fn m5b_defend_answers_a_raid_at_minute_5() {
@@ -438,6 +448,13 @@ fn m5b_defend_answers_a_raid_at_minute_5() {
     let raid_at = 6000;
     let raid = common::spawn(&r, P0, "skirmisher", 103, 54, 6);
     let (mut m, log) = logged(&setup, &r, Some((raid_at, P0, raid)));
+    while m.sim.tick() < raid_at {
+        m.step();
+    }
+    assert!(
+        BotMemory::decode(m.sim.view().ai_memory(P1)).military,
+        "the setup's premise: P1's Military step is latched before the raid"
+    );
     while m.sim.tick() < raid_at + 3 {
         m.step();
     }
@@ -456,19 +473,44 @@ fn m5b_defend_answers_a_raid_at_minute_5() {
         .filter(|b| b.owner == P1 && b.town_state.is_some())
         .map(|b| b.id)
         .collect();
+    // Where the living raiders stand at each tick a plan may read.
+    let mut seen: BTreeMap<u32, Vec<FxVec2>> = BTreeMap::new();
     while m.sim.tick() < raid_at + 200 {
+        let view = m.sim.view();
+        seen.insert(
+            view.tick,
+            raiders
+                .iter()
+                .filter_map(|u| view.unit(*u).map(|u| u.pos))
+                .collect(),
+        );
         m.step();
     }
     let mem = BotMemory::decode(m.sim.view().ai_memory(P1));
-    assert!(mem.defend.is_some(), "engaged within 200 ticks");
+    assert!(mem.defend.is_some(), "the defend latch is set");
     {
+        let regoal = r.ai.personality("standard").unwrap().defend_regoal_tiles;
+        let r2 = ai::standard::facts::tiles_sq(regoal);
         let log = log.lock().unwrap();
-        let trained = log.iter().any(|(t, p, cmds)| {
+        let engaged = log.iter().any(|(t, p, cmds)| {
             *p == P1
                 && *t > raid_at
-                && cmds.iter().any(|c| matches!(c, Command::Train { kind, .. } if r.unit_kind(kind.0).is_some_and(|k| k.class != UnitClass::Civilian)))
+                && cmds.iter().any(|c| match c {
+                    Command::AttackMove { target, .. } => seen
+                        .get(t)
+                        .is_some_and(|at| at.iter().any(|x| x.dist_sq_i64(*target) <= r2)),
+                    Command::Attack {
+                        target: TargetId::Unit(u),
+                        ..
+                    } => raiders.contains(u),
+                    _ => false,
+                })
         });
-        assert!(trained, "army trained within 200 ticks of the raid");
+        assert!(engaged, "a guard engages a raider within 200 ticks");
+        let trained = log.iter().any(|(t, p, cmds)| {
+            *p == P1 && *t > raid_at && cmds.iter().any(|c| trains_army(&r, c))
+        });
+        assert!(trained, "army production goes on through the raid");
     }
     let mut cleared = None;
     while m.sim.tick() < 12_000 {
@@ -488,10 +530,52 @@ fn m5b_defend_answers_a_raid_at_minute_5() {
     for t in towns_before {
         assert_eq!(view.building(t).map(|b| b.owner), Some(P1), "no flip");
     }
-    let _ = (
-        FxVec2::ZERO,
-        TargetId::Unit(UnitId(0)),
-        SimEvent::TerritoryChanged,
+    let _ = SimEvent::TerritoryChanged;
+}
+
+/// A defence outranks saving for an age: Standard (P0) against Passive
+/// (P1), which debug-spawns three Skirmishers 13 tiles north of P0's Seat
+/// at tick 6200. P0's Muster Hall is up and idle and its `Military` step
+/// latched, but the Masonry `Advance` in its window is saving up its 250
+/// Grain while its techs finish. While the bot defends, that saving no
+/// longer holds the stock back from production, so P0 queues an armed
+/// unit within 200 ticks of the raid.
+#[test]
+#[ignore = "long: a 6400-tick game; CI runs --ignored m5b_"]
+fn m5b_defend_outranks_saving_for_an_age() {
+    let r = common::rules();
+    let setup = common::standard_vs_passive(&r);
+    let raid_at = 6200;
+    let raid = common::spawn(&r, P1, "skirmisher", 24, 51, 3);
+    let (mut m, log) = logged(&setup, &r, Some((raid_at, P1, raid)));
+    while m.sim.tick() < raid_at {
+        m.step();
+    }
+    let view = m.sim.view();
+    let mem = BotMemory::decode(view.ai_memory(P0));
+    let line = ai::describe(&view, P0);
+    assert!(
+        mem.military && line.contains("advance masonry"),
+        "the setup's premise: production latched, Masonry saved for: {line}"
+    );
+    while m.sim.tick() <= raid_at + 200 {
+        m.step();
+    }
+    assert!(
+        BotMemory::decode(m.sim.view().ai_memory(P0))
+            .defend
+            .is_some(),
+        "the defend latch is set"
+    );
+    let log = log.lock().unwrap();
+    let first = log
+        .iter()
+        .filter(|(t, p, _)| *p == P0 && *t > raid_at)
+        .find(|(_, _, cmds)| cmds.iter().any(|c| trains_army(&r, c)))
+        .map(|(t, _, _)| *t);
+    assert!(
+        first.is_some_and(|t| t <= raid_at + 200),
+        "the first armed unit queued after the raid at {raid_at}: {first:?}"
     );
 }
 

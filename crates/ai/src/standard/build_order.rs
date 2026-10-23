@@ -544,8 +544,7 @@ pub fn site_keeper(ctx: &mut Ctx<'_>, mem: &BotMemory) {
     else {
         return;
     };
-    ctx.probes_left -= 1;
-    if ctx.view.check_build(ctx.me, builder, kind, tile).is_ok() {
+    if ctx.check_build(builder, kind, tile).is_ok() {
         ctx.claim(builder);
         ctx.push(Command::Build {
             unit: builder,

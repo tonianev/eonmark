@@ -118,7 +118,7 @@ impl StandardBot {
             memory.set(bytes);
         }
         let stats = PlanStats {
-            probes: knobs.site_checks_per_think.saturating_sub(ctx.probes_left),
+            probes: ctx.probes_made,
         };
         let cmds = ctx.into_commands();
         (cmds, stats)
@@ -151,8 +151,8 @@ impl StandardBot {
 /// `m5b_standard_respects_work_caps`, reads it).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PlanStats {
-    /// `check_build` probes made (each a full-map search), at most
-    /// `site_checks_per_think`.
+    /// `check_build` probes made (each a full-map search), counted by
+    /// [`Ctx::check_build`]; at most `site_checks_per_think`.
     pub probes: u32,
 }
 

@@ -467,8 +467,7 @@ fn probe(
         .filter_map(|id| ctx.view.unit(*id))
         .min_by_key(|u| (u.pos.dist_sq_i64(centre), u.id))?
         .id;
-    ctx.probes_left -= 1;
-    Some(match ctx.view.check_build(ctx.me, builder, kind, tile) {
+    Some(match ctx.check_build(builder, kind, tile) {
         Ok(_) => SiteSearch::Found { builder, tile },
         Err(_) => SiteSearch::NoSite,
     })
@@ -617,7 +616,7 @@ mod tests {
                 "{p:?} {found:?}"
             );
             assert_eq!(mem.site, Some((9, pinned)), "remembered");
-            assert_eq!(ctx.probes_left, 3, "one probe");
+            assert_eq!((ctx.probes_left, ctx.probes_made), (3, 1), "one probe");
         }
     }
 

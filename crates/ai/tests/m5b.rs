@@ -289,15 +289,17 @@ fn par<T: Send>(games: Vec<Box<dyn FnOnce() -> T + Send>>) -> Vec<T> {
     })
 }
 
-/// Standard against Passive with the Standard bot in `seat`, to
-/// `ticks` or the outcome; returns the observed facts of the Standard
-/// side.
-fn vs_passive(seed: u64, seat: PlayerId, ticks: u32) -> Side {
-    vs_passive_under(common::rules(), seed, seat, ticks)
+/// A Standard-against-Passive game's end: the Standard side's observed
+/// facts, the tick reached and whether the match was decided.
+struct VsPassive {
+    side: Side,
+    tick: u32,
+    decided: bool,
 }
 
-/// [`vs_passive`] under rules `r`.
-fn vs_passive_under(r: Rules, seed: u64, seat: PlayerId, ticks: u32) -> Side {
+/// Standard against Passive under rules `r`, with the Standard bot in
+/// `seat`, to `ticks` or the outcome.
+fn vs_passive_under(r: Rules, seed: u64, seat: PlayerId, ticks: u32) -> VsPassive {
     let (a, b) = if seat == P0 {
         (("standard", "standard"), ("passive", ""))
     } else {
@@ -306,33 +308,53 @@ fn vs_passive_under(r: Rules, seed: u64, seat: PlayerId, ticks: u32) -> Side {
     let setup = MatchSetup::bots(&r, seed, a, b);
     let mut m = BotMatch::with_bots(setup, r).unwrap();
     m.run(ticks);
-    m.observer.sides()[usize::from(seat.0)]
+    VsPassive {
+        side: m.observer.sides()[usize::from(seat.0)],
+        tick: m.sim.tick(),
+        decided: m.sim.result().is_some(),
+    }
 }
 
-/// The build order never stalls: every non-optional step is done before
-/// tick 30000 in five seeds, from either seat. The first wave takes
-/// Passive's Seat around tick 15600, before the build order's last steps
-/// (the match is then decided and the bots stop), so these games run with
-/// the waves held back past the match cap (`first_wave_not_before_ds` at
-/// its maximum): the army is still trained and paid for as in a real
-/// game, so the build order competes for the same stock.
-#[test]
-#[ignore = "long: five 30000-tick games a side; CI runs --ignored m5b_"]
-fn m5b_build_order_completes_vs_passive_by_30000() {
+/// The rules with every wave held back past the match cap
+/// (`first_wave_not_before_ds` at its maximum). The first wave takes
+/// Passive's Seat around tick 15600, the match is then decided and the
+/// bots stop; held back, a game against Passive runs its whole length
+/// undecided while the army is still trained and paid for as in a real
+/// game, so the build order competes for the same stock. (The all-in, at
+/// `all_in_after_ds` = tick 36000, would launch anyway; no game here runs
+/// past 36000.)
+fn waves_held_back() -> Rules {
     let mut r = common::rules();
     for p in &mut r.ai.personalities {
         p.first_wave_not_before_ds = rules::ai::MAX_AI_DS;
     }
     assert!(r.ticks_from_ds(rules::ai::MAX_AI_DS) > r.match_cap_ticks());
+    r
+}
+
+/// The build order never stalls: every non-optional step is done before
+/// tick 30000 in five seeds, from either seat, in games that run the whole
+/// 30000 ticks undecided with the waves held back ([`waves_held_back`]).
+#[test]
+#[ignore = "long: five 30000-tick games a side; CI runs --ignored m5b_"]
+fn m5b_build_order_completes_vs_passive_by_30000() {
+    let r = waves_held_back();
     for seat in [P0, P1] {
-        let games: Vec<Box<dyn FnOnce() -> Side + Send>> = (1..=5)
+        let games: Vec<Box<dyn FnOnce() -> VsPassive + Send>> = (1..=5)
             .map(|seed| {
                 let r = r.clone();
                 Box::new(move || vs_passive_under(r, seed, seat, 30_000)) as Box<_>
             })
             .collect();
-        for (i, side) in par(games).into_iter().enumerate() {
-            let done = side.bo_done_tick;
+        for (i, game) in par(games).into_iter().enumerate() {
+            assert!(
+                !game.decided && game.tick == 30_000,
+                "{seat:?} seed {}: undecided at 30000, not {} ({})",
+                i + 1,
+                game.tick,
+                game.decided
+            );
+            let done = game.side.bo_done_tick;
             assert!(
                 done.is_some_and(|t| t < 30_000),
                 "{seat:?} seed {}: {done:?}",
@@ -343,16 +365,43 @@ fn m5b_build_order_completes_vs_passive_by_30000() {
 }
 
 /// The bot checks its commands before it issues them: fewer than 20 are
-/// rejected in 36000 ticks against Passive, from either seat.
+/// rejected in 36000 ticks against Passive, from either seat. With waves
+/// the first one takes Passive's Seat around tick 15600 and the bots stop
+/// there, so each seat plays two games: one with the waves held back
+/// ([`waves_held_back`]), which runs the whole 36000 ticks undecided
+/// (asserted) and covers every build-order step, and one with the waves,
+/// which covers their commands up to the capture.
 #[test]
-#[ignore = "long: 36000-tick games; CI runs --ignored m5b_"]
+#[ignore = "long: four games, two of them 36000 ticks; CI runs --ignored m5b_"]
 fn m5b_rejections_stay_under_20_per_36000_ticks_vs_passive() {
-    let games: Vec<Box<dyn FnOnce() -> Side + Send>> = [P0, P1]
+    let held = waves_held_back();
+    let cases = [(P0, true), (P1, true), (P0, false), (P1, false)];
+    let games: Vec<Box<dyn FnOnce() -> VsPassive + Send>> = cases
         .into_iter()
-        .map(|seat| Box::new(move || vs_passive(1, seat, 36_000)) as Box<_>)
+        .map(|(seat, held_back)| {
+            let r = if held_back {
+                held.clone()
+            } else {
+                common::rules()
+            };
+            Box::new(move || vs_passive_under(r, 1, seat, 36_000)) as Box<_>
+        })
         .collect();
-    for (seat, side) in [P0, P1].into_iter().zip(par(games)) {
-        assert!(side.rejected < 20, "{seat:?}: {} rejected", side.rejected);
+    for ((seat, held_back), game) in cases.into_iter().zip(par(games)) {
+        if held_back {
+            assert!(
+                !game.decided && game.tick == 36_000,
+                "{seat:?}, waves held back: undecided at 36000, not {} ({})",
+                game.tick,
+                game.decided
+            );
+        }
+        assert!(
+            game.side.rejected < 20,
+            "{seat:?}, waves held back {held_back}: {} rejected by {}",
+            game.side.rejected,
+            game.tick
+        );
     }
 }
 
@@ -437,15 +486,31 @@ fn m5b_pop_never_deadlocks() {
 
 /// The bot never walls itself in: after 20000 ticks every one of its
 /// buildings has a ring tile in the walkable component of the Seat's
-/// ring.
+/// ring. The waves are held back ([`waves_held_back`]), so the game is
+/// still undecided at 20000 (asserted) and the build order has placed its
+/// later buildings, the second Muster Hall among them.
 #[test]
 #[ignore = "long: a 20000-tick game; CI runs --ignored m5b_"]
 fn m5b_sites_keep_connectivity() {
-    let r = common::rules();
+    let r = waves_held_back();
     let setup = common::standard_vs_passive(&r);
     let mut m = BotMatch::with_bots(setup, r.clone()).unwrap();
     m.run(20_000);
+    assert!(
+        m.sim.result().is_none() && m.sim.tick() == 20_000,
+        "undecided at 20000, not {} ({:?})",
+        m.sim.tick(),
+        m.sim.result()
+    );
     let view = m.sim.view();
+    let muster = common::building_kind(&r, "muster_hall");
+    assert!(
+        view.buildings()
+            .filter(|b| b.owner == P0 && b.kind == muster)
+            .count()
+            >= 2,
+        "the second Muster Hall (a NearTown site of slice 3's steps) is placed"
+    );
     let map = view.map();
     let ring = |b: &sim::Building| {
         let d = r.building_kind(b.kind.0).unwrap();
@@ -895,7 +960,9 @@ impl AiController for Stats {
 /// The work caps hold on every plan of a Standard-vs-Standard game's first
 /// 6000 ticks (the building-heavy opening): at most
 /// `max_commands_per_think` commands and `site_checks_per_think`
-/// `check_build` probes.
+/// `check_build` probes, each counted where it is made
+/// (`Ctx::check_build`, which every probe of the bot goes through:
+/// `ctx::tests::every_probe_goes_through_the_counter`).
 #[test]
 #[ignore = "long: a 6000-tick game; CI runs --ignored m5b_"]
 fn m5b_standard_respects_work_caps() {

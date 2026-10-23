@@ -4,7 +4,7 @@
 use super::facts::Facts;
 use super::sites::MapAnalysis;
 use rules::{BuildOrder, Personality};
-use sim::{Command, FxVec2, PlayerId, SimView, Tile, Unit, UnitId};
+use sim::{BuildingKindId, Command, FxVec2, PlayerId, RejectReason, SimView, Tile, Unit, UnitId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Where `u` is headed or holds: its order's goal, else its post's goal.
@@ -101,6 +101,9 @@ pub struct Ctx<'a> {
     pub claimed: BTreeSet<UnitId>,
     /// `check_build` probes (a full-map search each) left in this plan.
     pub probes_left: u32,
+    /// `check_build` probes made in this plan, every one counted by
+    /// [`Ctx::check_build`] (the work-cap test reads it).
+    pub probes_made: u32,
     /// Commands left in this plan.
     pub commands_left: u32,
     /// The footprints this plan's `Build`s place, as inclusive tile
@@ -144,6 +147,7 @@ impl<'a> Ctx<'a> {
             ledger,
             claimed: BTreeSet::new(),
             probes_left: knobs.site_checks_per_think,
+            probes_made: 0,
             commands_left: knobs.max_commands_per_think,
             planned: Vec::new(),
             out: Vec::new(),
@@ -192,6 +196,22 @@ impl<'a> Ctx<'a> {
         let r = map.center_of(tile);
         self.rally = Some(r);
         r
+    }
+
+    /// The view's `check_build` for the bot (a full-map search), counted:
+    /// one probe off `probes_left` (the caller checks there is one left)
+    /// and one onto `probes_made`. Every probe of the bot goes through
+    /// here, so `probes_made` is the number of full-map searches the plan
+    /// made.
+    pub fn check_build(
+        &mut self,
+        builder: UnitId,
+        kind: BuildingKindId,
+        tile: Tile,
+    ) -> Result<Vec<i64>, RejectReason> {
+        self.probes_left = self.probes_left.saturating_sub(1);
+        self.probes_made = self.probes_made.saturating_add(1);
+        self.view.check_build(self.me, builder, kind, tile)
     }
 
     /// Issue `make(units)` as one command, unless `units` is empty (then
@@ -281,5 +301,42 @@ mod tests {
         assert!(!l.affords(&[0, 0, 1, 0]));
         assert!(l.affords(&[0, 0, 0, 0]));
         assert_eq!(l.available(9), 0, "an unknown resource has nothing");
+    }
+
+    /// Every full-map probe of the bot goes through [`Ctx::check_build`],
+    /// so `probes_made` counts them all: no other source file of the crate
+    /// calls a `check_build` but the plan context's.
+    #[test]
+    fn every_probe_goes_through_the_counter() {
+        let files = [
+            ("army.rs", include_str!("army.rs")),
+            ("build_order.rs", include_str!("build_order.rs")),
+            ("defend.rs", include_str!("defend.rs")),
+            ("economy.rs", include_str!("economy.rs")),
+            ("facts.rs", include_str!("facts.rs")),
+            ("memory.rs", include_str!("memory.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("sites.rs", include_str!("sites.rs")),
+            ("waves.rs", include_str!("waves.rs")),
+            ("../harness.rs", include_str!("../harness.rs")),
+            ("../lib.rs", include_str!("../lib.rs")),
+            ("../seats.rs", include_str!("../seats.rs")),
+        ];
+        let call = "check_build(";
+        let mut counted = 0;
+        for (name, src) in files {
+            for (at, _) in src.match_indices(call) {
+                assert!(
+                    src[..at].ends_with("ctx."),
+                    "{name}: a check_build( not through Ctx::check_build: {:?}",
+                    &src[at.saturating_sub(40)..at + call.len()]
+                );
+                counted += 1;
+            }
+        }
+        assert!(
+            counted >= 2,
+            "the site probe and the site keeper: {counted}"
+        );
     }
 }

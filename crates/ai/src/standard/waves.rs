@@ -1284,13 +1284,16 @@ mod tests {
 
     /// A wave ends (its units come home) with no unit that can annex, with
     /// fewer than `recall_below_units` armed units, or after
-    /// `wave_max_ds`.
+    /// `wave_max_ds`. The siege-only wave has `recall_below_units`
+    /// Mangonels, so only the annexer rule can end it.
     #[test]
     fn wave_ends_without_annexers() {
         let r = crate::testkit::rules();
+        let below = r.ai.personality("standard").unwrap().recall_below_units;
+        assert!(3 >= below, "the siege-only case needs {below} Mangonels");
         let (x, y) = (80, 64);
         for (why, kind, n, age, ends) in [
-            ("siege only", "mangonel", 2, 0, true),
+            ("siege only", "mangonel", 3, 0, true),
             ("two armed", "skirmisher", 2, 0, true),
             ("three armed", "skirmisher", 3, 0, false),
             ("too old", "skirmisher", 3, 7200, true),
@@ -1375,8 +1378,8 @@ mod tests {
     }
 
     /// From `all_in_after_ds` every home armed unit joins the active wave
-    /// and is sent with it, a threat at home recalls nothing, and a wave of
-    /// siege alone goes on.
+    /// and is sent with it, the wave goes on, and a threat at home recalls
+    /// nothing.
     #[test]
     fn all_in_joins_every_home_unit_and_is_never_recalled() {
         let r = crate::testkit::rules();
@@ -1403,7 +1406,7 @@ mod tests {
         let mut ctx = a.ctx(P0);
         ctx.knobs = &k;
         step(&mut ctx, &mut mem);
-        let w = mem.wave.clone().expect("siege alone goes on");
+        let w = mem.wave.clone().expect("the wave goes on");
         let mut all = siege.clone();
         all.extend(home.iter().copied());
         all.sort();
@@ -1435,6 +1438,99 @@ mod tests {
             mem.wave.is_some(),
             "a staging wave stays out during the all-in"
         );
+    }
+
+    /// During the all-in a wave ends only when none of its armed units is
+    /// left: two Mangonels alone, with no home unit to join them (no
+    /// annexer and fewer than `recall_below_units`, which ends the same
+    /// wave before the all-in), stay out.
+    #[test]
+    fn all_in_keeps_a_wave_of_siege_alone_out() {
+        let r = crate::testkit::rules();
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "mangonel", 80, 64, 2),
+            ],
+        );
+        let siege = a.units_of(P0, "mangonel");
+        let target = a.seat(P1);
+        let standard = r.ai.personality("standard").unwrap().all_in_after_ds;
+        for (all_in_after_ds, stays) in [(standard, false), (0, true)] {
+            let k = knobs(&r, |k| k.all_in_after_ds = all_in_after_ds);
+            let mut w = wave(siege.clone(), None, target, Tile::new(72, 64));
+            w.phase_at = a.sim.tick();
+            let mut mem = BotMemory {
+                wave: Some(w),
+                ..BotMemory::default()
+            };
+            let mut ctx = a.ctx(P0);
+            ctx.knobs = &k;
+            let rally = ctx.rally();
+            step(&mut ctx, &mut mem);
+            assert_eq!(mem.wave.is_some(), stays, "all-in from {all_in_after_ds}");
+            let cmds = ctx.into_commands();
+            let home = cmds
+                .iter()
+                .any(|c| matches!(c, Command::AttackMove { target, .. } if *target == rally));
+            assert_eq!(home, !stays, "all-in from {all_in_after_ds}: {cmds:?}");
+            if stays {
+                assert_eq!(mem.wave.unwrap().units, siege, "no unit joined");
+            }
+        }
+    }
+
+    /// The all-in launches with one home armed unit anywhere: no size,
+    /// siege or Wain, not assembled at the rally, and no wait for
+    /// `next_wave_at` (the age gate still holds); before the all-in the
+    /// same army launches nothing.
+    #[test]
+    fn all_in_launches_one_unit_without_siege_wain_or_timer() {
+        let r = crate::testkit::rules();
+        let (x, y) = RALLY;
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "skirmisher", x - 14, y, 1),
+            ],
+        );
+        let skirm = a.units_of(P0, "skirmisher");
+        let standard = r.ai.personality("standard").unwrap().all_in_after_ds;
+        for (all_in_after_ds, launches) in [(standard, false), (0, true)] {
+            let k = knobs(&r, |k| k.all_in_after_ds = all_in_after_ds);
+            let mut mem = BotMemory {
+                next_wave_at: a.sim.tick() + 1000,
+                ..BotMemory::default()
+            };
+            let mut ctx = a.ctx(P0);
+            ctx.knobs = &k;
+            step(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            assert_eq!(
+                mem.wave.is_some(),
+                launches,
+                "all-in from {all_in_after_ds}: {cmds:?}"
+            );
+            if launches {
+                let w = mem.wave.unwrap();
+                assert_eq!(
+                    (&w.units, w.wain, w.phase),
+                    (&skirm, None, WavePhase::Stage)
+                );
+                let s = a.sim.view().map().center_of(w.stage);
+                assert_eq!(
+                    cmds,
+                    [Command::AttackMove {
+                        units: skirm.clone(),
+                        target: s
+                    }]
+                );
+            } else {
+                assert!(cmds.is_empty(), "{cmds:?}");
+            }
+        }
     }
 
     #[test]

@@ -112,9 +112,9 @@ selftest:
 data-check:
     cargo run -p sim-cli --locked -- data-check data
 
-# Scripted bot matches (available from M5b).
+# Seeded bot-vs-bot matches (M5b): `just bots --seeds 1..5 --a standard --b standard --jobs 5` prints one CSV row per game; see docs/design/ai.md.
 bots *ARGS:
-    @echo "bots: available from M5b (sim-cli play-bots)"
+    cargo run -p sim-cli --locked --release -- play-bots {{ARGS}}
 
 # Sim benchmarks: `just bench` runs the 500-mover crossing, `just bench --astar --budget 4000` one saturated A* tick,
 # `just bench --territory --sources 16 --edits 100` incremental territory recompute (M3a acceptance: mean < 2 ms),

@@ -2,12 +2,14 @@
 //!
 //! Runs on any OS without a GPU. M0 implemented `selftest`, `data-check` and
 //! the scripted `hash-dump`; M1 adds `verify`, `bench`, `fuzz`, `record` and
-//! the replay form of `hash-dump`; `play-bots` arrives in M5b.
+//! the replay form of `hash-dump`; M5b adds `play-bots` and builds every
+//! replay's bots from its header (`ai::controller_for`).
 //!
 //! Wall-clock timing (`std::time::Instant`) is allowed here and banned in
 //! `sim`, `rules` and `ai`: this crate measures the sim, it is not part of it.
 #![forbid(unsafe_code)]
 
+mod play_bots;
 mod scenarios;
 
 use clap::{Parser, Subcommand};
@@ -160,8 +162,10 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         slow_ms: u64,
     },
-    /// Run seeded bot-vs-bot matches in parallel (M5b).
-    PlayBots,
+    /// Run seeded bot-vs-bot matches in parallel and print one CSV row per
+    /// game (M5b): exit 1 when a game ends without a winner (unless
+    /// --allow-undecided) or panics, 2 on usage, rules or bot-id errors.
+    PlayBots(play_bots::PlayBotsArgs),
 }
 
 fn main() -> ExitCode {
@@ -233,18 +237,13 @@ fn main() -> ExitCode {
             seed,
             slow_ms,
         ),
-        Cmd::PlayBots => not_yet("play-bots", "M5b"),
+        Cmd::PlayBots(args) => play_bots::run(&cli.data, &args),
     }
 }
 
 /// Exit status for a failure that is neither a verify outcome nor success:
 /// unreadable files, unloadable rules, unknown scenario names.
 const EXIT_ERROR: u8 = 2;
-
-fn not_yet(name: &str, milestone: &str) -> ExitCode {
-    eprintln!("{name}: not implemented until {milestone}");
-    ExitCode::from(EXIT_ERROR)
-}
 
 fn load_rules(data: &Path) -> Result<Rules, ExitCode> {
     Rules::load(data).map_err(|e| {
@@ -300,7 +299,7 @@ fn data_check(dir: &Path) -> ExitCode {
     match Rules::load(dir).and_then(|r| Ok((r, rules::strings::Strings::load(dir, "en")?))) {
         Ok((r, _strings)) => {
             println!(
-                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} side_techs={} factions={} maps={} strings=en",
+                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} side_techs={} factions={} personalities={} build_orders={} maps={} strings=en",
                 r.rules_version,
                 r.rules_hash(),
                 r.resources.resources.len(),
@@ -310,6 +309,8 @@ fn data_check(dir: &Path) -> ExitCode {
                 r.counting_techs(),
                 r.techs.len() - r.counting_techs(),
                 r.factions.len(),
+                r.ai.personalities.len(),
+                r.ai.build_orders.len(),
                 r.maps.keys().cloned().collect::<Vec<_>>().join(",")
             );
             ExitCode::SUCCESS
@@ -341,40 +342,36 @@ fn hash_dump(data: &Path, ticks: u32, seed: u64) -> ExitCode {
 // M1: verify, hash-dump <replay>, record, bench, fuzz
 // ---------------------------------------------------------------------------
 
-/// The controller that drives AI slots during a re-simulation, plus the
-/// warnings a re-simulation prints on stderr before its result. M1 replays
-/// are scenario recordings with two human slots; a header with an AI slot is
-/// driven by `ai::Passive` with a warning until the header names a bot (M5b).
-/// A file without the clean-exit trailer (a recording killed mid-match) is
-/// re-simulated up to its last complete record with a warning; the OK line
-/// itself is unchanged so CI's `^OK` grep and hash-parity diff still apply.
-fn replay_controller(replay: &Path) -> Box<dyn sim::AiController> {
+/// The warning a re-simulation prints on stderr before its result: a file
+/// without the clean-exit trailer (a recording killed mid-match) is
+/// re-simulated up to its last complete record; the OK line itself is
+/// unchanged so CI's `^OK` grep and hash-parity diff still apply.
+fn warn_if_truncated(replay: &Path) {
     if let Ok(ReplayFile {
-        setup,
-        truncated,
+        truncated: true,
         undecoded_bytes,
         records,
+        ..
     }) = ReplayReader::open(replay)
     {
-        if setup.players.iter().any(|p| p.is_ai) {
-            eprintln!(
-                "warning: {} has AI slots; they are driven by ai::Passive (bot ids in the header arrive in M5b)",
-                replay.display()
-            );
-        }
-        if truncated {
-            eprintln!(
-                "warning: {} has no clean-exit trailer (recording was cut); checking {} complete records, {undecoded_bytes} trailing bytes dropped",
-                replay.display(),
-                records.len()
-            );
-        }
+        eprintln!(
+            "warning: {} has no clean-exit trailer (recording was cut); checking {} complete records, {undecoded_bytes} trailing bytes dropped",
+            replay.display(),
+            records.len()
+        );
     }
-    Box::new(ai::Passive)
+}
+
+/// The controller factory of every re-simulation: the header's own bots
+/// (M5b), built after the version and rules checks. An unknown bot or
+/// personality is `ReplayError::Controller` (exit 2).
+fn header_bots(setup: &MatchSetup, rules: &Rules) -> Result<Box<dyn sim::AiController>, String> {
+    ai::controller_for(setup, rules).map_err(|e| e.to_string())
 }
 
 fn verify(data: &Path, replay: &Path) -> ExitCode {
-    match sim::verify(replay, data, replay_controller(replay)) {
+    warn_if_truncated(replay);
+    match sim::verify_with(replay, data, Box::new(header_bots)) {
         Ok(outcome) => {
             println!("{outcome}");
             ExitCode::from(outcome.exit_code())
@@ -398,14 +395,20 @@ fn hash_dump_line(tick: u32, hash: u64, sub: &SubHashes) -> String {
 
 fn hash_dump_replay(data: &Path, replay: &Path, every: u32) -> ExitCode {
     use std::io::Write;
-    let ai = replay_controller(replay);
+    warn_if_truncated(replay);
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    let result = sim::replay::hash_dump(replay, data, ai, every, |tick, hash, sub| {
-        // `hash-dump ... | head` closes the pipe early; that is not an error.
-        if writeln!(out, "{}", hash_dump_line(tick, hash, sub)).is_err() {
-            std::process::exit(0);
-        }
-    });
+    let result = sim::replay::hash_dump_with(
+        replay,
+        data,
+        Box::new(header_bots),
+        every,
+        |tick, hash, sub| {
+            // `hash-dump ... | head` closes the pipe early; that is not an error.
+            if writeln!(out, "{}", hash_dump_line(tick, hash, sub)).is_err() {
+                std::process::exit(0);
+            }
+        },
+    );
     if out.flush().is_err() {
         return ExitCode::SUCCESS;
     }

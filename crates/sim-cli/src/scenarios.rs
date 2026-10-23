@@ -9,8 +9,8 @@
 //! `Crossing`, and the seeded random generator behind `fuzz`.
 //!
 //! Every scenario runs on [`MatchSetup::scenario`] (two human slots, debug
-//! commands accepted) with [`ai::Passive`] in the AI seat, which is never
-//! consulted.
+//! commands accepted, no AI seat), built through `ai::controller_for` like
+//! every replay.
 
 use rand_core::{Rng, SeedableRng};
 use sim::scenarios::{BENCH_CROSS_SEED, EAST, Stream, WEST};
@@ -155,9 +155,15 @@ impl Scenario {
     }
 }
 
-/// A sim for a scenario setup, with a passive AI seat.
+/// A sim for a scenario setup, with the bots its header names
+/// (`ai::controller_for`; the scenarios here have none).
+///
+/// # Panics
+///
+/// If the header names a bot this build does not know.
 pub fn build(setup: &MatchSetup, rules: &Rules) -> Sim {
-    Sim::new(setup.clone(), rules.clone(), Box::new(ai::Passive))
+    let controller = ai::controller_for(setup, rules).expect("a scenario's bots are known");
+    Sim::new(setup.clone(), rules.clone(), controller)
 }
 
 /// `DebugSpawn` of `count` Yeomen for `owner` around `at`.
@@ -237,8 +243,8 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 /// (unknown player, no valid units, unknown unit kind, not enough techs,
 /// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`, `Research`),
 /// a `Build` by a unit that does not exist, an `Attack` or a `DebugDamage`
-/// on a unit that does not exist, and everything player 1 issues after it
-/// surrenders). Returns the per-tick commands and the `(player, seq)` keys
+/// on a unit that does not exist, a `DebugAdvanceAge` for a player that
+/// does not exist, and everything player 1 issues after it surrenders). Returns the per-tick commands and the `(player, seq)` keys
 /// the sim must reject.
 /// `movement` enables Move commands.
 pub fn random_commands(
@@ -448,6 +454,17 @@ pub fn random_commands(
                     target: TargetId::Unit(UnitId(0)),
                     amount: 1 + rng.next_u32() % 100,
                 },
+            ));
+            rejected.push((PlayerId(0), seq[0]));
+            seq[0] += 1;
+        } else if (69..73).contains(&bad) {
+            // UnknownPlayer: a DebugAdvanceAge for a player that does not
+            // exist (M5b); the issuer exists, so only the owner check
+            // rejects it.
+            cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq[0],
+                Command::DebugAdvanceAge { owner: PlayerId(7) },
             ));
             rejected.push((PlayerId(0), seq[0]));
             seq[0] += 1;

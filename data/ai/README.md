@@ -55,13 +55,13 @@ simply tried again:
 
 | Step | Done when | Notes |
 |------|-----------|-------|
-| `Workers(count, split)` | workers (the kind the Town trains that builds: the Yeoman) alive plus queued reach `count` | `split` weights per resource id: at least one entry, each at least 1, summing to at most `count`, every resource gathered by the worker kind. The latest `Workers` step sets the gather split |
+| `Workers(count, split)` | workers (the kind the Town trains that builds: the Yeoman) alive plus queued reach `count` | `split` weights per resource id: at least one entry, each at least 1, summing to at most `count`, every resource gathered by the worker kind. The latest `Workers` step at or before the window's first step sets the gather split |
 | `Build(kind, count, at, optional)` | own buildings of `kind`, sites included, reach `count` (the Seat counts for the Town kind) | `at`: `NearTown` (around an own Town), `Terrain` (beside the resource terrain; only kinds with `Adjacent` slots), `Expansion` (a second Town; only the Town kind), `BorderEdge` (the owned tile nearest the enemy start; only kinds with `border_radius_tiles`) |
 | `Train(kind, count, optional)` | units of `kind` alive plus queued reach `count` | |
 | `Research(tech, optional)` | `tech` is researched or queued | at a building of the tech's host kind, so `harrying_1` goes to the Watchtower |
 | `Advance(age)` | the age is reached | never optional |
 | `Military` | always | crossing it starts army production for good |
-| `Wait(until_ds)` | the match time reaches `until_ds` | |
+| `Wait(until_ds)` | the match time reaches `until_ds` | the window stops at it until then |
 
 `count` is 1 to 200 and a build order has 1 to 64 steps. Static
 reachability is checked at load so a build order cannot stall for ever: a
@@ -74,6 +74,46 @@ than `max_per_town` times the Towns the earlier non-optional steps build.
 An `Advance` is never optional: its age must be later than the age before
 it, and the earlier non-optional `Research` steps must cover its
 `techs_required` techs that count toward an age.
+
+How the Standard bot works through the steps (`crates/ai/src/standard/`,
+from M5b's economy slice). Every plan (`think_every_ds`) it takes the
+**window**: the first `lookahead` steps that are not done and not cooling
+down, in order. For each, within the plan's caps:
+
+- it **issues** the step's command when the sim's own check accepts it and
+  the plan's stock, less what earlier steps of the plan spent or reserved,
+  pays for it: a worker or unit at the free trainer with the shortest
+  queue (at most `max_queue_per_building` entries), a tech at a free host
+  of its kind, the age, or a building at a site with a builder (one new
+  site per step and plan);
+- it **saves up** when the stock is short: the step's cost is reserved,
+  so later steps and army production cannot spend it. An `Advance` also
+  saves up while the techs it needs are still researching;
+- it **waits** while a trainer or host is busy, a predecessor tech is
+  still queued, every worker is busy or the plan's `check_build` probes
+  ran out;
+- it is **blocked** for any other reason (no trainer or host built yet,
+  the age not reached, no site, the pop cap, a contested Town): it reserves
+  nothing and leaves the window for `blocked_retry_ds`, then is tried
+  again. It never becomes a permanent skip, and an `Advance` is never
+  blocked.
+
+Builders are idle workers, or, when none is idle, the gatherers of the
+resource most over its share. Sites come from the `at` policy: `NearTown`
+walks rings `near_town_min_tiles..=near_town_max_tiles` around the own
+Town with the fewest of the kind (Seat first); `Terrain` the static spots
+beside the kind's resource terrain, most resource tiles first;
+`Expansion` the static Town spots wholly inside the Seat's first border
+and at least `expansion_min_tiles` out, scored by the Forest and Mountain
+tiles within `resource_radius_tiles` (20, the radius of a new Town's
+border) outside the first border, less `toward_enemy_penalty` per tile
+gained toward the enemy; `BorderEdge` the own grass tile nearest the enemy
+start, `tower_spacing_tiles` from other border buildings. Every site keeps
+a passable ring of `building_gap_tiles` free of other buildings (a yard or
+pit may touch its resource), has no unit on it, and passes `check_build`.
+A site without a builder gets one again (a free resume). Crossing the
+`Military` step (every non-optional step before it done) latches army
+production for good; a defence also starts it.
 
 ## Personalities (`personalities.ron`)
 
@@ -108,7 +148,8 @@ it, and the earlier non-optional `Research` steps must cover its
 | `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
 | `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave, or an assaulting one when the threatened Town is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
 
-M5b's first slice reads only `think_every_ds` (the cadence), the per-plan
-caps and the site, rally and expansion knobs that the static map analysis
-uses; the rules that read the rest arrive with the economy and wave slices
-of M5b (docs/design/ai.md).
+M5b's economy slice reads every knob but the wave knobs
+(`assemble_radius_tiles`, `wave_requires_age` to `wave_interval_ds`,
+`min_siege`, and `stage_margin_tiles` to `wave_max_ds`), which the wave
+slice of M5b reads (docs/design/ai.md); `all_in_after_ds` already stops a
+defence from recalling a wave.

@@ -5,6 +5,7 @@
 //! state, draws no randomness of its own, and its commands go through the
 //! same delay queue as a human's.
 
+use crate::annexation::AnnexView;
 use crate::attrition::{self, Exposure, Pulses, SupplyGrid};
 use crate::combat::{self, UnitStats};
 use crate::command::Command;
@@ -16,7 +17,9 @@ use crate::ids::{
 };
 use crate::map::Map;
 use crate::pathing::Pathing;
-use crate::state::{Building, MatchSetup, Player, RejectReason, State, Unit};
+use crate::state::{
+    Building, Hold, MatchResult, MatchSetup, Outcome, Player, RejectReason, State, Unit,
+};
 use crate::tech;
 use crate::territory::TerritoryField;
 use crate::town;
@@ -118,7 +121,8 @@ impl<'a> SimView<'a> {
     }
 
     /// Whether `Train { building, kind }` from `p` would be accepted now,
-    /// and what it would deduct.
+    /// and what it would deduct (`TownContested` at a Town whose
+    /// annexation timer runs, M5a).
     pub fn check_train(
         &self,
         p: PlayerId,
@@ -339,6 +343,32 @@ impl<'a> SimView<'a> {
     pub fn attrition(&self, id: UnitId) -> Option<Exposure> {
         let u = self.state.units.get(&id)?;
         Pulses::new(self.state, self.rules)?.exposure(&self.state.map, &self.state.territory, u)
+    }
+
+    /// Town `town`'s running annexation timer (M5a): who annexes it, how
+    /// many eligible steps have passed since the entry step and how many
+    /// flip it. `None` when the building is not a Town, does not exist, or
+    /// is held.
+    pub fn annexation(&self, town: BuildingId) -> Option<AnnexView> {
+        match self.state.buildings.get(&town)?.town_state?.hold {
+            Hold::Held => None,
+            Hold::Contested { attacker, ticks } => Some(AnnexView {
+                attacker,
+                ticks,
+                total: self.rules.annexation_ticks(),
+            }),
+        }
+    }
+
+    /// How the match ended, once step 6e decided it (M5a); `None` while it
+    /// runs.
+    pub fn outcome(&self) -> Option<Outcome> {
+        self.state.outcome.map(|r| r.outcome)
+    }
+
+    /// The match result (outcome, reason and deciding tick), once decided.
+    pub fn result(&self) -> Option<MatchResult> {
+        self.state.outcome
     }
 
     /// Whether `Attack { units, target }` from `p` would be accepted now,

@@ -14,6 +14,18 @@
 //! step applies in that step, so the tick an assertion names is the
 //! literal `sim.tick()` after the step, and the field is set up in step 0.
 //!
+//! The annexation and outcome slice (`SIM_VERSION` 16, `rules_version` 20)
+//! adds the `annexation_*` tests, which `cargo test -p sim annexation`
+//! selects (acceptance line 2): the timer, its resets and the flip around
+//! P1's Town at 0 HP beside P0's Skirmishers ([`annex_setup`], delay 0,
+//! entry in step [`T0`]), the `capture_seat` scenario, the 54000-tick
+//! stalemate (not ignored) and the outcome rules. They read
+//! `annexation_ds`, the defender radius, the flipped hit points and the
+//! match cap from `Rules`, as the attrition tests read the interval. The
+//! goldens `golden_capture_seat` and `golden_stalemate_45min` (ignored:
+//! 54000 ticks, verified in CI) and the `m5a_random_*` streams over
+//! attrition and annexation come with it.
+//!
 //! The tests run on `MatchSetup::scenario`, an empty start: with no Town
 //! there is no income, so stockpiles are exact through `DebugGrant`, and
 //! a Scriptorium's Lore is the only income where one is placed. Every
@@ -25,8 +37,9 @@ use proptest::prelude::*;
 use rand_core::{Rng, SeedableRng};
 use rules::Rules;
 use sim::{
-    BuildingId, BuildingKindId, Command, Exposure, FxVec2, MatchSetup, PlayerCommand, PlayerId,
-    RejectReason, Sim, SimEvent, SimView, TargetId, TechId, Tile, UnitId, UnitKindId,
+    AnnexView, BuildingId, BuildingKindId, Command, Exposure, FxVec2, Hold, MatchResult,
+    MatchSetup, Outcome, OutcomeReason, PlayerCommand, PlayerId, RejectReason, Sim, SimEvent,
+    SimView, TargetId, TechId, Tile, UnitId, UnitKindId,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,6 +61,10 @@ fn data_dir() -> PathBuf {
 
 fn load_rules() -> Rules {
     Rules::load(data_dir()).expect("data/ loads")
+}
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 fn tech(rules: &Rules, id: &str) -> TechId {
@@ -1738,5 +1755,1717 @@ proptest! {
         let at = usize::try_from(cut % ticks).unwrap();
         let (b, _) = run_attrition_stream(seed, &stream, Some(at));
         prop_assert_eq!(a, b, "restored after step {}", at);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Annexation and the outcome (slice 3): `cargo test -p sim annexation`.
+// ---------------------------------------------------------------------------
+
+/// P1's Town in the annexation tests ([`annex_with`]), placed first, at
+/// [`FIELD_TOWN`] (north-west tile (20,30), centre (21.5,31.5), footprint
+/// x 20-22, y 30-32), all in the all-grass west rectangle of
+/// `plains_1v1`.
+const TOWN: BuildingId = BuildingId(1);
+
+/// The tiles P0's Skirmishers stand on in [`annex_setup`]: the north row
+/// of the Town's ring (Chebyshev 1 from the footprint). Every probe and
+/// every other P1 unit or building of these tests stands at least 7.25
+/// tiles edge to edge from them, beyond every unit's reach (6), so nothing
+/// acquires anything and the results do not depend on the annex-hold rule.
+const POSTS: [(i32, i32); 4] = [(20, 29), (21, 29), (22, 29), (23, 29)];
+
+/// The step in which [`annex_setup`]'s timer starts (`T0`): the attackers
+/// spawn and the Town drops to 0 in step 1 (delay 0).
+const T0: u32 = 1;
+
+/// The south probe tile at exactly the defender radius from the Town's
+/// centre (6.0 with the shipped data: (21,37), centre (21.5,37.5)).
+fn probe_in(rules: &Rules) -> (i32, i32) {
+    (
+        21,
+        31 + i32::try_from(rules.annexation_defender_radius_tiles).unwrap(),
+    )
+}
+
+/// One tile farther south than [`probe_in`] (7.0: (21,38)).
+fn probe_out(rules: &Rules) -> (i32, i32) {
+    let (x, y) = probe_in(rules);
+    (x, y + 1)
+}
+
+/// Steps from the entry step to the flip (`Rules::annexation_ticks()`,
+/// 1200 with the shipped data: the annexation tests read it, as the
+/// attrition tests read the interval).
+fn total(rules: &Rules) -> u32 {
+    rules.annexation_ticks()
+}
+
+/// The Town's hit points after a flip: `annexation_town_hp_permille` of
+/// its kind's (500 with the shipped data).
+fn flipped_hp(rules: &Rules) -> i32 {
+    let hp = i64::from(rules.building_kind_by_id("town").unwrap().1.hp);
+    i32::try_from(hp * i64::from(rules.annexation_town_hp_permille) / 1000).unwrap()
+}
+
+/// A Skirmisher of P0 on each of [`POSTS`].
+fn on_posts(rules: &Rules) -> Vec<(u8, Command)> {
+    POSTS
+        .iter()
+        .map(|&at| (0, spawn_for(P0, ukind(rules, "skirmisher"), at)))
+        .collect()
+}
+
+/// [`annex_with`]'s sim after step `T0` and what it saw.
+struct Annex {
+    m: M,
+    /// The events of step `T0`.
+    entry: Vec<SimEvent>,
+    /// The tiles P1 owned after step 0.
+    p1_tiles: Vec<Tile>,
+}
+
+/// Delay 0. Step 0: P1 places its complete Town at [`FIELD_TOWN`]
+/// ([`TOWN`]), then `step0` (P1's commands, after the Town). Step `T0`:
+/// P0's `DebugDamage` takes the Town to 0, then `step1` in order (P0's
+/// before P1's). Nothing is rejected.
+fn annex_with(rules: &Rules, step0: Vec<Command>, step1: Vec<(u8, Command)>) -> Annex {
+    let mut m = M::delay0(rules.clone(), 8);
+    let mut cmds = vec![(1, place_for(P1, bkind(rules, "town"), FIELD_TOWN))];
+    cmds.extend(step0.into_iter().map(|c| (1, c)));
+    let events = m.step_with(cmds);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let field = m.view().territory();
+    let p1_tiles: Vec<Tile> = (0..field.height())
+        .flat_map(|y| (0..field.width()).map(move |x| Tile::new(x, y)))
+        .filter(|t| field.owner_at(*t) == Some(P1))
+        .collect();
+    let mut cmds = vec![(0, damage(TargetId::Building(TOWN), u32::MAX))];
+    cmds.extend(step1);
+    let entry = m.step_with(cmds);
+    assert!(rejections(&entry).is_empty(), "{entry:?}");
+    assert_eq!(m.sim.tick(), T0 + 1);
+    Annex { m, entry, p1_tiles }
+}
+
+/// The standard annexation field: [`annex_with`] with P0's Skirmishers on
+/// [`POSTS`] and nothing else; the timer starts in step `T0`.
+fn annex_setup(rules: &Rules) -> Annex {
+    annex_with(rules, vec![], on_posts(rules))
+}
+
+/// Step `m` until `sim.tick() == t` (the next step is the one at tick
+/// `t`), collecting the events.
+fn step_to(m: &mut M, t: u32) -> Vec<SimEvent> {
+    let mut events = Vec::new();
+    while m.sim.tick() < t {
+        events.extend(m.step(1));
+    }
+    events
+}
+
+fn started(events: &[SimEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, SimEvent::AnnexationStarted { .. }))
+        .count()
+}
+
+fn resets(events: &[SimEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, SimEvent::AnnexationReset { .. }))
+        .count()
+}
+
+fn annexed(events: &[SimEvent]) -> Vec<(BuildingId, PlayerId, PlayerId)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::TownAnnexed { town, from, to } => Some((*town, *from, *to)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn decided(events: &[SimEvent]) -> Vec<MatchResult> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::MatchDecided { result } => Some(*result),
+            _ => None,
+        })
+        .collect()
+}
+
+fn hold(m: &M, b: BuildingId) -> Hold {
+    m.view().building(b).unwrap().town_state.unwrap().hold
+}
+
+/// Whether the territory field equals a full recompute of its sources.
+fn field_is_exact(m: &M) -> bool {
+    let field = m.view().territory();
+    *field == field.recomputed()
+}
+
+/// Acceptance 2, first clause: a Town at 0 HP with enemy Skirmishers
+/// adjacent and no defender military within 6 tiles flips after 1200
+/// ticks ([`total`]). `AnnexationStarted { town: 1, attacker: P0 }` lands
+/// in step `T0`; after step `T0 + k`, for every `k` below 1200,
+/// `SimView::annexation` is `{ P0, k, 1200 }` and nothing has flipped; in
+/// step `T0 + 1200` the Town flips to P0 (`TownAnnexed`), returns `Held`
+/// at 500 HP ([`flipped_hp`]), and P0 owns exactly the tiles P1 owned
+/// (1245), with the field equal to a full recompute. P1 has no complete
+/// Town left, so the same step decides `Victory { P0, decisive: true }`,
+/// reason `AllTownsLost`, at tick `T0 + 1201`.
+#[test]
+fn annexation_town_at_0_hp_with_skirmishers_adjacent_and_no_defender_flips_after_1200_ticks() {
+    let rules = load_rules();
+    let n = total(&rules);
+    let Annex {
+        mut m,
+        entry,
+        p1_tiles,
+    } = annex_setup(&rules);
+    assert!(
+        entry.contains(&SimEvent::AnnexationStarted {
+            town: TOWN,
+            attacker: P0
+        }),
+        "{entry:?}"
+    );
+    assert!(entry.contains(&SimEvent::TownAtZeroHp { town: TOWN }));
+    let view_at = |m: &M| m.view().annexation(TOWN);
+    assert_eq!(
+        view_at(&m),
+        Some(AnnexView {
+            attacker: P0,
+            ticks: 0,
+            total: n
+        })
+    );
+    for k in 1..n {
+        let events = m.step(1);
+        assert!(annexed(&events).is_empty(), "no flip in step T0 + {k}");
+        assert_eq!(
+            view_at(&m),
+            Some(AnnexView {
+                attacker: P0,
+                ticks: k,
+                total: n
+            }),
+            "after step T0 + {k}"
+        );
+        assert_eq!(m.view().outcome(), None);
+    }
+    assert_eq!(m.sim.tick(), T0 + n);
+    let events = m.step(1);
+    assert_eq!(
+        annexed(&events),
+        [(TOWN, P1, P0)],
+        "the flip in step T0 + {n}"
+    );
+    let view = m.view();
+    let town = view.building(TOWN).unwrap();
+    assert_eq!(town.owner, P0);
+    assert_eq!(town.town_state.unwrap().hold, Hold::Held);
+    assert_eq!(view.building_hp(TOWN).unwrap().0, flipped_hp(&rules));
+    assert_eq!(view.annexation(TOWN), None);
+    let p0 = view.territory().owned_tile_count(P0);
+    assert_eq!(p0, u32::try_from(p1_tiles.len()).unwrap());
+    assert_eq!(view.territory().owned_tile_count(P1), 0);
+    assert!(field_is_exact(&m));
+    let want = MatchResult {
+        outcome: Outcome::Victory {
+            player: P0,
+            decisive: true,
+        },
+        reason: OutcomeReason::AllTownsLost,
+        tick: T0 + n + 1,
+    };
+    assert_eq!(m.sim.result(), Some(want));
+    assert_eq!(decided(&events), [want]);
+    println!(
+        "entry in step {T0}, flip in step {} (TownAnnexed {:?}), hp {}, P0 owns {p0} tiles, result {want:?}",
+        T0 + n,
+        annexed(&events),
+        flipped_hp(&rules)
+    );
+}
+
+/// Acceptance 2, second clause: a defender arriving at tick 600 resets the
+/// timer. A P1 Shieldbearer appears on [`probe_in`] (exactly 6.0 tiles
+/// from the Town's centre) in step `T0 + 600`, when the timer had counted
+/// 599: the same step emits `AnnexationReset`, the Town is `Held` and P1
+/// owns its 1245 tiles again. During `T0 + 650` a `Move` takes it to
+/// (21,40), beyond the radius: the timer starts again in a later step `T1`
+/// and the Town flips in exactly `T1 + 1200`, not at `T0 + 1200`. No `Hit`
+/// lands in the whole run.
+#[test]
+fn annexation_defender_arriving_at_tick_600_resets_the_timer() {
+    let rules = load_rules();
+    let n = total(&rules);
+    let Annex {
+        mut m, p1_tiles, ..
+    } = annex_setup(&rules);
+    let mut all = step_to(&mut m, T0 + 600);
+    assert_eq!(m.view().annexation(TOWN).unwrap().ticks, 599);
+    let shieldbearer = UnitId(5);
+    let events = m.step_with(vec![(
+        1,
+        spawn_for(P1, ukind(&rules, "shieldbearer"), probe_in(&rules)),
+    )]);
+    assert!(events.contains(&SimEvent::UnitSpawned { unit: shieldbearer }));
+    assert!(
+        events.contains(&SimEvent::AnnexationReset { town: TOWN }),
+        "{events:?}"
+    );
+    assert_eq!(hold(&m, TOWN), Hold::Held);
+    assert_eq!(m.view().annexation(TOWN), None);
+    assert_eq!(
+        m.view().territory().owned_tile_count(P1),
+        u32::try_from(p1_tiles.len()).unwrap()
+    );
+    assert!(field_is_exact(&m));
+    all.extend(events);
+    all.extend(step_to(&mut m, T0 + 650));
+    assert_eq!(hold(&m, TOWN), Hold::Held, "held while the defender stays");
+    let mut t1 = None;
+    let mut cmds = vec![(1, move_to(shieldbearer, (21, 40)))];
+    while t1.is_none() {
+        assert!(m.sim.tick() < T0 + 800, "the timer starts again");
+        let t = m.sim.tick();
+        let events = m.step_with(std::mem::take(&mut cmds));
+        if started(&events) == 1 {
+            t1 = Some(t);
+        }
+        all.extend(events);
+    }
+    let t1 = t1.unwrap();
+    while m.sim.tick() < t1 + n {
+        let t = m.sim.tick();
+        let events = m.step(1);
+        assert!(annexed(&events).is_empty(), "no flip in step {t}");
+        all.extend(events);
+    }
+    let events = m.step(1);
+    assert_eq!(
+        annexed(&events),
+        [(TOWN, P1, P0)],
+        "the flip in step T1 + {n}"
+    );
+    all.extend(events);
+    assert_eq!(hits(&all), 0, "nothing fought");
+    assert!(t1 + n > T0 + n);
+    println!(
+        "reset in step {} (timer at 599), restarted in step T1 = {t1}, flip in step {}",
+        T0 + 600,
+        t1 + n
+    );
+}
+
+/// Acceptance 2, third clause: during the timer `owner_at` returns neutral
+/// for the Town's tiles and Train is rejected. Every tile P1 owned before
+/// the entry is neutral, P1 owns none, the Town's source stamps the
+/// neutral layer and the field equals a full recompute. A P1 `Train` of a
+/// Yeoman at the Town, with the Grain granted, is rejected
+/// `TownContested`, and `check_train` agrees; every sub-hash equals a
+/// control whose rejected command is a `Train` at a building that does not
+/// exist. The Yeoman queued before the entry keeps its progress for the
+/// whole timer; after a reset (a P1 Shieldbearer on [`probe_in`]) the
+/// queue moves again and `Train` is accepted.
+#[test]
+fn annexation_during_the_timer_owner_at_is_neutral_and_train_is_rejected() {
+    let rules = load_rules();
+    let yeoman = ukind(&rules, "yeoman");
+    let grain = u8::try_from(res(&rules, "grain")).unwrap();
+    let p1_grant = |amount| Command::DebugGrant {
+        owner: P1,
+        resource: grain,
+        amount,
+    };
+    let train = |b: BuildingId| Command::Train {
+        building: b,
+        kind: yeoman,
+    };
+    let setup = || annex_with(&rules, vec![p1_grant(200), train(TOWN)], on_posts(&rules));
+    let Annex {
+        mut m, p1_tiles, ..
+    } = setup();
+    let mut control = setup().m;
+    let progress = |m: &M| m.view().building(TOWN).unwrap().queue[0].progress;
+    let queued = progress(&m);
+    assert_eq!(queued, 1, "the head trained during step 0 only");
+    for _ in 0..50 {
+        m.step(1);
+        control.step(1);
+        let view = m.view();
+        let field = view.territory();
+        assert!(p1_tiles.iter().all(|t| field.owner_at(*t).is_none()));
+        assert_eq!(field.owned_tile_count(P1), 0);
+        assert_eq!(field.sources()[&TOWN].owner, sim::SourceOwner::Neutral);
+        assert_eq!(progress(&m), queued, "the queue is paused");
+    }
+    assert!(field_is_exact(&m));
+    assert_eq!(
+        m.view().check_train(P1, TOWN, yeoman),
+        Err(RejectReason::TownContested)
+    );
+    let events = m.step_with(vec![(1, train(TOWN))]);
+    let control_events = control.step_with(vec![(1, train(BuildingId(99)))]);
+    assert_eq!(rejections(&events), [RejectReason::TownContested]);
+    assert_eq!(rejections(&control_events), [RejectReason::UnknownBuilding]);
+    assert_eq!(m.sim.sub_hashes(), control.sim.sub_hashes());
+    assert_eq!(m.sim.hash(), control.sim.hash());
+    assert_eq!(m.view().building(TOWN).unwrap().queue.len(), 1);
+    // A defender resets the timer; the queue moves again and Train is
+    // accepted.
+    let events = m.step_with(vec![(
+        1,
+        spawn_for(P1, ukind(&rules, "shieldbearer"), probe_in(&rules)),
+    )]);
+    assert_eq!(resets(&events), 1);
+    assert_eq!(m.view().check_train(P1, TOWN, yeoman).map(|_| ()), Ok(()));
+    let events = m.step_with(vec![(1, train(TOWN))]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(m.view().building(TOWN).unwrap().queue.len(), 2);
+    assert!(progress(&m) > queued, "the queue moves again");
+    let owned = m.view().territory().owned_tile_count(P1);
+    assert_eq!(owned, u32::try_from(p1_tiles.len()).unwrap());
+    println!(
+        "during the timer: {} tiles neutral, P1 owns 0, Train rejected TownContested; after the reset P1 owns {owned} and Train is accepted",
+        p1_tiles.len()
+    );
+}
+
+/// The `capture_seat` scenario (`sim::scenarios::capture_seat`) run to the
+/// first step with an outcome, at most `CAPTURE_SEAT_MAX_TICKS`.
+fn capture_seat_to_outcome(rules: &Rules) -> (Sim, sim::scenarios::Stream, Vec<(u32, SimEvent)>) {
+    let (setup, stream, cap) = sim::scenarios::by_name("capture_seat", rules).unwrap();
+    let mut sim = Sim::new(setup, rules.clone(), Box::new(NoAi));
+    let mut events = Vec::new();
+    while sim.outcome().is_none() {
+        let t = sim.tick();
+        assert!(t < cap, "decided within {cap} ticks");
+        sim.step(sim::scenarios::commands_at(&stream, t));
+        events.extend(sim.drain_events().into_iter().map(|e| (t, e)));
+    }
+    (sim, stream, events)
+}
+
+/// Acceptance 2, fourth clause: capturing the Seat makes `outcome()` return
+/// `Victory { decisive: true }`. The `capture_seat` stream decides
+/// `Victory { P0, decisive: true }`, reason `SeatCaptured`, at
+/// `result.tick == sim.tick()`; P1's Seat (`BuildingId(2)`) is P0's and
+/// still carries the seat flag; 300 more steps change nothing about the
+/// result and decide nothing again; and the golden fixture ends at this
+/// decision tick, with this hash.
+#[test]
+fn annexation_capturing_the_seat_makes_outcome_a_decisive_victory() {
+    let rules = load_rules();
+    let (mut sim, stream, events) = capture_seat_to_outcome(&rules);
+    let seat = BuildingId(2);
+    let result = sim.result().unwrap();
+    assert_eq!(
+        result.outcome,
+        Outcome::Victory {
+            player: P0,
+            decisive: true
+        }
+    );
+    assert_eq!(sim.outcome(), Some(result.outcome));
+    assert_eq!(result.reason, OutcomeReason::SeatCaptured);
+    assert_eq!(result.tick, sim.tick());
+    let b = sim.view().building(seat).unwrap().clone();
+    assert_eq!(b.owner, P0);
+    assert!(b.town_state.unwrap().seat, "the seat flag stays");
+    let last: Vec<SimEvent> = events
+        .iter()
+        .filter(|(t, _)| *t + 1 == result.tick)
+        .map(|(_, e)| e.clone())
+        .collect();
+    assert_eq!(annexed(&last), [(seat, P1, P0)]);
+    assert_eq!(decided(&last), [result]);
+    let (decision_hash, decision_tick) = (sim.hash(), sim.tick());
+    for _ in 0..300 {
+        let t = sim.tick();
+        sim.step(sim::scenarios::commands_at(&stream, t));
+        assert!(decided(&sim.drain_events()).is_empty());
+    }
+    assert_eq!(sim.result(), Some(result), "latched");
+    let file = sim::ReplayReader::open(&fixtures_dir().join("capture_seat.eonreplay")).unwrap();
+    let last_hash = file
+        .records
+        .iter()
+        .filter_map(|r| match r {
+            sim::replay::Record::Hash(h) => Some((h.tick, h.hash)),
+            sim::replay::Record::Tick(_) => None,
+        })
+        .next_back()
+        .unwrap();
+    assert_eq!(
+        last_hash,
+        (decision_tick, decision_hash),
+        "the fixture ends at the decision"
+    );
+    println!(
+        "capture_seat: {:?} reason {:?} at tick {} (hash 0x{decision_hash:016x}); Seat owner {:?}, seat flag {}",
+        result.outcome,
+        result.reason,
+        result.tick,
+        b.owner,
+        b.town_state.unwrap().seat
+    );
+}
+
+/// Acceptance 2, fifth clause: a 54000-tick scripted stalemate returns
+/// `Victory { decisive: false }` for the player with more territory. The
+/// `stalemate_45min` stream (no unit ever exists; P0 owns 1248 tiles, P1
+/// 1245) is undecided after 53999 steps and decided after 54000
+/// (`Rules::match_cap_ticks()`): `Victory { P0, decisive: false }`, reason
+/// `Territory`, tick 54000. Not ignored: it is the acceptance line.
+#[test]
+fn annexation_54000_tick_scripted_stalemate_is_a_tiebreak_victory_for_more_territory() {
+    let rules = load_rules();
+    let cap = rules.match_cap_ticks();
+    let (setup, stream, ticks) = sim::scenarios::by_name("stalemate_45min", &rules).unwrap();
+    assert_eq!(ticks, cap);
+    let mut sim = sim::scenarios::run(setup, rules.clone(), &stream, cap - 1);
+    assert_eq!(sim.tick(), cap - 1);
+    assert_eq!(sim.view().unit_count(), 0);
+    assert_eq!(sim.outcome(), None, "undecided after {} steps", cap - 1);
+    sim.drain_events();
+    sim.step(&[]);
+    let view = sim.view();
+    let (p0, p1) = (
+        view.territory().owned_tile_count(P0),
+        view.territory().owned_tile_count(P1),
+    );
+    assert!(p0 > p1, "{p0} > {p1}");
+    let want = MatchResult {
+        outcome: Outcome::Victory {
+            player: P0,
+            decisive: false,
+        },
+        reason: OutcomeReason::Territory,
+        tick: cap,
+    };
+    assert_eq!(sim.result(), Some(want));
+    assert_eq!(decided(&sim.drain_events()), [want]);
+    println!(
+        "stalemate after {cap} steps: P0 {p0} tiles, P1 {p1}; {:?} reason {:?} at tick {}",
+        want.outcome, want.reason, want.tick
+    );
+}
+
+/// The defender radius is 6 tiles from the Town's centre, inclusive, centre
+/// to centre: a P1 Shieldbearer appearing on [`probe_in`] (exactly the
+/// radius) during the timer resets it; one on [`probe_out`] (a tile
+/// farther) does not, and the timer runs on to the flip.
+#[test]
+fn annexation_defender_radius_is_6_tiles_inclusive() {
+    let rules = load_rules();
+    let n = total(&rules);
+    for (probe, inside) in [(probe_in(&rules), true), (probe_out(&rules), false)] {
+        let Annex { mut m, .. } = annex_setup(&rules);
+        step_to(&mut m, T0 + 10);
+        let events = m.step_with(vec![(
+            1,
+            spawn_for(P1, ukind(&rules, "shieldbearer"), probe),
+        )]);
+        assert_eq!(resets(&events), usize::from(inside), "{probe:?}");
+        let events = step_to(&mut m, T0 + n + 1);
+        if inside {
+            assert_eq!(hold(&m, TOWN), Hold::Held, "{probe:?}");
+            assert!(annexed(&events).is_empty());
+        } else {
+            assert_eq!(annexed(&events), [(TOWN, P1, P0)], "{probe:?}");
+            assert_eq!(hits(&events), 0);
+        }
+        println!("defender at {probe:?}: resets the timer {inside}");
+    }
+}
+
+/// Which units defend a Town (`annexation_defenders`, every non-Civilian
+/// kind): a P1 unit of each kind on [`probe_in`] in step `T0` keeps the
+/// timer from starting when the rules select its kind, Mangonel and Supply
+/// Wain included, and does not when they do not: the Yeoman and the
+/// Scribe.
+#[test]
+fn annexation_any_non_civilian_defender_blocks_but_yeomen_and_scribes_do_not() {
+    let rules = load_rules();
+    let mut blocking = Vec::new();
+    for (k, kind) in rules.units.iter().enumerate() {
+        let defends = rules.annexation_defenders.iter().any(|s| s.selects(kind));
+        if rules.annexation_defenders == [rules::UnitSel::Military] {
+            assert_eq!(defends, kind.class != rules::units::UnitClass::Civilian);
+        }
+        let mut step1 = on_posts(&rules);
+        step1.push((
+            1,
+            spawn_for(P1, UnitKindId(u16::try_from(k).unwrap()), probe_in(&rules)),
+        ));
+        let Annex { m, entry, .. } = annex_with(&rules, vec![], step1);
+        assert_eq!(started(&entry), usize::from(!defends), "{}", kind.id);
+        assert_eq!(m.view().annexation(TOWN).is_none(), defends, "{}", kind.id);
+        if defends {
+            blocking.push(kind.id.as_str());
+        }
+    }
+    for civilian in ["yeoman", "scribe"] {
+        assert!(!blocking.contains(&civilian), "{civilian}");
+    }
+    println!("defenders on the probe that block the timer: {blocking:?}");
+}
+
+/// The attackers leaving resets the timer: once no P0 Skirmisher stands
+/// beside the Town (they walk north), the step that sees none emits
+/// `AnnexationReset`, the Town is `Held` and P1 owns its tiles again.
+#[test]
+fn annexation_attackers_leaving_reset_the_timer() {
+    let rules = load_rules();
+    let Annex {
+        mut m, p1_tiles, ..
+    } = annex_setup(&rules);
+    step_to(&mut m, T0 + 100);
+    let attackers: Vec<UnitId> = (1..=4).map(UnitId).collect();
+    let events = m.step_with(vec![(
+        0,
+        Command::Move {
+            units: attackers,
+            target: FxVec2::from_ints(21, 20),
+            queue: false,
+        },
+    )]);
+    let mut all = events;
+    let mut at = None;
+    while at.is_none() {
+        assert!(m.sim.tick() < T0 + 200, "the attackers leave");
+        let t = m.sim.tick();
+        let events = m.step(1);
+        if resets(&events) == 1 {
+            at = Some(t);
+        }
+        all.extend(events);
+    }
+    assert_eq!(resets(&all), 1);
+    assert_eq!(hold(&m, TOWN), Hold::Held);
+    assert_eq!(
+        m.view().territory().owned_tile_count(P1),
+        u32::try_from(p1_tiles.len()).unwrap()
+    );
+    assert!(field_is_exact(&m));
+    step_to(&mut m, T0 + total(&rules) + 10);
+    assert_eq!(m.view().building(TOWN).unwrap().owner, P1);
+    println!("the attackers left; reset in step {}", at.unwrap());
+}
+
+/// Mangonels and Supply Wains beside the Town do not start the timer (the
+/// shipped `annexation_attackers` select infantry and cavalry only); a
+/// Skirmisher joining them does.
+#[test]
+fn annexation_mangonels_and_supply_wains_adjacent_do_not_start_it() {
+    let rules = load_rules();
+    let selects = |id: &str| {
+        let kind = rules.unit_kind_by_id(id).unwrap();
+        rules.annexation_attackers.iter().any(|s| s.selects(kind))
+    };
+    assert!(!selects("mangonel") && !selects("supply_wain"));
+    let step1 = vec![
+        (0, spawn_for(P0, ukind(&rules, "mangonel"), POSTS[0])),
+        (0, spawn_for(P0, ukind(&rules, "mangonel"), POSTS[1])),
+        (0, spawn_for(P0, ukind(&rules, "supply_wain"), POSTS[2])),
+    ];
+    let Annex { mut m, entry, .. } = annex_with(&rules, vec![], step1);
+    let mut all = entry;
+    all.extend(step_to(&mut m, T0 + 60));
+    assert_eq!(started(&all), 0);
+    assert_eq!(hold(&m, TOWN), Hold::Held);
+    let events = m.step_with(vec![(
+        0,
+        spawn_for(P0, ukind(&rules, "skirmisher"), POSTS[3]),
+    )]);
+    assert_eq!(started(&events), 1);
+    println!(
+        "Mangonels and a Supply Wain held the ring for 60 steps without a timer; a Skirmisher started it"
+    );
+}
+
+/// A flip transfers the Town with every building and site attributed to it
+/// except the kinds that `stays_on_annexation`, and idles the old owner's
+/// workers and builders there. P1 has, attributed to the Town, a Croft
+/// worked by a Yeoman, a Muster Hall with a rally point, a Croft site whose
+/// Yeoman builder took the job just before the flip, and a Watchtower and
+/// a Watchtower site, the second with its own Yeoman builder. After the
+/// flip the Croft, the Muster Hall and the Croft site are P0's (rally
+/// cleared, site progress kept), both Yeomen's jobs on them are gone, and
+/// the Watchtower and its site are still P1's, attributed to no Town (P1
+/// has none left), with their builder still at work.
+#[test]
+fn annexation_flip_transfers_civilian_buildings_and_sites_keeps_watchtowers_and_clears_jobs() {
+    let rules = load_rules();
+    let n = total(&rules);
+    let k = |id: &str| bkind(&rules, id);
+    let site = |kind, (x, y): (u16, u16)| Command::DebugPlaceBuilding {
+        owner: P1,
+        kind,
+        tile: Tile::new(x, y),
+        complete: false,
+    };
+    let yeoman = ukind(&rules, "yeoman");
+    let (croft, hall, croft_site, tower, tower_site) = (
+        BuildingId(2),
+        BuildingId(3),
+        BuildingId(4),
+        BuildingId(5),
+        BuildingId(6),
+    );
+    let (worker, builder, tower_builder) = (UnitId(1), UnitId(2), UnitId(3));
+    let step0 = vec![
+        place_for(P1, k("croft"), (14, 40)),
+        place_for(P1, k("muster_hall"), (8, 33)),
+        site(k("croft"), (17, 44)),
+        place_for(P1, k("watchtower"), (6, 40)),
+        site(k("watchtower"), (6, 44)),
+        spawn_for(P1, yeoman, (13, 38)),
+        spawn_for(P1, yeoman, (19, 47)),
+        spawn_for(P1, yeoman, (5, 46)),
+        Command::Gather {
+            units: vec![worker],
+            node: croft,
+        },
+        Command::SetRally {
+            building: hall,
+            target: FxVec2::from_ints(10, 38),
+        },
+    ];
+    let Annex { mut m, .. } = annex_with(&rules, step0, on_posts(&rules));
+    for b in [croft, hall, croft_site, tower, tower_site] {
+        assert_eq!(m.view().building(b).unwrap().town, Some(TOWN), "{b:?}");
+    }
+    step_to(&mut m, T0 + n - 10);
+    let build = |unit, kind, (x, y): (u16, u16)| Command::Build {
+        unit,
+        kind,
+        tile: Tile::new(x, y),
+    };
+    let events = m.step_with(vec![
+        (1, build(builder, k("croft"), (17, 44))),
+        (1, build(tower_builder, k("watchtower"), (6, 44))),
+    ]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let job = |m: &M, u| m.view().unit(u).unwrap().job;
+    assert!(job(&m, worker).is_some() && job(&m, builder).is_some());
+    let progress = |m: &M| m.view().building(croft_site).unwrap().construction;
+    let events = step_to(&mut m, T0 + n + 1);
+    assert_eq!(annexed(&events), [(TOWN, P1, P0)]);
+    let view = m.view();
+    for b in [TOWN, croft, hall, croft_site] {
+        assert_eq!(view.building(b).unwrap().owner, P0, "{b:?} changed hands");
+    }
+    for b in [tower, tower_site] {
+        let b = view.building(b).unwrap();
+        assert_eq!((b.owner, b.town), (P1, None), "{:?} stayed", b.id);
+    }
+    assert_eq!(view.building(hall).unwrap().rally, None);
+    assert!(matches!(progress(&m), sim::Construction::Site { .. }));
+    assert_eq!(job(&m, worker), None, "the worker left the Croft");
+    assert_eq!(job(&m, builder), None, "the builder left the site");
+    assert_eq!(
+        job(&m, tower_builder),
+        Some(sim::Job::Build { site: tower_site }),
+        "the Watchtower site stays with its builder"
+    );
+    assert!(field_is_exact(&m));
+    println!(
+        "after the flip: Town, Croft, Muster Hall and Croft site are P0's; Watchtower and its site stay P1's with no Town"
+    );
+}
+
+/// A flip refunds every queue entry of the buildings that change hands to
+/// the old owner, clamped like `Cancel`, with a `TrainingCancelled` per
+/// entry, and zeroes what a site paid with no refund. P1 queues two
+/// Yeomen at the Town before the timer (paused since) and a Skirmisher at
+/// its Muster Hall just before the flip, and places a Croft site with a
+/// real `Build` (it paid Lumber; its builder is stopped). After the flip
+/// P1's stockpile has grown by exactly the queued entries' cost, the
+/// site's `paid` is zero and P0's stockpile is unchanged.
+#[test]
+fn annexation_flip_refunds_queues_to_the_old_owner_and_zeroes_site_paid() {
+    let rules = load_rules();
+    let n = total(&rules);
+    let grant = |resource: &str, amount| Command::DebugGrant {
+        owner: P1,
+        resource: u8::try_from(res(&rules, resource)).unwrap(),
+        amount,
+    };
+    let (hall, croft_site) = (BuildingId(2), BuildingId(3));
+    let builder = UnitId(1);
+    let train = |building, kind: &str| Command::Train {
+        building,
+        kind: ukind(&rules, kind),
+    };
+    let step0 = vec![
+        grant("grain", 500),
+        grant("lumber", 500),
+        train(TOWN, "yeoman"),
+        train(TOWN, "yeoman"),
+        place_for(P1, bkind(&rules, "muster_hall"), (8, 33)),
+        spawn_for(P1, ukind(&rules, "yeoman"), (16, 45)),
+        Command::Build {
+            unit: builder,
+            kind: bkind(&rules, "croft"),
+            tile: Tile::new(14, 44),
+        },
+        Command::Stop {
+            units: vec![builder],
+        },
+    ];
+    let Annex { mut m, .. } = annex_with(&rules, step0, on_posts(&rules));
+    let site_paid = m.view().building(croft_site).unwrap().paid.clone();
+    assert!(site_paid.iter().any(|v| *v > 0), "{site_paid:?}");
+    step_to(&mut m, T0 + n - 20);
+    let events = m.step_with(vec![(1, train(hall, "skirmisher"))]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    step_to(&mut m, T0 + n);
+    let paid: Vec<i64> = [TOWN, hall]
+        .iter()
+        .flat_map(|b| m.view().building(*b).unwrap().queue.clone())
+        .fold(vec![0; rules.resources.resources.len()], |mut acc, e| {
+            for (a, p) in acc.iter_mut().zip(&e.paid) {
+                *a += p;
+            }
+            acc
+        });
+    assert_eq!(m.view().building(TOWN).unwrap().queue.len(), 2);
+    assert_eq!(m.view().building(hall).unwrap().queue.len(), 1);
+    let (p0_before, p1_before) = (m.stock(P0), m.stock(P1));
+    let events = m.step(1);
+    assert_eq!(annexed(&events), [(TOWN, P1, P0)]);
+    let cancelled: Vec<(BuildingId, u8)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SimEvent::TrainingCancelled { building, slot } => Some((*building, *slot)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cancelled, [(TOWN, 0), (TOWN, 1), (hall, 0)]);
+    let mut want = p1_before.clone();
+    for (w, p) in want.iter_mut().zip(&paid) {
+        *w += p;
+    }
+    for (w, res) in want.iter_mut().zip(&rules.resources.resources) {
+        if let Some(cap) = res.stockpile_cap {
+            *w = (*w).min(i64::from(cap));
+        }
+    }
+    assert_eq!(m.stock(P1), want, "the queues' cost, and not the site's");
+    assert_eq!(m.stock(P0), p0_before);
+    let view = m.view();
+    for b in [TOWN, hall] {
+        assert!(view.building(b).unwrap().queue.is_empty(), "{b:?}");
+    }
+    let site = view.building(croft_site).unwrap();
+    assert_eq!(site.owner, P0);
+    assert!(site.paid.iter().all(|v| *v == 0), "{:?}", site.paid);
+    println!(
+        "flip refunds {paid:?} to P1 ({p1_before:?} -> {:?}); the site paid {site_paid:?}, now zero",
+        m.stock(P1)
+    );
+}
+
+/// A flip may take the new owner over its town limit; only new Town
+/// sites are gated. P0 holds two complete Towns (the limit) before it
+/// annexes P1's: it then owns three, and `Build` of another Town is
+/// rejected `TownLimitReached`.
+#[test]
+fn annexation_flip_may_exceed_the_town_limit() {
+    let rules = load_rules();
+    let mut step1 = on_posts(&rules);
+    for at in [(23, 63), (102, 63)] {
+        step1.push((0, place_for(P0, bkind(&rules, "town"), at)));
+    }
+    let Annex { mut m, .. } = annex_with(&rules, vec![], step1);
+    let (count, limit) = m.view().towns(P0);
+    assert_eq!(count, limit, "at the limit before the flip");
+    let events = step_to(&mut m, T0 + total(&rules) + 1);
+    assert_eq!(annexed(&events), [(TOWN, P1, P0)]);
+    assert_eq!(m.view().towns(P0), (limit + 1, limit));
+    assert_eq!(
+        m.view().check_build_kind(P0, bkind(&rules, "town")),
+        Err(RejectReason::TownLimitReached)
+    );
+    println!("P0 owns {} Towns over a limit of {limit}", limit + 1);
+}
+
+/// While a Town's timer runs its queue is paused and a new building of
+/// its owner is attributed to the owner's nearest other complete Town
+/// (`town::attribute` skips a contested Town); once the timer resets, the
+/// queue moves again and new buildings attribute to it again. P1 has a
+/// second Town at nw (20,70).
+#[test]
+fn annexation_contested_town_queue_pauses_and_new_buildings_attribute_elsewhere() {
+    let rules = load_rules();
+    let other = BuildingId(2);
+    let grain = u8::try_from(res(&rules, "grain")).unwrap();
+    let step0 = vec![
+        place_for(P1, bkind(&rules, "town"), (20, 70)),
+        Command::DebugGrant {
+            owner: P1,
+            resource: grain,
+            amount: 100,
+        },
+        Command::Train {
+            building: TOWN,
+            kind: ukind(&rules, "yeoman"),
+        },
+    ];
+    let Annex { mut m, .. } = annex_with(&rules, step0, on_posts(&rules));
+    let progress = |m: &M| m.view().building(TOWN).unwrap().queue[0].progress;
+    let paused = progress(&m);
+    step_to(&mut m, T0 + 40);
+    assert_eq!(progress(&m), paused);
+    let croft = |x, y| (1, place_for(P1, bkind(&rules, "croft"), (x, y)));
+    let events = m.step_with(vec![croft(14, 40)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let during = BuildingId(3);
+    assert_eq!(m.view().building(during).unwrap().town, Some(other));
+    let events = m.step_with(vec![(
+        1,
+        spawn_for(P1, ukind(&rules, "shieldbearer"), probe_in(&rules)),
+    )]);
+    assert_eq!(resets(&events), 1);
+    let events = m.step_with(vec![croft(14, 36)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    assert_eq!(m.view().building(BuildingId(4)).unwrap().town, Some(TOWN));
+    assert!(progress(&m) > paused, "the queue moves after the reset");
+    println!(
+        "paused at {paused}; a Croft during the timer went to {other:?}, one after the reset to {TOWN:?}"
+    );
+}
+
+/// The neutral land under a running timer applies no attrition: P1 has
+/// Harrying I, and its land under P0's Skirmishers bites in step `T0`
+/// (their counters reach 1 before step 5d turns it neutral); from step
+/// `T0 + 1` through the flip and after it every counter stays 0.
+#[test]
+fn annexation_neutral_land_under_the_timer_applies_no_attrition() {
+    let rules = load_rules();
+    let step0 = vec![Command::DebugResearch {
+        owner: P1,
+        tech: tech(&rules, "harrying_1"),
+    }];
+    let Annex { mut m, .. } = annex_with(&rules, step0, on_posts(&rules));
+    let ids: Vec<UnitId> = (1..=4).map(UnitId).collect();
+    for &u in &ids {
+        assert_eq!(exposed(&m, u), 1, "P1's land bit in step T0");
+    }
+    let mut landed = 0;
+    while m.sim.tick() < T0 + total(&rules) + 100 {
+        let events = m.step(1);
+        landed += pulses(&events).len();
+        for &u in &ids {
+            assert_eq!(exposed(&m, u), 0, "tick {}", m.sim.tick());
+        }
+    }
+    assert_eq!(landed, 0);
+    assert_eq!(m.view().building(TOWN).unwrap().owner, P0);
+}
+
+/// The annex-hold guard rule (owner decision 6): an idle infantry or
+/// cavalry guard beside an enemy Town at 0 HP takes only targets in weapon
+/// range and never chases. A P1 Croft stands 3.5 tiles from the nearest
+/// post, inside every guard's reach and directly chaseable, out of weapon
+/// range: the guards stay on their posts for 300 steps with no target and
+/// no `Hit`, and the timer runs. With the rule off for Skirmishers (the
+/// control rules select only cavalry as attackers, so no timer runs either)
+/// a guard takes the Croft and chases it.
+#[test]
+fn annexation_adjacent_guards_hold_the_ring() {
+    let rules = load_rules();
+    let mut off = rules.clone();
+    off.annexation_attackers = vec![rules::UnitSel::Class(rules::units::UnitClass::Cavalry)];
+    let croft = BuildingId(2);
+    let mut seen = Vec::new();
+    for (name, r) in [("rule on", &rules), ("rule off", &off)] {
+        let step0 = vec![place_for(P1, bkind(r, "croft"), (27, 26))];
+        let Annex { mut m, .. } = annex_with(r, step0, on_posts(r));
+        let posts: Vec<Tile> = (1..=4).map(|u| unit_tile(&m, UnitId(u))).collect();
+        let mut events = Vec::new();
+        for _ in 0..300 {
+            events.extend(m.step(1));
+        }
+        let moved = (1..=4)
+            .filter(|&u| {
+                m.view().unit(UnitId(u)).is_none_or(|x| {
+                    m.view().map().tile_of(x.pos) != posts[usize::try_from(u - 1).unwrap()]
+                })
+            })
+            .count();
+        let on_croft = hits_on_building(&events, croft);
+        let targets: Vec<Option<TargetId>> = (1..=4)
+            .map(|u| m.view().unit(UnitId(u)).and_then(|x| x.target))
+            .collect();
+        if r.annexation_attackers == rules.annexation_attackers {
+            assert_eq!(moved, 0, "{name}: nobody leaves the ring");
+            assert_eq!(on_croft, 0, "{name}");
+            assert!(targets.iter().all(Option::is_none), "{name}: {targets:?}");
+            assert!(
+                m.view().annexation(TOWN).is_some(),
+                "{name}: the timer runs"
+            );
+        } else {
+            assert!(
+                moved > 0 && on_croft > 0,
+                "{name}: {moved} moved, {on_croft} hits"
+            );
+            assert!(targets.contains(&Some(TargetId::Building(croft))), "{name}");
+        }
+        seen.push((name, moved, on_croft));
+    }
+    println!("guards that left their post and hits on the Croft: {seen:?}");
+}
+
+fn hits_on_building(events: &[SimEvent], b: BuildingId) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, SimEvent::Hit { target: TargetId::Building(t), .. } if *t == b))
+        .count()
+}
+
+/// The territory field equals a full recompute of its sources right after
+/// the entry, after a reset and after the flip.
+#[test]
+fn annexation_field_equals_full_recompute_at_entry_reset_and_flip() {
+    let rules = load_rules();
+    let Annex { mut m, entry, .. } = annex_setup(&rules);
+    assert_eq!(started(&entry), 1);
+    assert!(field_is_exact(&m), "entry");
+    let shieldbearer = UnitId(5);
+    let events = m.step_with(vec![(
+        1,
+        spawn_for(P1, ukind(&rules, "shieldbearer"), probe_in(&rules)),
+    )]);
+    assert_eq!(resets(&events), 1);
+    assert!(field_is_exact(&m), "reset");
+    let events = m.step_with(vec![(1, move_to(shieldbearer, (21, 40)))]);
+    let mut restarted = started(&events);
+    let mut flipped = Vec::new();
+    while flipped.is_empty() {
+        let events = m.step(1);
+        restarted += started(&events);
+        flipped = annexed(&events);
+    }
+    assert_eq!(restarted, 1);
+    assert!(field_is_exact(&m), "flip");
+}
+
+/// A restore in the middle of the timer continues exactly: a snapshot at
+/// step `T0 + 600` restored into a fresh sim gives the same events, every
+/// sub-hash and the whole hash after every step through the flip and 50
+/// steps more, and the same result.
+#[test]
+fn annexation_restore_mid_timer_matches_uninterrupted() {
+    let rules = load_rules();
+    let Annex { mut m, .. } = annex_setup(&rules);
+    step_to(&mut m, T0 + 600);
+    let mut b = m.clone_at_tick();
+    assert_eq!(m.sim.sub_hashes(), b.sim.sub_hashes());
+    let mut flips = 0;
+    while m.sim.tick() < T0 + total(&rules) + 50 {
+        let t = m.sim.tick();
+        let ea = m.step(1);
+        let eb = b.step(1);
+        assert_eq!(ea, eb, "events in step {t}");
+        assert_eq!(m.sim.sub_hashes(), b.sim.sub_hashes(), "after step {t}");
+        assert_eq!(m.sim.hash(), b.sim.hash());
+        flips += annexed(&ea).len();
+    }
+    assert_eq!(flips, 1);
+    assert!(m.sim.result().is_some());
+    assert_eq!(m.sim.result(), b.sim.result());
+}
+
+/// Annexation draws nothing from the RNG: the `rng` sub-hash keeps its
+/// value from the setup through the timer, the flip and the outcome.
+#[test]
+fn annexation_draws_no_randomness() {
+    let rules = load_rules();
+    let Annex { mut m, .. } = annex_setup(&rules);
+    let rng = m.sim.sub_hashes().rng;
+    let events = step_to(&mut m, T0 + total(&rules) + 20);
+    assert_eq!(annexed(&events).len(), 1);
+    assert_eq!(decided(&events).len(), 1);
+    assert_eq!(m.sim.sub_hashes().rng, rng);
+}
+
+/// `SimView::annexation` says how many steps are left: after step `T0 +
+/// k`, `total - ticks` more steps flip the Town, for several `k`; the last
+/// of them, and no earlier one, emits `TownAnnexed`.
+#[test]
+fn annexation_view_remaining_ticks_agrees_with_the_flip() {
+    let rules = load_rules();
+    let n = total(&rules);
+    for k in [0, 1, n / 2, n - 2, n - 1] {
+        let Annex { mut m, .. } = annex_setup(&rules);
+        step_to(&mut m, T0 + k + 1);
+        let v = m.view().annexation(TOWN).unwrap();
+        assert_eq!(v.ticks, k);
+        let left = v.total - v.ticks;
+        for i in 1..=left {
+            let events = m.step(1);
+            assert_eq!(
+                annexed(&events).len(),
+                usize::from(i == left),
+                "k {k}, step {i} of {left}"
+            );
+        }
+    }
+}
+
+/// The `capture_seat` scenario's beats, from the real sim: every P1 unit is
+/// dead by tick 3; the Seat (`BuildingId(2)`) reaches 0 HP before tick 300;
+/// the timer starts once and never resets; the Bowman bleeds (at least one
+/// `Attrition`) while the Skirmishers and Mangonels, covered by the Wain,
+/// never do; and no command is rejected.
+#[test]
+fn annexation_capture_seat_scenario_beats() {
+    use sim::scenarios::{CAPTURE_SEAT_MOVE_TICK, CAPTURE_SEAT_RING};
+    let rules = load_rules();
+    let (sim, _, events) = capture_seat_to_outcome(&rules);
+    let seat = BuildingId(2);
+    let rejected: Vec<_> = events
+        .iter()
+        .filter(|(_, e)| matches!(e, SimEvent::CommandRejected { .. }))
+        .collect();
+    assert!(rejected.is_empty(), "{rejected:?}");
+    let p1_dead: Vec<u32> = events
+        .iter()
+        .filter_map(|(t, e)| match e {
+            SimEvent::UnitDied { owner, .. } if *owner == P1 => Some(*t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(p1_dead.len(), 5, "P1's five Yeomen");
+    assert!(p1_dead.iter().all(|t| *t < 3), "{p1_dead:?}");
+    let zero = events
+        .iter()
+        .find(|(_, e)| *e == SimEvent::TownAtZeroHp { town: seat })
+        .map(|(t, _)| *t)
+        .expect("the Seat reaches 0");
+    assert!(zero < CAPTURE_SEAT_MOVE_TICK, "{zero}");
+    let all: Vec<SimEvent> = events.iter().map(|(_, e)| e.clone()).collect();
+    assert_eq!(started(&all), 1);
+    assert_eq!(resets(&all), 0);
+    let entry = events
+        .iter()
+        .find(|(_, e)| matches!(e, SimEvent::AnnexationStarted { .. }))
+        .unwrap()
+        .0;
+    let bled = |u: u32| pulses(&all).iter().filter(|p| p.0 == UnitId(u)).count();
+    assert!(bled(24) > 0, "the Bowman bleeds");
+    for u in 11..=22 {
+        assert_eq!(bled(u), 0, "{u}");
+    }
+    assert_eq!(CAPTURE_SEAT_RING.len(), 8);
+    println!(
+        "capture_seat: P1's Yeomen dead at {p1_dead:?}, Seat at 0 HP in step {zero}, timer from step {entry}, decided at tick {} ({:?}), the Bowman took {} pulses",
+        sim.tick(),
+        sim.result().unwrap().reason,
+        bled(24)
+    );
+}
+
+/// The shipped rules with an in-memory `match_cap_ds` of 50 (100 ticks),
+/// so the outcome tests reach the cap quickly (`Rules::match_cap_ticks()`
+/// is read, not hard-coded).
+fn short_cap_rules() -> Rules {
+    let mut r = load_rules();
+    r.match_cap_ds = 50;
+    r
+}
+
+/// A surrender is decisive for the opponent: P1's `Surrender` in step 0
+/// (delay 0) decides `Victory { P0, decisive: true }`, reason `Surrender`,
+/// at tick 1, with one `MatchDecided`.
+#[test]
+fn annexation_outcome_surrender_is_decisive_for_the_opponent() {
+    let mut m = M::delay0(load_rules(), 9);
+    let events = m.step_with(vec![(1, Command::Surrender)]);
+    let want = MatchResult {
+        outcome: Outcome::Victory {
+            player: P0,
+            decisive: true,
+        },
+        reason: OutcomeReason::Surrender,
+        tick: 1,
+    };
+    assert_eq!(decided(&events), [want]);
+    assert_eq!(m.sim.result(), Some(want));
+    assert_eq!(m.view().result(), Some(want));
+    assert_eq!(m.view().outcome(), Some(want.outcome));
+}
+
+/// Both players surrendering in the same step is a `Draw`, reason
+/// `Surrender` (P0's applies first, then P1's: nobody is left).
+#[test]
+fn annexation_outcome_double_surrender_is_a_draw() {
+    let mut m = M::delay0(load_rules(), 9);
+    let events = m.step_with(vec![(0, Command::Surrender), (1, Command::Surrender)]);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    let want = MatchResult {
+        outcome: Outcome::Draw,
+        reason: OutcomeReason::Surrender,
+        tick: 1,
+    };
+    assert_eq!(decided(&events), [want]);
+}
+
+/// Losing the last complete Town is decisive, checked at the flip, and a
+/// Town site does not count as a Town (owner decision 7): P1 with a Town
+/// site besides the annexed Town loses (`AllTownsLost` in the flip's
+/// step), while P1 with a second complete Town plays on.
+#[test]
+fn annexation_outcome_all_towns_lost_is_decisive() {
+    let rules = load_rules();
+    let town = bkind(&rules, "town");
+    let cases = [("a Town site", false), ("a second complete Town", true)];
+    for (name, complete) in cases {
+        let step0 = vec![Command::DebugPlaceBuilding {
+            owner: P1,
+            kind: town,
+            tile: Tile::new(20, 70),
+            complete,
+        }];
+        let Annex { mut m, .. } = annex_with(&rules, step0, on_posts(&rules));
+        let events = step_to(&mut m, T0 + total(&rules) + 1);
+        assert_eq!(annexed(&events), [(TOWN, P1, P0)], "{name}");
+        if complete {
+            assert_eq!(m.sim.result(), None, "{name}: P1 plays on");
+        } else {
+            assert_eq!(
+                m.sim.result(),
+                Some(MatchResult {
+                    outcome: Outcome::Victory {
+                        player: P0,
+                        decisive: true
+                    },
+                    reason: OutcomeReason::AllTownsLost,
+                    tick: T0 + total(&rules) + 1,
+                }),
+                "{name}"
+            );
+        }
+    }
+}
+
+/// An empty start never ends before the cap: with nothing owned and nobody
+/// surrendering, the outcome is `None` after every step up to the cap and
+/// decided in the step that reaches it, a `Draw` (0 tiles each), reason
+/// `Territory`.
+#[test]
+fn annexation_outcome_empty_start_never_ends_before_the_cap() {
+    let rules = short_cap_rules();
+    let cap = rules.match_cap_ticks();
+    let mut m = M::delay0(rules, 9);
+    while m.sim.tick() < cap - 1 {
+        m.step(1);
+        assert_eq!(m.sim.outcome(), None, "tick {}", m.sim.tick());
+    }
+    let events = m.step(1);
+    let want = MatchResult {
+        outcome: Outcome::Draw,
+        reason: OutcomeReason::Territory,
+        tick: cap,
+    };
+    assert_eq!(decided(&events), [want]);
+}
+
+/// The territory tiebreak at the cap (with [`short_cap_rules`]).
+/// `towns_and_towers` are complete placements in step 0.
+fn territory_result(placements: &[(u8, &str, (u16, u16))]) -> (MatchResult, u32, u32) {
+    let rules = short_cap_rules();
+    let cap = rules.match_cap_ticks();
+    let cmds: Vec<(u8, Command)> = placements
+        .iter()
+        .map(|&(p, kind, at)| (p, place_for(PlayerId(p), bkind(&rules, kind), at)))
+        .collect();
+    let mut m = M::delay0(rules, 9);
+    let events = m.step_with(cmds);
+    assert!(rejections(&events).is_empty(), "{events:?}");
+    step_to(&mut m, cap);
+    let f = m.view().territory();
+    let (p0, p1) = (f.owned_tile_count(P0), f.owned_tile_count(P1));
+    (m.sim.result().expect("decided at the cap"), p0, p1)
+}
+
+/// An exact territory tie at the cap is a `Draw` (owner decision 1): the
+/// mirrored Towns at the two starts own 1245 tiles each.
+#[test]
+fn annexation_outcome_exact_territory_tie_is_a_draw() {
+    let (r, p0, p1) = territory_result(&[(0, "town", (23, 63)), (1, "town", (102, 63))]);
+    assert_eq!(p0, p1);
+    assert_eq!(
+        (r.outcome, r.reason),
+        (Outcome::Draw, OutcomeReason::Territory)
+    );
+    println!("tie {p0} : {p1} -> {:?}", r.outcome);
+}
+
+/// The tiebreak goes to whichever player owns more: a Watchtower at
+/// (43,64) gives P0 three more tiles, the mirrored one at (84,64) gives P1
+/// three more; each wins `Victory { decisive: false }`, reason
+/// `Territory`.
+#[test]
+fn annexation_outcome_tiebreak_goes_to_either_player() {
+    for (p, tower) in [(0u8, (43, 64)), (1, (84, 64))] {
+        let (r, p0, p1) = territory_result(&[
+            (0, "town", (23, 63)),
+            (1, "town", (102, 63)),
+            (p, "watchtower", tower),
+        ]);
+        let winner = PlayerId(p);
+        assert!(if p == 0 { p0 > p1 } else { p1 > p0 }, "{p0} {p1}");
+        assert_eq!(
+            (r.outcome, r.reason),
+            (
+                Outcome::Victory {
+                    player: winner,
+                    decisive: false
+                },
+                OutcomeReason::Territory
+            )
+        );
+        println!("P0 {p0}, P1 {p1} -> {:?}", r.outcome);
+    }
+}
+
+/// A surrender beats a Seat capture in the same step: `capture_seat` with
+/// P0's `Surrender` applying in the very step its Skirmishers flip P1's
+/// Seat decides `Victory { P1 }`, reason `Surrender`, although the Seat
+/// still changes hands in that step.
+#[test]
+fn annexation_outcome_surrender_beats_a_same_step_seat_capture() {
+    let rules = load_rules();
+    let (sim, _, _) = capture_seat_to_outcome(&rules);
+    let decision = sim.result().unwrap().tick;
+    let (setup, stream, _) = sim::scenarios::by_name("capture_seat", &rules).unwrap();
+    let delay = setup.cmd_delay;
+    let seq = stream
+        .iter()
+        .flat_map(|(_, c)| c)
+        .filter(|c| c.player == P0)
+        .map(|c| c.seq + 1)
+        .max()
+        .unwrap();
+    let mut sim = Sim::new(setup, rules, Box::new(NoAi));
+    let issue = decision - 1 - delay;
+    let surrender = PlayerCommand::new(P0, seq, Command::Surrender);
+    let mut last = Vec::new();
+    while sim.tick() < decision {
+        let t = sim.tick();
+        let mut cmds = sim::scenarios::commands_at(&stream, t).to_vec();
+        if t == issue {
+            cmds.push(surrender.clone());
+        }
+        sim.step(&cmds);
+        last = sim.drain_events();
+    }
+    assert_eq!(annexed(&last), [(BuildingId(2), P1, P0)], "the Seat flips");
+    let want = MatchResult {
+        outcome: Outcome::Victory {
+            player: P1,
+            decisive: true,
+        },
+        reason: OutcomeReason::Surrender,
+        tick: decision,
+    };
+    assert_eq!(decided(&last), [want]);
+}
+
+/// The outcome is latched: P1 surrenders during the timer (`Victory { P0
+/// }`, `Surrender`); the later flip of its last Town decides nothing
+/// again, and neither does P0's own surrender after it.
+#[test]
+fn annexation_outcome_is_latched() {
+    let rules = load_rules();
+    let Annex { mut m, .. } = annex_setup(&rules);
+    let events = m.step_with(vec![(1, Command::Surrender)]);
+    let result = m.sim.result().unwrap();
+    assert_eq!(decided(&events), [result]);
+    assert_eq!(result.reason, OutcomeReason::Surrender);
+    let mut events = step_to(&mut m, T0 + total(&rules) + 1);
+    assert_eq!(annexed(&events), [(TOWN, P1, P0)], "annexation goes on");
+    events.extend(m.step_with(vec![(0, Command::Surrender)]));
+    events.extend(m.step(10));
+    assert!(decided(&events).is_empty());
+    assert_eq!(m.sim.result(), Some(result));
+}
+
+/// The late-game Yield Cap decay (`ai.md`, M6's pressure knob) is off in
+/// the shipped data (`yield_cap_decay_step: 0`): even with the decay
+/// starting at tick 0 the cap stays `yield_cap_base`. With an in-memory
+/// step of 10 from 5 ds (10 ticks) every 5 ds, the cap a player's income
+/// reads falls by 10 at tick 10, by 20 at tick 20, and so on, floored at
+/// 0. Deliberately not prefixed: it is neither attrition nor annexation.
+#[test]
+fn late_game_yield_cap_decay_is_off_in_the_shipped_data_and_lowers_the_cap_when_set() {
+    let shipped = load_rules();
+    assert_eq!(shipped.yield_cap_decay_step, 0, "off until an M6 iteration");
+    let grain = res(&shipped, "grain");
+    let cap = |m: &M| m.view().income(P0)[grain].cap.unwrap();
+    let base = shipped.yield_cap_base;
+    let mut from_zero = shipped.clone();
+    from_zero.yield_cap_decay_after_ds = 0;
+    let mut m = M::delay0(from_zero, 9);
+    for _ in 0..30 {
+        assert_eq!(cap(&m), base);
+        m.step(1);
+    }
+    let mut on = shipped.clone();
+    on.yield_cap_decay_after_ds = 5;
+    on.yield_cap_decay_every_ds = 5;
+    on.yield_cap_decay_step = 10;
+    let (after, every) = on.yield_cap_decay_ticks();
+    assert_eq!((after, every), (10, 10));
+    let mut m = M::delay0(on, 9);
+    let mut seen = Vec::new();
+    while m.sim.tick() <= 20 * every {
+        let t = m.sim.tick();
+        let want = if t < after {
+            base
+        } else {
+            base.saturating_sub(10 * (1 + (t - after) / every))
+        };
+        assert_eq!(cap(&m), want, "tick {t}");
+        if t.is_multiple_of(every) {
+            seen.push((t, cap(&m)));
+        }
+        m.step(1);
+    }
+    assert_eq!(cap(&m), 0, "floored at 0");
+    println!("decay from tick {after} every {every}: {seen:?}");
+}
+
+fn golden(name: &str) {
+    let replay = fixtures_dir().join(format!("{name}.eonreplay"));
+    let hash_file = fixtures_dir().join(format!("{name}.hash"));
+    let expected = std::fs::read_to_string(&hash_file)
+        .unwrap_or_else(|e| panic!("{}: {e}", hash_file.display()));
+    let outcome = sim::verify(&replay, &data_dir(), Box::new(NoAi))
+        .unwrap_or_else(|e| panic!("{}: {e}", replay.display()));
+    match outcome {
+        sim::VerifyOutcome::Ok { final_hash, .. } => {
+            assert_eq!(format!("0x{final_hash:016x}"), expected.trim(), "{name}");
+        }
+        other => panic!("{name}: {other}"),
+    }
+}
+
+/// The M5a capture golden: `capture_seat.eonreplay` verifies to the hash
+/// in `capture_seat.hash`, the state at the tick the match is decided.
+#[test]
+fn golden_capture_seat() {
+    golden("capture_seat");
+}
+
+/// The M5a 45-minute golden: 54000 ticks, verified by `sim-cli verify
+/// --release` in CI (rule 18: goldens over 5000 ticks are ignored
+/// locally). The acceptance test
+/// `annexation_54000_tick_scripted_stalemate_is_a_tiebreak_victory_for_more_territory`
+/// runs the same stream and is not ignored.
+#[test]
+#[ignore = "long golden (54000 ticks); verified by sim-cli verify --release in CI"]
+fn golden_stalemate_45min() {
+    golden("stalemate_45min");
+}
+
+// ---------------------------------------------------------------------------
+// Seeded random streams over attrition and annexation (`m5a_*`).
+// ---------------------------------------------------------------------------
+
+/// The rules of the M5a annexation streams: [`stream_rules`] (attrition
+/// every 8 ticks at Harrying I) with an in-memory `annexation_ds` of 50
+/// (100 ticks), so a short stream sees Towns change hands.
+fn annex_stream_rules() -> &'static Rules {
+    static RULES: std::sync::OnceLock<Rules> = std::sync::OnceLock::new();
+    RULES.get_or_init(|| {
+        let mut r = stream_rules().clone();
+        r.annexation_ds = 50;
+        assert_eq!(r.annexation_ticks(), 100);
+        r
+    })
+}
+
+/// A seeded random stream over both players for the delay-0 sim with
+/// [`annex_stream_rules`], extending the attrition stream with Towns at 0
+/// HP, defenders, attacks and a surrender. Step 0: P0's complete Town at
+/// (59,30) (`BuildingId(1)`), P1's at [`FIELD_TOWN`] (`BuildingId(2)`),
+/// Harrying for P1 (I, and II on odd seeds) and for P0 on seeds divisible
+/// by 3; P0's four Skirmishers on [`POSTS`], beside P1's Town, and a Bowman,
+/// a Yeoman, a Scribe and a Supply Wain each side away from the Towns.
+/// Step 1: P0 takes P1's Town to 0 HP (except on seeds `3 mod 4`) and P1
+/// takes P0's to 0 on seeds divisible by 3. Then each tick may: move a few
+/// units of one side to a random point of the strip between the Towns, to
+/// a tile of the enemy Town's ring or near their own Town; stop one; damage
+/// a random unit id or a Town; order a unit to attack a random enemy unit
+/// id; research Harrying II; spawn a unit at a random point or near the
+/// spawner's own Town (a defender); and late in the stream, rarely,
+/// surrender (that player's commands then stop). Many commands are
+/// rejected, as intended.
+fn random_m5a_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
+    let rules = annex_stream_rules();
+    let k = |id: &str| ukind(rules, id);
+    let mut rng = rand_pcg::Pcg32::seed_from_u64(seed ^ 0x5a5a);
+    let mut seq = [0u32; 2];
+    let mut ids: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+    let mut next_id = 1u32;
+    let mut gone = [false; 2];
+    let towns = [(59i32, 30i32), (20, 30)];
+    let ring = |town: (i32, i32), i: u32| -> (i32, i32) {
+        // The 16 ring tiles of a 3x3 footprint, clockwise from the north-west.
+        let i = i32::try_from(i % 16).unwrap();
+        let (x0, y0) = (town.0 - 1, town.1 - 1);
+        match i {
+            0..=4 => (x0 + i, y0),
+            5..=8 => (x0 + 4, y0 + i - 4),
+            9..=12 => (x0 + 4 - (i - 8), y0 + 4),
+            _ => (x0, y0 + 4 - (i - 12)),
+        }
+    };
+    let mut out = Vec::with_capacity(usize::try_from(ticks).unwrap());
+    for t in 0..ticks {
+        let mut cmds: Vec<PlayerCommand> = Vec::new();
+        let mut push = |p: usize, c: Command| {
+            cmds.push(PlayerCommand::new(
+                PlayerId(u8::try_from(p).unwrap()),
+                seq[p],
+                c,
+            ));
+            seq[p] += 1;
+        };
+        match t {
+            0 => {
+                push(0, place_for(P0, bkind(rules, "town"), (59, 30)));
+                if seed.is_multiple_of(3) {
+                    push(0, harrying_for(rules, P0, 1)[0].1.clone());
+                }
+                for at in POSTS {
+                    push(0, spawn_for(P0, k("skirmisher"), at));
+                    ids[0].push(next_id);
+                    next_id += 1;
+                }
+                for (p, at) in [(0usize, (35, 40)), (1, (47, 31))] {
+                    let owner = PlayerId(u8::try_from(p).unwrap());
+                    let kinds = ["bowman", "yeoman", "scribe", "supply_wain", "skirmisher"];
+                    for (i, kind) in kinds.iter().enumerate() {
+                        let dy = 2 * i32::try_from(i).unwrap() - 4;
+                        push(p, spawn_for(owner, k(kind), (at.0, at.1 + dy)));
+                        ids[p].push(next_id);
+                        next_id += 1;
+                    }
+                }
+                push(1, place_for(P1, bkind(rules, "town"), FIELD_TOWN));
+                for (_, c) in harrying_for(rules, P1, 1 + usize::from(seed % 2 == 1)) {
+                    push(1, c);
+                }
+            }
+            1 => {
+                if seed % 4 != 3 {
+                    push(0, damage(TargetId::Building(BuildingId(2)), u32::MAX));
+                }
+                if seed.is_multiple_of(3) {
+                    push(1, damage(TargetId::Building(BuildingId(1)), u32::MAX));
+                }
+            }
+            _ => {
+                let roll = rng.next_u32() % 100;
+                let p = usize::try_from(rng.next_u32() % 2).unwrap();
+                if gone[p] {
+                    out.push(cmds);
+                    continue;
+                }
+                let owner = PlayerId(u8::try_from(p).unwrap());
+                let own = towns[p];
+                let enemy = towns[1 - p];
+                let pick = |rng: &mut rand_pcg::Pcg32, v: &Vec<u32>| {
+                    UnitId(v[usize::try_from(rng.next_u32()).unwrap() % v.len()])
+                };
+                let near_own = |rng: &mut rand_pcg::Pcg32| {
+                    (
+                        own.0 + 1 + i32::try_from(rng.next_u32() % 9).unwrap() - 4,
+                        own.1 + 5 + i32::try_from(rng.next_u32() % 3).unwrap(),
+                    )
+                };
+                if roll < 10 {
+                    let n = 1 + rng.next_u32() % 3;
+                    let units = (0..n).map(|_| pick(&mut rng, &ids[p])).collect();
+                    let (x, y) = match rng.next_u32() % 10 {
+                        0..=3 => (
+                            10 + i32::try_from(rng.next_u32() % 60).unwrap(),
+                            14 + i32::try_from(rng.next_u32() % 36).unwrap(),
+                        ),
+                        4..=6 => ring(enemy, rng.next_u32()),
+                        _ => near_own(&mut rng),
+                    };
+                    push(
+                        p,
+                        Command::Move {
+                            units,
+                            target: FxVec2::from_ints(x, y),
+                            queue: false,
+                        },
+                    );
+                } else if roll < 13 {
+                    let u = pick(&mut rng, &ids[p]);
+                    push(p, Command::Stop { units: vec![u] });
+                } else if roll < 18 {
+                    let target = if rng.next_u32().is_multiple_of(4) {
+                        TargetId::Building(BuildingId(1 + rng.next_u32() % 2))
+                    } else {
+                        TargetId::Unit(UnitId(rng.next_u32() % (next_id + 2)))
+                    };
+                    let amount = if rng.next_u32().is_multiple_of(3) {
+                        u32::MAX
+                    } else {
+                        1 + rng.next_u32() % 30
+                    };
+                    push(p, damage(target, amount));
+                } else if roll < 20 {
+                    let u = pick(&mut rng, &ids[p]);
+                    let target = TargetId::Unit(pick(&mut rng, &ids[1 - p]));
+                    push(
+                        p,
+                        Command::Attack {
+                            units: vec![u],
+                            target,
+                        },
+                    );
+                } else if roll < 21 {
+                    push(p, harrying_for(rules, owner, 2)[1].1.clone());
+                } else if roll < 27 {
+                    let kinds = [
+                        "skirmisher",
+                        "bowman",
+                        "shieldbearer",
+                        "yeoman",
+                        "supply_wain",
+                    ];
+                    let kind = kinds[usize::try_from(rng.next_u32()).unwrap() % kinds.len()];
+                    let at = if rng.next_u32().is_multiple_of(2) {
+                        near_own(&mut rng)
+                    } else {
+                        (
+                            10 + i32::try_from(rng.next_u32() % 60).unwrap(),
+                            14 + i32::try_from(rng.next_u32() % 36).unwrap(),
+                        )
+                    };
+                    push(p, spawn_for(owner, k(kind), at));
+                    ids[p].push(next_id);
+                    next_id += 1;
+                } else if roll == 99 && t * 4 > ticks * 3 {
+                    push(p, Command::Surrender);
+                    gone[p] = true;
+                }
+            }
+        }
+        out.push(cmds);
+    }
+    out
+}
+
+/// The delay-0 sim of the annexation streams.
+fn annex_stream_sim(seed: u64) -> Sim {
+    let mut setup = MatchSetup::scenario(annex_stream_rules(), seed);
+    setup.cmd_delay = 0;
+    Sim::new(setup, annex_stream_rules().clone(), Box::new(NoAi))
+}
+
+/// Run `stream` on [`annex_stream_sim`], restoring into a fresh sim after
+/// step `restore_after`: the hash after every step, and the events.
+fn run_m5a_stream(
+    seed: u64,
+    stream: &[Vec<PlayerCommand>],
+    restore_after: Option<usize>,
+) -> (Vec<u64>, Vec<SimEvent>, Option<MatchResult>) {
+    let mut sim = annex_stream_sim(seed);
+    let mut hashes = Vec::with_capacity(stream.len());
+    let mut events = Vec::new();
+    for (i, cmds) in stream.iter().enumerate() {
+        sim.step(cmds);
+        hashes.push(sim.hash());
+        events.extend(sim.drain_events());
+        if restore_after == Some(i) {
+            let mut restored = annex_stream_sim(seed);
+            restored.restore(&sim.snapshot()).expect("restores");
+            sim = restored;
+        }
+    }
+    let result = sim.result();
+    (hashes, events, result)
+}
+
+/// The annexation stream really exercises the M5a sim: over 8 seeds of 240
+/// ticks it lands attrition pulses, starts, resets and completes
+/// annexations, and every territory change it makes leaves the field equal
+/// to a full recompute at the end.
+#[test]
+fn m5a_random_stream_exercises_attrition_and_annexation() {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut results = Vec::new();
+    for seed in 0..8 {
+        let stream = random_m5a_commands(seed, 240);
+        let mut sim = annex_stream_sim(seed);
+        for cmds in &stream {
+            sim.step(cmds);
+            for e in sim.drain_events() {
+                let key = match e {
+                    SimEvent::Attrition { .. } => "Attrition",
+                    SimEvent::AnnexationStarted { .. } => "AnnexationStarted",
+                    SimEvent::AnnexationReset { .. } => "AnnexationReset",
+                    SimEvent::TownAnnexed { .. } => "TownAnnexed",
+                    SimEvent::MatchDecided { .. } => "MatchDecided",
+                    SimEvent::TownAtZeroHp { .. } => "TownAtZeroHp",
+                    _ => continue,
+                };
+                *seen.entry(key).or_default() += 1;
+            }
+        }
+        let field = sim.view().territory();
+        assert_eq!(*field, field.recomputed(), "seed {seed}");
+        results.push(sim.result().map(|r| (r.reason, r.tick)));
+    }
+    eprintln!("m5a annexation stream, 8 seeds: {seen:?}; results {results:?}");
+    for key in [
+        "Attrition",
+        "AnnexationStarted",
+        "AnnexationReset",
+        "TownAnnexed",
+    ] {
+        assert!(seen.get(key).is_some_and(|n| *n > 0), "no {key}: {seen:?}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: proptest_cases(),
+        .. ProptestConfig::default()
+    })]
+
+    /// A random annexation stream gives the same hash after every step, and
+    /// the same result, on a second run that restores from a snapshot at a
+    /// random step.
+    #[test]
+    fn m5a_random_streams_are_deterministic_with_restore(
+        seed in any::<u64>(),
+        ticks in 60u32..240,
+        cut in 0u32..1000,
+    ) {
+        let stream = random_m5a_commands(seed, ticks);
+        let (a, _, ra) = run_m5a_stream(seed, &stream, None);
+        let at = usize::try_from(cut % ticks).unwrap();
+        let (b, _, rb) = run_m5a_stream(seed, &stream, Some(at));
+        prop_assert_eq!(a, b, "restored after step {}", at);
+        prop_assert_eq!(ra, rb);
     }
 }

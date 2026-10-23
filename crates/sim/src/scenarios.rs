@@ -28,9 +28,12 @@
 //! proxy and golden fixture, at beat ticks derived from the rules
 //! ([`enemy_outpost_beats`]).
 //!
+//! [`capture_seat`] (M5a) takes a Seat by annexation and decides the
+//! match; [`stalemate_45min`] (M5a) runs to the 45-minute cap with no unit.
+//!
 //! Scenarios start empty ([`StartKind::Empty`]) except
-//! [`economy_second_town`], [`economy_walkthrough`] and the two outpost
-//! scenarios, which start from the standard start. On
+//! [`economy_second_town`], [`economy_walkthrough`], the two outpost
+//! scenarios and [`capture_seat`], which start from the standard start. On
 //! `plains_1v1` that start creates the Seats `BuildingId(1)` (P0) and
 //! `BuildingId(2)` (P1), P0's Yeomen `UnitId(1..=5)` and P1's
 //! `UnitId(6..=10)`, so a stream's own buildings begin at `BuildingId(3)`.
@@ -128,8 +131,10 @@ pub const ECONOMY_WALKTHROUGH_TICKS: u32 = 2400;
 /// the M3b one and `combat_skirmish` the M4a one; `unit_looks` (M4b) is
 /// windowed only, `enemy_outpost` (M4b) is the interactive acceptance
 /// scenario and `enemy_outpost_walkthrough` its scripted proxy, the M4b
-/// golden fixture.
-pub const NAMES: [&str; 14] = [
+/// golden fixture; `capture_seat` (M5a) is the annexation acceptance
+/// scenario and golden, and `stalemate_45min` the 45-minute territory
+/// golden.
+pub const NAMES: [&str; 16] = [
     "move_500",
     "move_500_short",
     "group_spiral",
@@ -144,6 +149,8 @@ pub const NAMES: [&str; 14] = [
     "unit_looks",
     "enemy_outpost",
     "enemy_outpost_walkthrough",
+    "capture_seat",
+    "stalemate_45min",
 ];
 
 /// Spawn rows of [`bench_cross`]: a band along the west side from the
@@ -1590,6 +1597,211 @@ pub fn enemy_outpost_walkthrough(rules: &Rules) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
+/// Seed of [`capture_seat`].
+pub const CAPTURE_SEAT_SEED: u64 = 31;
+/// Upper bound on [`capture_seat`]'s length: the Seat flips and the match
+/// is decided well before it (about tick 1640), and it is at most 5000
+/// ticks, so the golden runs in `cargo test`. `sim-cli record` stops right
+/// after the deciding step (`Scenario::stops_at_outcome`), so the fixture
+/// ends there, not here, and no Rust constant holds the decision tick.
+pub const CAPTURE_SEAT_MAX_TICKS: u32 = 2400;
+/// The Seat's hit points after [`capture_seat`]'s tick-0 `DebugDamage`:
+/// one volley of the four Mangonels (4 x 120 against buildings) takes it
+/// to 0. The damage is computed from the Town's `hp` in the rules.
+pub const CAPTURE_SEAT_SEAT_HP: u32 = 300;
+/// Where [`capture_seat`] spawns its four Mangonels (`UnitId(11..=14)`).
+pub const CAPTURE_SEAT_MANGONELS: FxVec2 = FxVec2::from_ints(88, 64);
+/// Where [`capture_seat`] spawns its eight Skirmishers (`UnitId(15..=22)`).
+pub const CAPTURE_SEAT_SKIRMISHERS: FxVec2 = FxVec2::from_ints(86, 64);
+/// Where [`capture_seat`] spawns its Supply Wain (`UnitId(23)`).
+pub const CAPTURE_SEAT_WAIN: FxVec2 = FxVec2::from_ints(85, 64);
+/// Where [`capture_seat`] spawns its Bowman (`UnitId(24)`): inside P1's
+/// border (`dx² + dy² = 362` from the Seat's centre tile (103, 64)),
+/// beyond the Wain's cover and the Town's range, so it bleeds until the
+/// timer turns the land neutral.
+pub const CAPTURE_SEAT_BOWMAN: FxVec2 = FxVec2::from_ints(104, 83);
+/// Tick during which [`capture_seat`]'s Skirmishers walk onto the ring and
+/// its Wain follows them; the Seat is at 0 HP well before.
+pub const CAPTURE_SEAT_MOVE_TICK: u32 = 300;
+/// The ring tiles [`capture_seat`]'s Skirmishers stand on, one each, all
+/// beside P1's Seat (north-west tile (102, 63), so the ring is x 101-105,
+/// y 62-66): the west column, two on the north row and one on the south.
+pub const CAPTURE_SEAT_RING: [Tile; 8] = [
+    Tile::new(101, 62),
+    Tile::new(101, 63),
+    Tile::new(101, 64),
+    Tile::new(101, 65),
+    Tile::new(101, 66),
+    Tile::new(102, 62),
+    Tile::new(103, 62),
+    Tile::new(102, 66),
+];
+/// Where [`capture_seat`]'s Supply Wain stands during the timer: every
+/// ring tile is within its 14 tiles.
+pub const CAPTURE_SEAT_WAIN_POST: FxVec2 = FxVec2::from_ints(99, 64);
+
+/// The M5a capture scenario and golden (`capture_seat`, seed 31, from the
+/// standard start on `plains_1v1`): P0 takes P1's Seat by annexation, the
+/// interactive acceptance scenario of the game (`--scenario capture_seat`)
+/// and its fixture. Ids from the standard start: the Seats are
+/// `BuildingId(1)` (P0) and `BuildingId(2)` (P1), P0's Yeomen
+/// `UnitId(1..=5)` and P1's `UnitId(6..=10)`.
+///
+/// - During tick 0, P1 researches Harrying I (`DebugResearch`). P0 removes
+///   P1's five Yeomen (`DebugDamage`, they stand on the Seat's ring, so
+///   nothing can distract the ring guards whatever the annex-hold rule
+///   does) and takes the Seat down to [`CAPTURE_SEAT_SEAT_HP`]; spawns four
+///   Mangonels at [`CAPTURE_SEAT_MANGONELS`] (`UnitId(11..=14)`), which
+///   `Attack` the Seat (they stop at their 8-tile range, outside the
+///   Seat's 7, and the first volley takes it to 0), eight Skirmishers at
+///   [`CAPTURE_SEAT_SKIRMISHERS`] (`UnitId(15..=22)`) and a Supply Wain at
+///   [`CAPTURE_SEAT_WAIN`] (`UnitId(23)`), all inside P1's border and
+///   covered by the Wain, and a Bowman at [`CAPTURE_SEAT_BOWMAN`]
+///   (`UnitId(24)`), inside the border and uncovered, which bleeds.
+/// - During [`CAPTURE_SEAT_MOVE_TICK`] each Skirmisher walks to the centre
+///   of its tile of [`CAPTURE_SEAT_RING`] and the Wain to
+///   [`CAPTURE_SEAT_WAIN_POST`].
+///
+/// The timer starts when the first Skirmisher reaches the ring (about tick
+/// 440), the Seat flips 1200 steps later and the match is decided in that
+/// step: `Victory { P0, decisive: true }`, reason `SeatCaptured` (about
+/// tick 1640). By name its length is [`CAPTURE_SEAT_MAX_TICKS`].
+pub fn capture_seat(rules: &Rules) -> (MatchSetup, Stream) {
+    let mut setup = MatchSetup::scenario(rules, CAPTURE_SEAT_SEED);
+    setup.start = StartKind::Standard;
+    let mut seq = [0u32; 2];
+    let mut cmd = |owner: u8, c: Command| {
+        let i = usize::from(owner);
+        seq[i] += 1;
+        PlayerCommand::new(PlayerId(owner), seq[i] - 1, c)
+    };
+    let p0 = PlayerId(0);
+    let p1_seat = BuildingId(2);
+    let damage =
+        |target: crate::ids::TargetId, amount: u32| Command::DebugDamage { target, amount };
+    let spawn_kind = |kind: &str, at: FxVec2, count: u16| Command::DebugSpawn {
+        owner: p0,
+        kind: unit_kind(rules, kind),
+        at,
+        count,
+    };
+    let town_hp = rules
+        .building_kind_by_id("town")
+        .expect("buildings.ron has the Town")
+        .1
+        .hp;
+    let mut tick0: Vec<PlayerCommand> = (6..=10)
+        .map(|u| cmd(0, damage(crate::ids::TargetId::Unit(UnitId(u)), u32::MAX)))
+        .collect();
+    tick0.push(cmd(
+        0,
+        damage(
+            crate::ids::TargetId::Building(p1_seat),
+            town_hp - CAPTURE_SEAT_SEAT_HP,
+        ),
+    ));
+    tick0.push(cmd(0, spawn_kind("mangonel", CAPTURE_SEAT_MANGONELS, 4)));
+    tick0.push(cmd(
+        0,
+        Command::Attack {
+            units: ids(11..=14),
+            target: crate::ids::TargetId::Building(p1_seat),
+        },
+    ));
+    tick0.push(cmd(
+        0,
+        spawn_kind("skirmisher", CAPTURE_SEAT_SKIRMISHERS, 8),
+    ));
+    tick0.push(cmd(0, spawn_kind("supply_wain", CAPTURE_SEAT_WAIN, 1)));
+    tick0.push(cmd(0, spawn_kind("bowman", CAPTURE_SEAT_BOWMAN, 1)));
+    tick0.push(cmd(
+        1,
+        Command::DebugResearch {
+            owner: PlayerId(1),
+            tech: tech_id(rules, "harrying_1"),
+        },
+    ));
+    let mut moves: Vec<PlayerCommand> = CAPTURE_SEAT_RING
+        .iter()
+        .zip(15u32..)
+        .map(|(t, u)| {
+            cmd(
+                0,
+                Command::Move {
+                    units: vec![UnitId(u)],
+                    target: FxVec2::new(
+                        crate::fx::Fx::from_ratio(2 * i32::from(t.x) + 1, 2),
+                        crate::fx::Fx::from_ratio(2 * i32::from(t.y) + 1, 2),
+                    ),
+                    queue: false,
+                },
+            )
+        })
+        .collect();
+    moves.push(cmd(
+        0,
+        Command::Move {
+            units: vec![UnitId(23)],
+            target: CAPTURE_SEAT_WAIN_POST,
+            queue: false,
+        },
+    ));
+    let stream = vec![(0, tick0), (CAPTURE_SEAT_MOVE_TICK, moves)];
+    (setup, stream)
+}
+
+/// Seed of [`stalemate_45min`].
+pub const STALEMATE_45MIN_SEED: u64 = 45;
+/// Hash records in the [`stalemate_45min`] fixture are this many ticks
+/// apart (54 records over 54000 ticks) instead of the default 20, which
+/// keeps the file small (`Scenario::default_hash_every` in `sim-cli`).
+pub const STALEMATE_45MIN_HASH_EVERY: u32 = 1000;
+/// [`stalemate_45min`]'s P0 Town (north-west tile), `BuildingId(1)`: the
+/// footprint of P0's Seat in the standard start.
+pub const STALEMATE_P0_TOWN: Tile = Tile::new(23, 63);
+/// [`stalemate_45min`]'s P0 Watchtower, `BuildingId(2)`: three more tiles
+/// for P0 (1248 against 1245; the M3a territory fixture).
+pub const STALEMATE_P0_WATCHTOWER: Tile = Tile::new(43, 64);
+/// [`stalemate_45min`]'s P1 Town, `BuildingId(3)`: the footprint of P1's
+/// Seat in the standard start.
+pub const STALEMATE_P1_TOWN: Tile = Tile::new(102, 63);
+
+/// The M5a match-cap scenario and long golden (`stalemate_45min`, seed 45,
+/// empty start on `plains_1v1`): no unit ever exists, so nothing happens
+/// but income until the match cap. During tick 0, P0 places a complete
+/// Town at [`STALEMATE_P0_TOWN`] (`BuildingId(1)`) and a complete
+/// Watchtower at [`STALEMATE_P0_WATCHTOWER`] (`BuildingId(2)`), P1 a
+/// complete Town at [`STALEMATE_P1_TOWN`] (`BuildingId(3)`): P0 owns 1248
+/// tiles, P1 1245, and columns 63 and 64 are neutral. In the step that
+/// reaches `Rules::match_cap_ticks()` (54000 ticks, 45 minutes) step 6e
+/// decides `Victory { P0, decisive: false }`, reason `Territory`. By name
+/// its length is the match cap, and its fixture keeps a hash every
+/// [`STALEMATE_45MIN_HASH_EVERY`] ticks.
+pub fn stalemate_45min(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::scenario(rules, STALEMATE_45MIN_SEED);
+    let place = |owner: u8, seq: u32, kind: &str, tile: Tile| {
+        PlayerCommand::new(
+            PlayerId(owner),
+            seq,
+            Command::DebugPlaceBuilding {
+                owner: PlayerId(owner),
+                kind: building_kind(rules, kind),
+                tile,
+                complete: true,
+            },
+        )
+    };
+    let stream = vec![(
+        0,
+        vec![
+            place(0, 0, "town", STALEMATE_P0_TOWN),
+            place(0, 1, "watchtower", STALEMATE_P0_WATCHTOWER),
+            place(1, 0, "town", STALEMATE_P1_TOWN),
+        ],
+    )];
+    (setup, stream)
+}
+
 /// Look a scenario up by name: `(setup, stream, ticks)`.
 pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
     let (setup, stream, ticks) = match name {
@@ -1648,6 +1860,14 @@ pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
         "enemy_outpost_walkthrough" => {
             let (s, c) = enemy_outpost_walkthrough(rules);
             (s, c, enemy_outpost_beats(rules).ticks)
+        }
+        "capture_seat" => {
+            let (s, c) = capture_seat(rules);
+            (s, c, CAPTURE_SEAT_MAX_TICKS)
+        }
+        "stalemate_45min" => {
+            let (s, c) = stalemate_45min(rules);
+            (s, c, rules.match_cap_ticks())
         }
         _ => return None,
     };

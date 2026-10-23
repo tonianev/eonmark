@@ -168,6 +168,7 @@ pub fn reject_key(reason: &RejectReason) -> &'static str {
         RejectReason::FinalAge => "final_age",
         RejectReason::PlayerMismatch => "player_mismatch",
         RejectReason::InvalidTarget => "invalid_target",
+        RejectReason::TownContested => "town_contested",
     }
 }
 
@@ -541,6 +542,7 @@ mod tests {
             RejectReason::FinalAge,
             RejectReason::PlayerMismatch,
             RejectReason::InvalidTarget,
+            RejectReason::TownContested,
         ]
     }
 

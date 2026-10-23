@@ -3,9 +3,10 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  // 19: M5a attrition (SIM 15): every fixture re-recorded for the new
-  // hashed Unit::exposed_ticks; no RON content changed besides the version.
-  rules_version: 19,
+  // 20: M5a annexation and outcome (SIM 16): every fixture re-recorded for
+  // the new hashed TownState::hold and State::outcome; no RON content
+  // changed besides the version.
+  rules_version: 20,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

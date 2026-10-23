@@ -89,6 +89,25 @@ impl Scenario {
         }
     }
 
+    /// Ticks between `Hash` records in this scenario's recording:
+    /// [`sim::scenarios::STALEMATE_45MIN_HASH_EVERY`] (1000) for the
+    /// 54000-tick `stalemate_45min`, the replay default (20) otherwise.
+    /// `record --hash-every` and `--hash-every-tick` override it.
+    pub fn default_hash_every(self) -> u32 {
+        match self {
+            Scenario::Fixture("stalemate_45min") => sim::scenarios::STALEMATE_45MIN_HASH_EVERY,
+            _ => sim::replay::DEFAULT_HASH_EVERY,
+        }
+    }
+
+    /// Whether a recording of this scenario ends right after the step that
+    /// decides the match (M5a): `capture_seat`, whose by-name length is
+    /// only an upper bound. Its fixture then ends at the deciding tick, so
+    /// its final hash is the one the game shows on the outcome overlay.
+    pub fn stops_at_outcome(self) -> bool {
+        matches!(self, Scenario::Fixture("capture_seat"))
+    }
+
     /// The tick before whose step a recording snapshots the sim, builds a
     /// fresh one and restores into it, so `verify` passing on the fixture
     /// proves the restore was exact. Only `snapshot_restore` has one.

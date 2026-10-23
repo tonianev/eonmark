@@ -14,9 +14,9 @@ use clap::{Parser, Subcommand};
 use scenarios::Scenario;
 use sim::replay::DEFAULT_HASH_EVERY;
 use sim::{
-    AStarSearch, BuildingId, FxVec2, Map, MatchSetup, PlayerId, ReplayFile, ReplayReader,
-    ReplayWriter, Rules, SearchStatus, Sim, SimEvent, SimView, Source, SourceOwner, SubHashes,
-    TerritoryField, Tile, UnitId, VerifyOutcome,
+    AStarSearch, BuildingId, FxVec2, Map, MatchResult, MatchSetup, Outcome, OutcomeReason,
+    PlayerId, ReplayFile, ReplayReader, ReplayWriter, Rules, SearchStatus, Sim, SimEvent, SimView,
+    Source, SourceOwner, SubHashes, TerritoryField, Tile, UnitId, VerifyOutcome,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -130,18 +130,23 @@ enum Cmd {
     /// Record a scripted scenario to an .eonreplay file.
     Record {
         /// Scenario name (`move_500`, `move_500_short`, `group_spiral`,
-        /// `snapshot_restore`, `selftest`).
+        /// `snapshot_restore`, `selftest`, ...; an unknown name lists them).
         #[arg(long)]
         scenario: String,
-        /// Ticks to simulate (default: the scenario's fixture length).
+        /// Ticks to simulate (default: the scenario's fixture length;
+        /// `capture_seat` stops at the step that decides the match).
         #[arg(long)]
         ticks: Option<u32>,
         /// Output file.
         #[arg(long)]
         out: PathBuf,
         /// Write a hash record every tick instead of every 20.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "hash_every")]
         hash_every_tick: bool,
+        /// Write a hash record every N ticks (default: the scenario's own,
+        /// 1000 for `stalemate_45min`, else 20).
+        #[arg(long)]
+        hash_every: Option<u32>,
         /// Match seed (default: the scenario's own seed; fixtures must keep it).
         #[arg(long)]
         seed: Option<u64>,
@@ -210,6 +215,7 @@ fn main() -> ExitCode {
             ticks,
             out,
             hash_every_tick,
+            hash_every,
             seed,
             slow_ms,
         } => record(
@@ -217,7 +223,7 @@ fn main() -> ExitCode {
             &scenario,
             ticks,
             &out,
-            hash_every_tick,
+            if hash_every_tick { Some(1) } else { hash_every },
             seed,
             slow_ms,
         ),
@@ -416,7 +422,7 @@ fn record(
     name: &str,
     ticks: Option<u32>,
     out: &Path,
-    hash_every_tick: bool,
+    hash_every: Option<u32>,
     seed: Option<u64>,
     slow_ms: u64,
 ) -> ExitCode {
@@ -432,11 +438,27 @@ fn record(
         Err(code) => return code,
     };
     let ticks = ticks.unwrap_or_else(|| scenario.default_ticks(&rules));
-    match record_scenario(&rules, scenario, ticks, out, hash_every_tick, seed, slow_ms) {
-        Ok((final_hash, records)) => {
-            println!(
-                "recorded {} scenario={name} ticks={ticks} records={records} final_hash=0x{final_hash:016x}",
+    let hash_every = hash_every.unwrap_or_else(|| scenario.default_hash_every());
+    if hash_every == 0 {
+        eprintln!("record: --hash-every must be at least 1");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    match record_scenario(&rules, scenario, ticks, out, hash_every, seed, slow_ms) {
+        Ok(rec) if scenario.stops_at_outcome() && rec.result.is_none() => {
+            eprintln!(
+                "error: {name} decided no outcome in {ticks} ticks; {} is incomplete",
                 out.display()
+            );
+            ExitCode::from(EXIT_ERROR)
+        }
+        Ok(rec) => {
+            println!(
+                "recorded {} scenario={name} ticks={} records={} final_hash=0x{:016x}{}",
+                out.display(),
+                rec.ticks,
+                rec.records,
+                rec.final_hash,
+                outcome_summary(rec.result)
             );
             ExitCode::SUCCESS
         }
@@ -447,6 +469,41 @@ fn record(
     }
 }
 
+/// The `record` summary's outcome fields: ` outcome=<victory player=N
+/// decisive=B|draw> reason=<reason> outcome_tick=T`, or nothing while the
+/// match is undecided.
+fn outcome_summary(result: Option<MatchResult>) -> String {
+    let Some(r) = result else {
+        return String::new();
+    };
+    let outcome = match r.outcome {
+        Outcome::Victory { player, decisive } => {
+            format!("victory player={} decisive={decisive}", player.0)
+        }
+        Outcome::Draw => "draw".to_string(),
+    };
+    let reason = match r.reason {
+        OutcomeReason::SeatCaptured => "seat_captured",
+        OutcomeReason::AllTownsLost => "all_towns_lost",
+        OutcomeReason::Surrender => "surrender",
+        OutcomeReason::Territory => "territory",
+    };
+    format!(" outcome={outcome} reason={reason} outcome_tick={}", r.tick)
+}
+
+/// What [`record_scenario`] wrote.
+struct Recorded {
+    /// The final state hash.
+    final_hash: u64,
+    /// Ticks simulated (fewer than asked when the scenario stops at its
+    /// outcome).
+    ticks: u32,
+    /// Records written.
+    records: u64,
+    /// The match result at the end, if decided.
+    result: Option<MatchResult>,
+}
+
 /// Run `scenario` for `ticks` ticks writing `out`: a `Tick` record for every
 /// tick with commands, a `Hash` record every `hash_every` ticks and at the
 /// end, a `flush` every 20 ticks (no fsync) and `finish` at clean exit, so a
@@ -454,22 +511,18 @@ fn record(
 /// For `snapshot_restore` the recording sim is snapshotted before the step
 /// at its snapshot tick, a fresh sim is restored from the bytes and the
 /// recording continues on that sim, so `verify` (which re-simulates without
-/// interruption) passing on the fixture proves the restore was exact.
-/// Returns the final hash and the number of records written.
+/// interruption) passing on the fixture proves the restore was exact. A
+/// scenario that stops at its outcome (`capture_seat`) ends right after
+/// the step that decides the match, with the final hash at that tick.
 fn record_scenario(
     rules: &Rules,
     scenario: Scenario,
     ticks: u32,
     out: &Path,
-    hash_every_tick: bool,
+    hash_every: u32,
     seed: Option<u64>,
     slow_ms: u64,
-) -> Result<(u64, u64), sim::ReplayError> {
-    let hash_every = if hash_every_tick {
-        1
-    } else {
-        DEFAULT_HASH_EVERY
-    };
+) -> Result<Recorded, sim::ReplayError> {
     let (setup, stream) = scenario.setup_and_stream(rules, seed, ticks);
     let mut sim = scenarios::build(&setup, rules);
     let mut writer = ReplayWriter::create(out, sim.setup())?;
@@ -505,13 +558,21 @@ fn record_scenario(
         if slow_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(slow_ms));
         }
+        if scenario.stops_at_outcome() && sim.result().is_some() {
+            break;
+        }
     }
     if last_hashed != sim.tick() {
         writer.hash(sim.tick(), sim.hash(), &sim.sub_hashes())?;
     }
     let records = writer.records();
     writer.finish()?;
-    Ok((sim.hash(), records))
+    Ok(Recorded {
+        final_hash: sim.hash(),
+        ticks: sim.tick(),
+        records,
+        result: sim.result(),
+    })
 }
 
 /// Mean, 95th percentile and maximum of `samples` (milliseconds).
@@ -1244,8 +1305,22 @@ mod tests {
     fn record_then_verify_selftest_scenario() {
         let rules = Rules::load(data()).unwrap();
         let out = temp("selftest.eonreplay");
-        let (final_hash, records) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out, false, None, 0).unwrap();
+        let Recorded {
+            final_hash,
+            records,
+            ticks,
+            result,
+        } = record_scenario(
+            &rules,
+            Scenario::Selftest,
+            90,
+            &out,
+            DEFAULT_HASH_EVERY,
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!((ticks, result), (90, None), "the selftest decides nothing");
         // Hash records at 20, 40, 60, 80 and the final one at 90, plus the
         // tick batches the selftest stream issues.
         assert!(records >= 5);
@@ -1259,8 +1334,9 @@ mod tests {
         );
         // --hash-every-tick: one hash record per tick, same final hash.
         let out2 = temp("selftest_every.eonreplay");
-        let (final_hash2, _) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out2, true, None, 0).unwrap();
+        let final_hash2 = record_scenario(&rules, Scenario::Selftest, 90, &out2, 1, None, 0)
+            .unwrap()
+            .final_hash;
         assert_eq!(final_hash2, final_hash);
         let recs = ReplayReader::open(&out2).unwrap().records;
         let hashes = recs
@@ -1279,9 +1355,123 @@ mod tests {
         assert_eq!(rng.len(), 1, "the selftest stream draws nothing");
         // A different seed changes the final hash.
         let out3 = temp("selftest_seed2.eonreplay");
-        let (final_hash3, _) =
-            record_scenario(&rules, Scenario::Selftest, 90, &out3, false, Some(2), 0).unwrap();
+        let final_hash3 = record_scenario(
+            &rules,
+            Scenario::Selftest,
+            90,
+            &out3,
+            DEFAULT_HASH_EVERY,
+            Some(2),
+            0,
+        )
+        .unwrap()
+        .final_hash;
         assert_ne!(final_hash3, final_hash);
+        // --hash-every 30: records at 30, 60 and 90 only, same final hash.
+        let out4 = temp("selftest_30.eonreplay");
+        let rec = record_scenario(&rules, Scenario::Selftest, 90, &out4, 30, None, 0).unwrap();
+        assert_eq!(rec.final_hash, final_hash);
+        let ticks: Vec<u32> = ReplayReader::open(&out4)
+            .unwrap()
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                sim::replay::Record::Hash(h) => Some(h.tick),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ticks, [30, 60, 90]);
+    }
+
+    /// M5a: `--hash-every N` parses, conflicts with `--hash-every-tick`,
+    /// and the scenarios' own cadence is 1000 for `stalemate_45min` and the
+    /// replay default otherwise; only `capture_seat` stops at its outcome.
+    #[test]
+    fn record_hash_every_flag_and_scenario_defaults() {
+        let cli = Cli::try_parse_from([
+            "sim-cli",
+            "record",
+            "--scenario",
+            "stalemate_45min",
+            "--out",
+            "x.eonreplay",
+            "--hash-every",
+            "500",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Record {
+                hash_every: Some(500),
+                hash_every_tick: false,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "sim-cli",
+                "record",
+                "--scenario",
+                "move_500",
+                "--out",
+                "x.eonreplay",
+                "--hash-every",
+                "5",
+                "--hash-every-tick",
+            ])
+            .is_err()
+        );
+        let stalemate = Scenario::parse("stalemate_45min").unwrap();
+        assert_eq!(stalemate.default_hash_every(), 1000);
+        assert!(!stalemate.stops_at_outcome());
+        let capture = Scenario::parse("capture_seat").unwrap();
+        assert_eq!(capture.default_hash_every(), DEFAULT_HASH_EVERY);
+        assert!(capture.stops_at_outcome());
+        assert_eq!(
+            Scenario::parse("move_500").unwrap().default_hash_every(),
+            DEFAULT_HASH_EVERY
+        );
+        let rules = Rules::load(data()).unwrap();
+        assert_eq!(stalemate.default_ticks(&rules), rules.match_cap_ticks());
+    }
+
+    /// `capture_seat` records up to the step that decides the match and
+    /// no further, and its replay verifies to the recorder's final hash at
+    /// that tick; the summary names the outcome.
+    #[test]
+    fn capture_seat_recording_stops_at_its_outcome() {
+        let rules = Rules::load(data()).unwrap();
+        let scenario = Scenario::parse("capture_seat").unwrap();
+        let cap = scenario.default_ticks(&rules);
+        let out = temp("capture_seat.eonreplay");
+        let rec = record_scenario(&rules, scenario, cap, &out, 20, None, 0).unwrap();
+        let result = rec.result.expect("the Seat falls before the cap");
+        assert_eq!(rec.ticks, result.tick);
+        assert!(rec.ticks < cap, "{} < {cap}", rec.ticks);
+        assert_eq!(
+            result.outcome,
+            Outcome::Victory {
+                player: PlayerId(0),
+                decisive: true
+            }
+        );
+        let summary = outcome_summary(rec.result);
+        assert_eq!(
+            summary,
+            format!(
+                " outcome=victory player=0 decisive=true reason=seat_captured outcome_tick={}",
+                rec.ticks
+            )
+        );
+        assert_eq!(outcome_summary(None), "");
+        let outcome = sim::verify(&out, &data(), Box::new(ai::Passive)).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Ok {
+                final_hash: rec.final_hash,
+                ticks: rec.ticks
+            }
+        );
     }
 
     #[test]

@@ -67,7 +67,11 @@
 //!     weapon range. The unit then holds or chases its target directly; an
 //!     attack-mover keeps its order meanwhile (it is not followed) and
 //!     resumes it when the fight is over, and a guard keeps its post and
-//!     walks back to it afterwards.
+//!     walks back to it afterwards. The annex-hold guard rule (M5a): a
+//!     guard whose kind `annexation_attackers` selects, standing within
+//!     `annexation_adjacent_tiles` of an enemy complete Town at 0 HP, keeps
+//!     and takes only targets in weapon range, so it holds and never chases
+//!     off the ring it annexes from.
 //!   - A shooter: a complete building with an `attack` (the Watchtower and
 //!     the Town) and hit points left, whose cooldown has run out, aims at
 //!     the nearest enemy unit whose edge is within its range of the
@@ -708,6 +712,7 @@ pub(crate) fn think(
         .filter(|b| b.hp > 0)
         .map(|b| (b.id, b.owner, building_rect(rules, &state.map, b)))
         .collect();
+    let ring = AnnexRing::new(state, rules);
     let mut scratch = Vec::new();
     for (id, intent) in units {
         if intent == Intent::Attack {
@@ -719,6 +724,7 @@ pub(crate) fn think(
                 grid,
                 stats,
                 &targetable,
+                &ring,
                 id,
                 &mut scratch,
                 &mut plan,
@@ -833,8 +839,60 @@ fn think_explicit(
     }
 }
 
+/// The annex-hold rule's inputs (M5a, owner decision 6): every complete
+/// Town at 0 HP with its owner and footprint (usually none), which kinds
+/// `annexation_attackers` selects and how near counts as adjacent.
+struct AnnexRing {
+    /// `(owner, footprint)` of each complete Town at 0 HP, `BuildingId`
+    /// order.
+    towns: Vec<(PlayerId, Rect)>,
+    /// `[kind]`: selected by `annexation_attackers`.
+    attackers: Vec<bool>,
+    /// `annexation_adjacent_tiles`.
+    adjacent: u16,
+}
+
+impl AnnexRing {
+    fn new(state: &State, rules: &Rules) -> AnnexRing {
+        let towns: Vec<(PlayerId, Rect)> = state
+            .buildings
+            .values()
+            .filter(|b| b.town_state.is_some() && b.hp == 0)
+            .map(|b| (b.owner, building_rect(rules, &state.map, b)))
+            .collect();
+        let attackers = if towns.is_empty() {
+            Vec::new()
+        } else {
+            rules
+                .units
+                .iter()
+                .map(|k| rules.annexation_attackers.iter().any(|s| s.selects(k)))
+                .collect()
+        };
+        AnnexRing {
+            towns,
+            attackers,
+            adjacent: u16::try_from(rules.annexation_adjacent_tiles).expect("validated <= 4"),
+        }
+    }
+
+    /// Whether `u`, an idle guard, holds an annexation ring: its kind can
+    /// annex and it stands within `annexation_adjacent_tiles` of an enemy
+    /// complete Town at 0 HP. Such a unit keeps and takes only targets in
+    /// weapon range and never chases, so nothing draws it off the ring.
+    fn holds(&self, map: &Map, u: &Unit) -> bool {
+        if self.towns.is_empty() || !self.attackers[usize::from(u.kind.0)] {
+            return false;
+        }
+        let tile = map.tile_of(u.pos);
+        self.towns
+            .iter()
+            .any(|&(owner, rect)| owner != u.owner && rect.chebyshev(tile) <= self.adjacent)
+    }
+}
+
 /// What an acquiring unit takes of the enemies of one tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Want {
     /// None of them.
     Nothing,
@@ -857,8 +915,10 @@ struct Candidate {
 /// module docs), among those that rank strictly better than `limit` on
 /// `(tier, out of weapon range)`: the best one, or every one that ties
 /// with it exactly, in `TargetId` order. Empty when none is in weapon
-/// range or directly chaseable. Reads `targetable` for buildings and the
-/// grid for units; `scratch` is reused between units.
+/// range or directly chaseable. `max_want` caps what is considered:
+/// `Want::InRange` for a unit holding an annexation ring (M5a), which
+/// takes only targets in weapon range. Reads `targetable` for buildings and
+/// the grid for units; `scratch` is reused between units.
 #[allow(clippy::too_many_arguments)]
 fn best_candidates(
     state: &State,
@@ -868,17 +928,19 @@ fn best_candidates(
     u: &Unit,
     attack: &AttackStats,
     limit: (u8, bool),
+    max_want: Want,
     scratch: &mut Vec<Candidate>,
 ) -> Vec<Candidate> {
     scratch.clear();
     let want = |tier: u8| {
-        if (tier, false) >= limit {
+        let w = if (tier, false) >= limit {
             Want::Nothing
         } else if (tier, true) >= limit {
             Want::InRange
         } else {
             Want::InReach
-        }
+        };
+        w.min(max_want)
     };
     let mut consider = |want: Want, tier: u8, id: TargetId, aim: Aim, dist_sq: i64| {
         let in_range = within(u.pos, u.radius, attack.range, &aim);
@@ -955,7 +1017,10 @@ fn best_candidates(
 }
 
 /// 5a for a unit that acquires: an idle guard or an attack-mover (see the
-/// module docs). Sets or clears its target and engages it.
+/// module docs). Sets or clears its target and engages it. An idle guard
+/// holding an annexation ring (`AnnexRing::holds`) keeps a target only in
+/// weapon range and takes only targets in weapon range, so it only ever
+/// holds (M5a).
 #[allow(clippy::too_many_arguments)]
 fn think_acquiring(
     state: &mut State,
@@ -963,6 +1028,7 @@ fn think_acquiring(
     grid: &SpatialGrid,
     stats: &Stats<'_>,
     targetable: &[Targetable],
+    ring: &AnnexRing,
     id: UnitId,
     scratch: &mut Vec<Candidate>,
     plan: &mut Plan,
@@ -986,14 +1052,21 @@ fn think_acquiring(
         .unit(u.owner, u.kind)
         .attack
         .expect("only armed units acquire");
+    let holding = u.intent == Intent::Plain && ring.holds(&state.map, u);
     // The current target, while it is valid and in weapon range or
-    // directly chaseable (so not beyond the reach).
+    // directly chaseable (so not beyond the reach); only in weapon range
+    // while holding a ring.
     let kept = u.target.and_then(|t| {
         let aim = locate(state, rules, u.owner, t)?;
         let in_range = within(u.pos, u.radius, attack.range, &aim);
-        (in_range || chases_directly(&state.map, u.pos, u.radius, attack.reach, &aim))
+        (in_range || (!holding && chases_directly(&state.map, u.pos, u.radius, attack.reach, &aim)))
             .then_some((t, aim, in_range))
     });
+    let max_want = if holding {
+        Want::InRange
+    } else {
+        Want::InReach
+    };
     // Only a candidate that ranks strictly better on (tier, out of weapon
     // range) displaces it; nothing ranks better than an in-range target of
     // the better tier, so then nothing is searched.
@@ -1004,7 +1077,9 @@ fn think_acquiring(
         )
     });
     let ties = if limit > (0, false) {
-        best_candidates(state, grid, stats, targetable, u, &attack, limit, scratch)
+        best_candidates(
+            state, grid, stats, targetable, u, &attack, limit, max_want, scratch,
+        )
     } else {
         Vec::new()
     };

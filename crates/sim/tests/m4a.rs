@@ -5093,6 +5093,8 @@ fn golden_combat_skirmish() {
 /// applied (nothing in the stream is rejected); the Mangonel destroys the
 /// Watchtower with five hits from out of its range while a path search is
 /// suspended, the footprint is passable again and the Mangonel stands down.
+/// Since M5a: P1's Town never reaches 0 HP, so no annexation starts, the
+/// annex-hold guard rule never applies and the match is not decided.
 #[test]
 fn combat_skirmish_beats_happen() {
     use sim::scenarios::{
@@ -5207,6 +5209,25 @@ fn combat_skirmish_beats_happen() {
         (m99.owner, m99.kind, m99.intent),
         (P0, mangonel, Intent::Plain)
     );
+    // M5a (SIM_VERSION 16): P1's Town keeps hit points throughout, so no
+    // Town is ever annexable, the annex-hold guard rule (which applies only
+    // beside an enemy Town at 0 HP) never changes an acquisition, and
+    // nothing decides the match: the fight is M4a's.
+    let annexing = events.iter().find(|(_, e)| {
+        matches!(
+            e,
+            SimEvent::TownAtZeroHp { .. }
+                | SimEvent::AnnexationStarted { .. }
+                | SimEvent::AnnexationReset { .. }
+                | SimEvent::TownAnnexed { .. }
+                | SimEvent::MatchDecided { .. }
+        )
+    });
+    assert_eq!(annexing, None);
+    let town_hp = view.building_hp(town).expect("the Town stands").0;
+    assert!(town_hp > 0, "{town_hp}");
+    assert_eq!(view.building(town).unwrap().owner, P1);
+    assert_eq!(view.outcome(), None);
     eprintln!(
         "combat_skirmish: research {researched:?}, Mangonel trained at {spawned_99}, deaths P0 {died0} P1 {died1}, Town shots {}, tower hits {on_tower:?}, destroyed at {at} with a search suspended",
         shots(town)

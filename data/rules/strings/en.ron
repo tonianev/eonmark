@@ -42,6 +42,7 @@
     "final_age": "Already in the last age",
     "player_mismatch": "That order is for another player",
     "invalid_target": "Cannot attack that",
+    "town_contested": "This Town is being annexed",
   },
   // HUD labels and tooltips.
   hud: {

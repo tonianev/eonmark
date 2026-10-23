@@ -8,8 +8,9 @@
 #   age_reached_tick is set, age_reached_tick <= first_attack_tick < 18000,
 #   first_attack_units >= 8 and first_attack_wains >= 1.
 #
-# With --decisive it also checks owner decision 4's extra gates for a game
-# against Passive: the side wins it decisively by Seat capture, and its
+# With --decisive it also checks, for a game against Passive, owner
+# decision 4's Seat capture (the side wins it decisively, reason
+# seat_captured) and the plan's extra gates from the ROADMAP M5b Goal: its
 # second Town and border Watchtower stand before tick 18000. Columns are
 # found by their header names; side b reads the `_b` columns.
 #
@@ -23,7 +24,9 @@ decisive=0
 csv=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --side) side="${2:-}"; shift 2 ;;
+    --side)
+      [ $# -ge 2 ] || { echo "check_first_wave: --side needs a or b" >&2; exit 2; }
+      side="$2"; shift 2 ;;
     --decisive) decisive=1; shift ;;
     -*) echo "check_first_wave: unknown flag $1" >&2; exit 2 ;;
     *) csv="$1"; shift ;;

@@ -1,4 +1,4 @@
-//! Attack waves with a Supply Wain attached (docs/design/ai.md rule 3; M5b
+//! Attack waves with a Supply Wain attached (docs/design/ai.md rule 5; M5b
 //! owner decision 4).
 //!
 //! A wave's roster lives in the memory (`BotMemory::wave`), so it is never
@@ -54,8 +54,8 @@
 //! spiral around the point, and around a Town the spiral starts on its
 //! ring. A unit on an explicit `Attack` whose target still exists is left
 //! alone. The wave issues `AttackMove` into enemy land only at the assault
-//! (and the all-in's joiners then), so the first such tick is the wave's
-//! assault order.
+//! (and the all-in's joiners then), so the first such tick is some wave's
+//! assault order (a wave that ends before its assault issues none).
 
 use super::army::home_armed;
 use super::ctx::{Ctx, goal_or_post, on_station};

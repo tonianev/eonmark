@@ -81,7 +81,9 @@ numbered in the ROADMAP's M5b Notes. M5b has started:
   sites, defence and army production;
 - slice 3 (`rules_version` 23): attack waves (stage, siege, ring hold,
   all-in), `sim-cli bench --bots`, the `m5_first_match` golden and the
-  play-bots acceptance runs in CI.
+  play-bots acceptance runs in CI; its review fixes (`rules_version` 24,
+  the `defend_guard_pop_ratio` knob) cap a defence's hold on launches,
+  pace an age's saving and keep the border tower away from enemy armies.
 
 New Game, the overlay proxy and the milestone close follow in slices 4
 and 5.

@@ -148,17 +148,19 @@ enum Cmd {
         #[arg(long)]
         scenario: String,
         /// Ticks to simulate (default: the scenario's fixture length;
-        /// `capture_seat` stops at the step that decides the match).
+        /// `capture_seat` and `m5_first_match` stop at the step that
+        /// decides the match).
         #[arg(long)]
         ticks: Option<u32>,
         /// Output file.
         #[arg(long)]
         out: PathBuf,
-        /// Write a hash record every tick instead of every 20.
+        /// Write a hash record every tick instead of at the scenario's
+        /// cadence.
         #[arg(long, conflicts_with = "hash_every")]
         hash_every_tick: bool,
         /// Write a hash record every N ticks (default: the scenario's own,
-        /// 1000 for `stalemate_45min`, else 20).
+        /// 1000 for `stalemate_45min`, 100 for `m5_first_match`, else 20).
         #[arg(long)]
         hash_every: Option<u32>,
         /// Match seed (default: the scenario's own seed; fixtures must keep it).
@@ -1723,8 +1725,9 @@ mod tests {
     }
 
     /// M5a: `--hash-every N` parses, conflicts with `--hash-every-tick`,
-    /// and the scenarios' own cadence is 1000 for `stalemate_45min` and the
-    /// replay default otherwise; only `capture_seat` stops at its outcome.
+    /// and the scenarios' own cadence is 1000 for `stalemate_45min`, 100
+    /// for `m5_first_match` and the replay default otherwise;
+    /// `capture_seat` and `m5_first_match` stop at their outcome.
     #[test]
     fn record_hash_every_flag_and_scenario_defaults() {
         let cli = Cli::try_parse_from([

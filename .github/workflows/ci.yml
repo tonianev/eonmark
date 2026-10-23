@@ -213,10 +213,11 @@ jobs:
           test "$(awk -F, '$1==1{print $5}' m5b-run1.csv)" = "$(cat crates/sim/tests/fixtures/m5_first_match.hash)"
 
       - name: M5b acceptance 2 (the first wave against Passive, from either side)
-        # ROADMAP M5b line 2 through scripts/check_first_wave.sh, with owner
-        # decision 4's extra gates (--decisive: a Seat capture, the second
-        # Town and the Watchtower before tick 18000), for the Standard bot
-        # as player a and, swapped, as player b (the New Game seat).
+        # ROADMAP M5b line 2 through scripts/check_first_wave.sh with
+        # --decisive: owner decision 4's Seat capture from either side, plus
+        # the plan's extra gates from the ROADMAP M5b Goal (the second Town
+        # and the Watchtower before tick 18000), for the Standard bot as
+        # player a and, swapped, as player b (the New Game seat).
         run: |
           cargo run -p sim-cli --locked --release -- play-bots --seeds 1..5 --a standard --b passive --max-ticks 36000 | tee m5b-wave-a.csv
           scripts/check_first_wave.sh --decisive m5b-wave-a.csv

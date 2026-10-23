@@ -10,7 +10,8 @@
 //! enemy siege in reach also gets an explicit `Attack` from up to
 //! [`SIEGE_GUARDS`] guards. Production runs while the latch is set
 //! (`army::producing`). A wave is called home while it is staging, or
-//! when the engaged Town is contested or at or below
+//! when a threatened Town (any Town with a threat, the engaged one or
+//! not) is contested or at or below
 //! `recall_wave_town_hp_permille` of its hit points (`recall_wave:
 //! WhileStaging`; `Always` recalls any wave), never once the all-in time
 //! is reached. After `defend_release_ds` with no threat the latch is
@@ -171,7 +172,12 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         last_threat: tick,
         since: mem.defend.map_or(tick, |d| d.since),
     });
-    if should_recall(ctx, mem, town) {
+    // Any threatened Town can call the wave home, not only the engaged
+    // one: a second Town being annexed may draw fewer raiders than the Seat.
+    if threats
+        .iter()
+        .any(|(t, _, pop)| *pop > 0 && should_recall(ctx, mem, *t))
+    {
         recall_wave(ctx, mem);
     }
     let rules = ctx.view.rules();
@@ -425,6 +431,59 @@ mod tests {
         let mut ctx = a.ctx(P0);
         step(&mut ctx, &mut mem);
         assert!(mem.wave.is_none(), "the Seat at 40% calls the wave home");
+    }
+
+    /// The recall looks at every threatened Town, not only the engaged
+    /// one: with more raiders at the Seat than at a second Town that is
+    /// being annexed at 0 HP, the Seat stays the engaged Town and the
+    /// assaulting wave still comes home for the contested one.
+    #[test]
+    fn a_contested_second_town_recalls_the_wave_though_the_seat_is_engaged() {
+        let r = crate::testkit::rules();
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                place(&r, P0, "town", 18, 81),
+                spawn(&r, P0, "skirmisher", 60, 64, 3),
+            ],
+        );
+        let seat = a.seat(P0);
+        let town2 = *a
+            .buildings_of(P0, "town")
+            .iter()
+            .find(|t| **t != seat)
+            .unwrap();
+        a.issue(
+            P0,
+            vec![
+                Command::DebugDamage {
+                    target: TargetId::Building(town2),
+                    amount: 5000,
+                },
+                spawn(&r, P1, "skirmisher", 17, 83, 2),
+            ],
+        );
+        a.run(5);
+        a.issue(P0, vec![spawn(&r, P1, "skirmisher", 24, 54, 4)]);
+        let view = a.sim.view();
+        assert_eq!(view.annexation(town2).map(|x| x.attacker), Some(P1));
+        assert_eq!(view.building_hp(seat), Some((2000, 2000)));
+        let roster = a.units_of(P0, "skirmisher");
+        let mut mem = BotMemory {
+            wave: Some(wave(roster, a.seat(P1), WavePhase::Assault)),
+            ..BotMemory::default()
+        };
+        let mut ctx = a.ctx(P0);
+        let threats = threats(&ctx);
+        let pops: Vec<(BuildingId, u32)> = threats.iter().map(|(t, _, p)| (*t, *p)).collect();
+        assert_eq!(pops, [(seat, 4), (town2, 2)]);
+        step(&mut ctx, &mut mem);
+        assert_eq!(
+            mem.defend.map(|d| d.town),
+            Some(seat),
+            "the Seat is engaged"
+        );
+        assert!(mem.wave.is_none(), "the contested Town calls the wave home");
     }
 
     /// With no threat for `defend_release_ds` the latch is released and

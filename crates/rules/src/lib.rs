@@ -3318,6 +3318,25 @@ mod tests {
     /// ticks allow level 7 (one tick) but not level 8.
     #[test]
     fn harrying_level_worst_case_bounds_the_level_and_the_interval() {
+        // Everything here is read from the repository data, so a data-only
+        // edit of `attrition_interval_ds` (the worked example in
+        // data/rules/README.md) moves the numbers instead of failing the
+        // test: the shipped Harrying rows' level, the interval in ticks and
+        // the first level at which it halves to 0.
+        let repo = Rules::load(data_dir()).unwrap();
+        let shipped: i32 = repo
+            .techs
+            .iter()
+            .flat_map(|t| &t.modifiers)
+            .chain(&repo.factions[0].modifiers)
+            .filter(|m| m.target == StatPath::HarryingLevel && m.op == ModOp::Add)
+            .map(|m| m.value)
+            .sum();
+        let interval = repo.attrition_interval_ticks();
+        // The first level whose halving `interval >> (level - 1)` is 0: one
+        // more than the interval's bit length.
+        let zero_at = 32 - interval.leading_zeros() + 1;
+        let max = i32::try_from(MAX_HARRYING_LEVEL).unwrap();
         let harrying = |value: i32| {
             move |f: &mut Factions| {
                 f.factions[0].modifiers.push(Modifier {
@@ -3327,23 +3346,36 @@ mod tests {
                 });
             }
         };
-        let msg = load_error_with::<Factions>("h-level-9", "rules/factions.ron", harrying(7));
+        let msg = load_error_with::<Factions>(
+            "h-level-9",
+            "rules/factions.ron",
+            harrying(max + 1 - shipped),
+        );
         assert!(
             msg.contains("rules/techs.ron")
                 && msg.contains("HarryingLevel")
-                && msg.contains("can reach 9")
-                && msg.contains("<= 8")
+                && msg.contains(&format!("can reach {}", max + 1))
+                && msg.contains(&format!("<= {max}"))
                 && msg.contains("freeholders"),
             "{msg}"
         );
-        let msg = load_error_with::<Factions>("h-level-8", "rules/factions.ron", harrying(6));
-        assert!(
-            msg.contains("rules/rules.ron: attrition_interval_ds: ")
-                && msg.contains("64 ticks")
-                && msg.contains("level 8"),
-            "{msg}"
-        );
-        let r = loads_with::<Factions>("h-level-7", "rules/factions.ron", harrying(5));
-        assert_eq!(r.attrition_interval_ticks().checked_shr(7 - 1), Some(1));
+        let zero_at = i32::try_from(zero_at).unwrap();
+        if zero_at <= max {
+            let msg = load_error_with::<Factions>(
+                "h-level-8",
+                "rules/factions.ron",
+                harrying(zero_at - shipped),
+            );
+            assert!(
+                msg.contains("rules/rules.ron: attrition_interval_ds: ")
+                    && msg.contains(&format!("{interval} ticks"))
+                    && msg.contains(&format!("level {zero_at}")),
+                "{msg}"
+            );
+        }
+        let top = zero_at.min(max + 1) - 1;
+        let r = loads_with::<Factions>("h-level-7", "rules/factions.ron", harrying(top - shipped));
+        let shift = u32::try_from(top - 1).unwrap();
+        assert!(r.attrition_interval_ticks().checked_shr(shift) >= Some(1));
     }
 }

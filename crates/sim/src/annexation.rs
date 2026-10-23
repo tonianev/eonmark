@@ -44,7 +44,8 @@
 //! (the Watchtower, sites included), which stay and are attributed again to
 //! the old owner's nearest uncontested Town. Queues are refunded to the old
 //! owner like `Cancel`, sites lose what was paid for them, rallies are
-//! cleared, and the old owner's builders and workers there are idled. The
+//! cleared, a transferred building with its own border projects for its new
+//! owner, and the old owner's builders and workers there are idled. The
 //! Town returns `Held` with `annexation_town_hp_permille` of its kind's hit
 //! points (500 of 2000), keeps its seat flag, and projects for its new
 //! owner. The town limit does not apply to a flip. Step 6e
@@ -56,7 +57,7 @@ use crate::economy::building_kind;
 use crate::fx::FxVec2;
 use crate::ids::{BuildingId, PlayerId};
 use crate::state::{Building, Construction, Hold, Job, SimEvent, State, TownState, fx_from_x100};
-use crate::territory::SourceOwner;
+use crate::territory::{Source, SourceOwner};
 use crate::town;
 use crate::training;
 use rules::Rules;
@@ -225,7 +226,10 @@ fn set_hold(state: &mut State, town: BuildingId, hold: Hold, layer: SourceOwner)
 /// whose kind `stays_on_annexation`; each one that changes hands has its
 /// queue refunded to the old owner (`TrainingCancelled` per entry), a
 /// site's `paid` zeroed with no refund, its rally cleared and its owner
-/// set; every unit of another player whose `Build` or `Gather` job names
+/// set, and a complete one with its own border source (a kind with
+/// `border_radius_tiles` that does not stay) has that source moved to
+/// `to`'s layer, centre and radius unchanged; every unit of another player
+/// whose `Build` or `Gather` job names
 /// one of them goes idle; the Town is `Held` again at
 /// `annexation_town_hp_permille` of its kind's hit points (floored, in
 /// `i64`) and its source moves to `to`'s layer before `town::refresh`
@@ -262,6 +266,18 @@ fn flip(
         }
         b.rally = None;
         b.owner = to;
+        // A complete building with its own border (a kind with
+        // `border_radius_tiles` that does not stay) projects for its new
+        // owner; the Town's source moves below, a site has none.
+        if id != town
+            && let Some(&source) = state.territory.sources().get(&id)
+        {
+            let source = Source {
+                owner: SourceOwner::Player(to),
+                ..source
+            };
+            state.territory.change_source(id, source);
+        }
     }
     for u in state.units.values_mut() {
         if u.owner == to {

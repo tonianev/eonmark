@@ -191,8 +191,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// cavalry and no defender within 6 tiles move the Town's border source to
 /// the neutral layer, and after `annexation_ds` (1200 ticks) the Town and
 /// the buildings attributed to it that do not stay change hands (queues
-/// refunded to the old owner, sites' `paid` zeroed, 250 per mille of the
-/// Town's hit points restored). `Train` and `Research` at a contested Town
+/// refunded to the old owner, sites' `paid` zeroed, border sources moved to
+/// the new owner's layer, 250 per mille of the Town's hit points
+/// restored). `Train` and `Research` at a contested Town
 /// are rejected with `TownContested` and its queue pauses; new buildings
 /// are not attributed to it. The annex-hold guard rule: an idle infantry
 /// or cavalry guard adjacent to an enemy Town at 0 HP keeps and takes only

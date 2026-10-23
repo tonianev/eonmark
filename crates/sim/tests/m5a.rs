@@ -2482,6 +2482,53 @@ fn annexation_flip_transfers_civilian_buildings_and_sites_keeps_watchtowers_and_
     );
 }
 
+/// A transferred building that projects its own border takes its land to
+/// its new owner. The shipped Watchtower stays on annexation, so these
+/// rules set its `stays_on_annexation` to false in memory, a data-only
+/// edit the validator accepts. P1's complete Watchtower at (21,54),
+/// attributed to the Town but beyond its border (23 tiles south of its
+/// centre tile, radius 20), owns the tiles of its own kernel before the
+/// flip; after it the tower is P0's, its source stamps P0's layer with the
+/// same centre and radius, its tile is P0's, P1 owns no tile and the field
+/// equals a full recompute.
+#[test]
+fn annexation_flip_moves_a_transferred_border_source_to_the_new_owner() {
+    let mut rules = load_rules();
+    let kind = bkind(&rules, "watchtower");
+    rules.buildings[usize::from(kind.0)].stays_on_annexation = false;
+    assert!(rules.buildings[usize::from(kind.0)].projects_border());
+    let tower = BuildingId(2);
+    let at = (21, 54);
+    let tile = Tile::new(at.0, at.1);
+    let Annex { mut m, .. } = annex_with(&rules, vec![place_for(P1, kind, at)], on_posts(&rules));
+    let view = m.view();
+    assert_eq!(view.building(tower).unwrap().town, Some(TOWN));
+    let before = view.territory().sources()[&tower];
+    assert_eq!(before.owner, sim::SourceOwner::Player(P1));
+    assert_eq!(view.territory().owner_at(tile), Some(P1));
+    let p1_during = view.territory().owned_tile_count(P1);
+    let events = step_to(&mut m, T0 + total(&rules) + 1);
+    assert_eq!(annexed(&events), [(TOWN, P1, P0)]);
+    let view = m.view();
+    assert_eq!(view.building(tower).unwrap().owner, P0);
+    let field = view.territory();
+    let after = field.sources()[&tower];
+    assert_eq!(
+        after.owner,
+        sim::SourceOwner::Player(P0),
+        "the tower's layer"
+    );
+    assert_eq!((after.centre, after.radius), (before.centre, before.radius));
+    assert_eq!(field.owner_at(tile), Some(P0));
+    assert_eq!(field.owned_tile_count(P1), 0, "P1 keeps no land");
+    assert!(field_is_exact(&m));
+    println!(
+        "the tower's {p1_during} tiles were P1's during the timer; after the flip P0 owns {}, P1 {}",
+        field.owned_tile_count(P0),
+        field.owned_tile_count(P1)
+    );
+}
+
 /// A flip refunds every queue entry of the buildings that change hands to
 /// the old owner, clamped like `Cancel`, with a `TrainingCancelled` per
 /// entry, and zeroes what a site paid with no refund. P1 queues two

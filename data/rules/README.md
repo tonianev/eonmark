@@ -354,7 +354,7 @@ at 0.
 | `max_per_town` | `Some(n)`: at most `n` of this kind per Town (each building counts for its nearest own Town), sites included. `None` when absent. The Croft limit lives here |
 | `border_radius_tiles` | `Some(r)`: the complete building is a border source of radius `r` (the Watchtower). `None` when absent. The Town's radius is `town_radius_tiles` in `rules.ron` instead |
 | `attack` | `Some((damage, range_tiles_x100, cooldown_ds))`: the complete building shoots enemy units, with the same block and ranges as `units.ron`; `prefer` must stay `Units` (or be omitted). `None` when absent (M4a) |
-| `stays_on_annexation` | `true`: buildings and sites of the kind stay with their owner when the Town they belong to is annexed, and are re-attributed to another of the owner's Towns (M5a; the Watchtower). Every other kind changes hands with the Town. `false` when absent; never `true` on the Town kind |
+| `stays_on_annexation` | `true`: buildings and sites of the kind stay with their owner when the Town they belong to is annexed, and are re-attributed to another of the owner's Towns (M5a; the Watchtower). Every other kind changes hands with the Town, and one with `border_radius_tiles` takes its border with it (its source moves to the new owner's layer). `false` when absent; never `true` on the Town kind |
 
 | Kind (`id`) | Footprint | Cost | `build_time_ds` | HP | Vision | Base yield per 30 s | Gather (resource, worker, rate, slots) | Other |
 |---|---|---|---|---|---|---|---|---|

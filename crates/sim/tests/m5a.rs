@@ -610,16 +610,41 @@ fn hits(events: &[SimEvent]) -> usize {
         .count()
 }
 
+/// Ticks between pulses at Harrying I, read from the data: 64 with the
+/// shipped 32 ds (the rules crate's `loads_repo_data` pins that). The
+/// attrition tests derive their ticks, pulse counts and hit points from
+/// it, so a data-only edit of `attrition_interval_ds`, the worked example
+/// in `data/rules/README.md`, moves their numbers instead of failing them
+/// (CONTRIBUTING.md: read a number the data controls from `Rules`).
+fn interval1(rules: &Rules) -> u32 {
+    rules.attrition_interval_ticks()
+}
+
+/// Ticks between pulses at Harrying II: half of [`interval1`], at least 1
+/// (32 with the shipped data).
+fn interval2(rules: &Rules) -> u32 {
+    (interval1(rules) / 2).max(1)
+}
+
+/// How many pulses a unit exposed from step 0 takes by tick `t` at
+/// `interval` (its counter is `t` then): `t / interval`, as an `i32`.
+fn pulses_by(t: u32, interval: u32) -> i32 {
+    i32::try_from(t / interval).unwrap()
+}
+
 /// Acceptance 1, first clause: an enemy unit in researched borders loses
-/// exactly 1 HP at ticks 64, 128 and 192. P0's Skirmisher stands inside
-/// P1's border from step 0, P1 has Harrying I and both players are in the
-/// Hearth Age (gap 0, 1 HP). Its hit points are 80 through tick 63, 79 at
-/// 64 to 127, 78 at 128 to 191 and 77 at 192 to 200, with exactly three
+/// exactly 1 HP at ticks 64, 128 and 192 (the multiples of [`interval1`]
+/// with the shipped data). P0's Skirmisher stands inside P1's border from
+/// step 0, P1 has Harrying I and both players are in the Hearth Age (gap
+/// 0, 1 HP). Its hit points are 80 through tick 63, 79 at 64 to 127, 78 at
+/// 128 to 191 and 77 at 192 to 200, with exactly three
 /// `Attrition { damage: 1 }` events, in the steps that end at those ticks,
 /// and no `Hit`.
 #[test]
 fn attrition_enemy_unit_in_researched_borders_loses_exactly_1_hp_at_ticks_64_128_192() {
     let rules = load_rules();
+    let i = interval1(&rules);
+    let end = 3 * i + 8;
     let u = UnitId(1);
     let (mut m, events) = attrition_field(&rules, 1, vec![]);
     let tile = unit_tile(&m, u);
@@ -630,7 +655,7 @@ fn attrition_enemy_unit_in_researched_borders_loses_exactly_1_hp_at_ticks_64_128
         m.view().attrition(u),
         Some(Exposure {
             owner: P1,
-            interval_ticks: 64,
+            interval_ticks: i,
             hp: 1
         })
     );
@@ -638,7 +663,7 @@ fn attrition_enemy_unit_in_researched_borders_loses_exactly_1_hp_at_ticks_64_128
     let mut hp_at = BTreeMap::from([(1, hp(&m, u))]);
     let mut landed = Vec::new();
     let mut hit_count = 0;
-    while m.sim.tick() < 200 {
+    while m.sim.tick() < end {
         let events = m.step(1);
         hit_count += hits(&events);
         for (unit, dmg) in pulses(&events) {
@@ -647,13 +672,15 @@ fn attrition_enemy_unit_in_researched_borders_loses_exactly_1_hp_at_ticks_64_128
         hp_at.insert(m.sim.tick(), hp(&m, u));
     }
     for (&t, &h) in &hp_at {
-        let want = 80 - i32::from(t >= 64) - i32::from(t >= 128) - i32::from(t >= 192);
+        let want = 80 - i32::from(t >= i) - i32::from(t >= 2 * i) - i32::from(t >= 3 * i);
         assert_eq!(h, want, "hit points after tick {t}");
     }
-    assert_eq!(landed, [(64, u, 1), (128, u, 1), (192, u, 1)]);
+    assert_eq!(landed, [(i, u, 1), (2 * i, u, 1), (3 * i, u, 1)]);
     assert_eq!(hit_count, 0, "nothing but attrition touched it");
-    for t in [63, 64, 127, 128, 191, 192, 200] {
-        println!("tick {t}: hp {}", hp_at[&t]);
+    for t in [i - 1, i, 2 * i - 1, 2 * i, 3 * i - 1, 3 * i, end] {
+        if let Some(h) = hp_at.get(&t) {
+            println!("tick {t}: hp {h}");
+        }
     }
     println!("Attrition events (tick, unit, damage): {landed:?}; Hit events: {hit_count}");
 }
@@ -662,15 +689,19 @@ fn attrition_enemy_unit_in_researched_borders_loses_exactly_1_hp_at_ticks_64_128
 /// tiles the unit loses 0 HP over 1200 ticks, and its counter never
 /// leaves 0. The Wain stands 14 tiles south of the intruder's tile
 /// (`dy² = 196`, inclusive); the control Wain 15 tiles south does not
-/// cover it, and the intruder ends at 62 HP (18 pulses). The Wain itself
-/// is immune.
+/// cover it, and the intruder ends at 62 HP (18 pulses, `1200 /`
+/// [`interval1`]). The Wain itself is immune.
 #[test]
 fn attrition_friendly_supply_wain_within_14_tiles_means_0_hp_lost_over_1200_ticks() {
     let rules = load_rules();
     let (u, w) = (UnitId(1), UnitId(2));
     let wain = ukind(&rules, "supply_wain");
-    for (at, covered, want_hp, want_pulses) in [((35, 45), true, 80, 0), ((35, 46), false, 62, 18)]
-    {
+    let n = pulses_by(1200, interval1(&rules));
+    let cases = [
+        ((35, 45), true, 80, 0),
+        ((35, 46), false, 80 - n, usize::try_from(n).unwrap()),
+    ];
+    for (at, covered, want_hp, want_pulses) in cases {
         let (mut m, _) = attrition_field(&rules, 1, vec![(0, spawn_for(P0, wain, at))]);
         let at_tile = Tile::new(u16::try_from(at.0).unwrap(), u16::try_from(at.1).unwrap());
         assert_eq!(m.view().supply_radius_tiles(), 14);
@@ -701,10 +732,11 @@ fn attrition_friendly_supply_wain_within_14_tiles_means_0_hp_lost_over_1200_tick
 /// with no Harrying tech P1's level is 0 and the intruder stays at 80 HP
 /// with a counter of 0 for 1200 ticks, with no event. Harrying I
 /// researched during tick 600 starts the exposure there: the first pulse
-/// lands at tick 664.
+/// lands at tick 664 (600 + [`interval1`]).
 #[test]
 fn attrition_before_harrying_one_an_enemy_unit_loses_0_hp() {
     let rules = load_rules();
+    let due = 600 + interval1(&rules);
     let u = UnitId(1);
     let (mut m, _) = attrition_field(&rules, 0, vec![]);
     assert_eq!(m.view().harrying_level(P1), 0);
@@ -725,25 +757,27 @@ fn attrition_before_harrying_one_an_enemy_unit_loses_0_hp() {
     assert_eq!(quiet.view().harrying_level(P1), 1);
     assert_eq!(exposed(&quiet, u), 1, "exposed from step 600");
     let mut first = None;
-    while quiet.sim.tick() < 700 {
+    while quiet.sim.tick() < due + 36 {
         let events = quiet.step(1);
         if first.is_none() && !pulses(&events).is_empty() {
             first = Some(quiet.sim.tick());
         }
         let t = quiet.sim.tick();
-        assert_eq!(hp(&quiet, u), 80 - i32::from(t >= 664), "{t}");
+        assert_eq!(hp(&quiet, u), 80 - i32::from(t >= due), "{t}");
     }
-    assert_eq!(first, Some(664));
+    assert_eq!(first, Some(due));
     println!("Harrying I during tick 600: first pulse at tick {first:?}");
 }
 
 /// Acceptance 1, fourth clause: Harrying II doubles the rate. With both
-/// Harrying techs the interval is 32 ticks instead of 64, and at every
-/// multiple of 64 up to 1152 the loss is exactly twice Harrying I's; after
-/// 1200 ticks the intruder has 43 HP against 62.
+/// Harrying techs the interval is 32 ticks instead of 64 ([`interval2`]
+/// and [`interval1`]), and at every multiple of 64 up to 1152 the loss is
+/// exactly twice Harrying I's; after 1200 ticks the intruder has 43 HP
+/// against 62.
 #[test]
 fn attrition_harrying_two_doubles_the_rate() {
     let rules = load_rules();
+    let (i1, i2) = (interval1(&rules), interval2(&rules));
     let u = UnitId(1);
     let (mut one, _) = attrition_field(&rules, 1, vec![]);
     let (mut two, _) = attrition_field(&rules, 2, vec![]);
@@ -752,8 +786,8 @@ fn attrition_harrying_two_doubles_the_rate() {
         (1, 2)
     );
     let interval = |m: &M| m.view().attrition(u).map(|e| e.interval_ticks);
-    assert_eq!((interval(&one), interval(&two)), (Some(64), Some(32)));
-    assert_eq!(two.view().attrition_pulse(P1, P0), Some((32, 1)));
+    assert_eq!((interval(&one), interval(&two)), (Some(i1), Some(i2)));
+    assert_eq!(two.view().attrition_pulse(P1, P0), Some((i2, 1)));
     let mut loss = [vec![0; 1201], vec![0; 1201]];
     while one.sim.tick() < 1200 {
         one.step(1);
@@ -762,18 +796,24 @@ fn attrition_harrying_two_doubles_the_rate() {
         loss[0][t] = 80 - hp(&one, u);
         loss[1][t] = 80 - hp(&two, u);
     }
-    for k in 1..=18 {
-        let t = 64 * k;
-        assert_eq!(loss[0][t], i32::try_from(k).unwrap(), "Harrying I at {t}");
+    let multiples: Vec<usize> = (1..=1200 / i1)
+        .map(|k| usize::try_from(k * i1).unwrap())
+        .collect();
+    assert!(!multiples.is_empty());
+    for (k, &t) in (1..).zip(&multiples) {
+        assert_eq!(loss[0][t], k, "Harrying I at {t}");
         assert_eq!(loss[1][t], 2 * loss[0][t], "Harrying II at {t}");
     }
-    assert_eq!((hp(&one, u), hp(&two, u)), (62, 43));
+    assert_eq!(
+        (hp(&one, u), hp(&two, u)),
+        (80 - pulses_by(1200, i1), 80 - pulses_by(1200, i2))
+    );
     println!(
-        "after 1200 ticks: Harrying I hp {} (interval 64), Harrying II hp {} (interval 32); loss at 64k: {:?} vs {:?}",
+        "after 1200 ticks: Harrying I hp {} (interval {i1}), Harrying II hp {} (interval {i2}); loss at {i1}k: {:?} vs {:?}",
         hp(&one, u),
         hp(&two, u),
-        (1..=18).map(|k| loss[0][64 * k]).collect::<Vec<_>>(),
-        (1..=18).map(|k| loss[1][64 * k]).collect::<Vec<_>>()
+        multiples.iter().map(|&t| loss[0][t]).collect::<Vec<_>>(),
+        multiples.iter().map(|&t| loss[1][t]).collect::<Vec<_>>()
     );
 }
 
@@ -781,10 +821,12 @@ fn attrition_harrying_two_doubles_the_rate() {
 /// player: P0 Wains 14 tiles south or at (10, 9) cover the intruder
 /// (`dx² + dy² = 196`, `181`), at 15 tiles south or (10, 10) (`225`,
 /// `200`) they do not, and P1's Wain 9 tiles south never covers P0's unit.
-/// After 200 ticks a covered intruder has 80 HP and an uncovered one 77.
+/// After 200 ticks (three [`interval1`] pulses and 8 ticks) a covered
+/// intruder has 80 HP and an uncovered one 77.
 #[test]
 fn attrition_supply_radius_is_14_tiles_inclusive_and_per_player() {
     let rules = load_rules();
+    let end = 3 * interval1(&rules) + 8;
     let u = UnitId(1);
     let wain = ukind(&rules, "supply_wain");
     let cases = [
@@ -801,7 +843,7 @@ fn attrition_supply_radius_is_14_tiles_inclusive_and_per_player() {
         assert_eq!(dx * dx + dy * dy <= 196 && owner == P0, covers, "{at:?}");
         assert_eq!(m.view().supplied(P0, t), covers, "{owner:?} {at:?}");
         assert_eq!(m.view().supplied(P1, t), owner == P1);
-        m.step(199);
+        m.step(end - m.sim.tick());
         assert_eq!(hp(&m, u), if covers { 80 } else { 77 }, "{owner:?} {at:?}");
     }
 }
@@ -883,11 +925,13 @@ fn attrition_counter_resets_when_supplied_friendly_or_neutral() {
 
 /// Only Scribes and Supply Wains are immune (`immune_to_attrition`):
 /// over 1200 ticks a Yeoman goes from 40 to 22 HP and a Skirmisher from 80
-/// to 62, while a Scribe and a Supply Wain (out of range of the others)
-/// keep every hit point and a counter of 0.
+/// to 62 (18 pulses, `1200 /` [`interval1`]), while a Scribe and a Supply
+/// Wain (out of range of the others) keep every hit point and a counter of
+/// 0.
 #[test]
 fn attrition_scribes_and_supply_wains_are_immune_yeomen_are_not() {
     let rules = load_rules();
+    let n = pulses_by(1200, interval1(&rules));
     let k = |id: &str| ukind(&rules, id);
     let (mut m, _) = attrition_field(
         &rules,
@@ -908,7 +952,11 @@ fn attrition_scribes_and_supply_wains_are_immune_yeomen_are_not() {
         assert_eq!((exposed(&m, UnitId(3)), exposed(&m, UnitId(4))), (0, 0));
     }
     let got: Vec<i32> = ids.iter().map(|&id| hp(&m, id)).collect();
-    assert_eq!(got, [62, 22, 30, 150], "skirmisher, yeoman, scribe, wain");
+    assert_eq!(
+        got,
+        [80 - n, 40 - n, 30, 150],
+        "skirmisher, yeoman, scribe, wain"
+    );
     assert_eq!(m.view().attrition(UnitId(3)), None);
     assert_eq!(m.view().attrition(UnitId(4)), None);
     println!("after 1200 ticks: skirmisher, yeoman, scribe, wain hp {got:?}");
@@ -918,11 +966,12 @@ fn attrition_scribes_and_supply_wains_are_immune_yeomen_are_not() {
 /// per pulse to a Hearth intruder (gap 1); a Hearth owner deals 1 to a
 /// Masonry intruder (a negative gap reads the gap-0 row); with an in-memory
 /// `harrying_bonus_hp` of 3 a Charter owner deals 5 to a Hearth intruder
-/// (gap 2 clamps to the last row, 2, plus 3). After 200 ticks (3 pulses)
-/// the intruder has 74, 77 and 65 HP.
+/// (gap 2 clamps to the last row, 2, plus 3). After 200 ticks (3 pulses of
+/// [`interval1`], and 8 ticks) the intruder has 74, 77 and 65 HP.
 #[test]
 fn attrition_age_gap_table_and_late_harrying_bonus() {
     let base = load_rules();
+    let i = interval1(&base);
     let mut bonus = base.clone();
     bonus.harrying_bonus_hp = 3;
     // The commands that take `p` to `age` (DebugResearch skips the age
@@ -984,55 +1033,72 @@ fn attrition_age_gap_table_and_late_harrying_bonus() {
         );
         assert_eq!(
             m.view().attrition_pulse(P1, P0),
-            Some((64, per_pulse)),
+            Some((i, per_pulse)),
             "{name}"
         );
         let mut landed = Vec::new();
-        while m.sim.tick() < 200 {
+        while m.sim.tick() < 3 * i + 8 {
             landed.extend(pulses(&m.step(1)).into_iter().map(|p| p.1));
         }
         assert_eq!(landed, [per_pulse; 3], "{name}");
         assert_eq!(hp(&m, UnitId(1)), want, "{name}");
-        println!("{name}: {per_pulse} HP per pulse, hp {want} after 200 ticks");
+        println!(
+            "{name}: {per_pulse} HP per pulse, hp {want} after {} ticks",
+            m.sim.tick()
+        );
     }
 }
 
 /// Attrition kills through the common death path: a Yeoman at 1 HP
 /// (`DebugDamage` 39) walking inside P1's border dies to the pulse at tick
-/// 64: `UnitDied` with its owner and kind in that step, no `Hit` in the
-/// whole run, and no path request left behind, although the walk's
-/// periodic repath asked for one in the same step (the control, without
-/// the damage, still has it pending after that step).
+/// 64 ([`interval1`]): `UnitDied` with its owner and kind in that step, no
+/// `Hit` in the whole run, and no path request left behind, although the
+/// walk's periodic repath asked for one in the same step (the control,
+/// without the damage, still has it pending after that step).
 #[test]
 fn attrition_kills_through_the_common_death_path() {
     let rules = load_rules();
     let yeoman = ukind(&rules, "yeoman");
     let u = UnitId(2);
+    let i = interval1(&rules);
+    let repath = rules.repath_interval_ticks();
+    // The killing pulse lands at the first multiple of the interval that
+    // leaves room for the walk to start in step 3 or later: tick 64 with
+    // the shipped data. The pulses before it (none with the shipped data)
+    // are paid for by a smaller `DebugDamage`.
+    let kill_at = (repath + 4).div_ceil(i) * i;
+    let earlier = pulses_by(kill_at - 1, i);
+    // The walk's first periodic repath falls in step `kill_at - 1`, with
+    // the pulse: a Move applied in step s repaths in step s + repath
+    // (3 + 60 = 63 with the shipped data).
+    let walk_from = kill_at - 1 - repath;
     for kill in [true, false] {
         let (mut m, _) = attrition_field(&rules, 1, vec![(0, spawn_for(P0, yeoman, (35, 33)))]);
         let mut all = Vec::new();
         if kill {
-            all.extend(m.step_with(vec![(0, damage(TargetId::Unit(u), 39))]));
-            assert_eq!(hp(&m, u), 1);
+            let amount = u32::try_from(39 - earlier).unwrap();
+            all.extend(m.step_with(vec![(0, damage(TargetId::Unit(u), amount))]));
+            assert_eq!(hp(&m, u), 1 + earlier);
         } else {
             all.extend(m.step(1));
         }
-        all.extend(m.step(1));
-        // The walk's first periodic repath falls in step 63, with the
-        // pulse: a Move applied in step 3 repaths at 3 + 60.
-        assert_eq!(m.sim.tick(), 3);
+        all.extend(m.step(walk_from - m.sim.tick()));
+        assert_eq!(m.sim.tick(), walk_from);
         all.extend(m.step_with(vec![(0, move_to(u, (35, 20)))]));
-        all.extend(m.step(63 - m.sim.tick()));
-        assert_eq!(m.sim.tick(), 63);
+        all.extend(m.step(kill_at - 1 - m.sim.tick()));
+        assert_eq!(m.sim.tick(), kill_at - 1);
         assert_eq!(
             m.view().territory().owner_at(unit_tile(&m, u)),
             Some(P1),
             "still walking inside the border"
         );
         assert!(m.view().unit(u).unwrap().order.is_some());
+        if kill {
+            assert_eq!(hp(&m, u), 1, "one pulse from death");
+        }
         let last = m.step(1);
         all.extend(last.iter().cloned());
-        assert_eq!(m.sim.tick(), 64);
+        assert_eq!(m.sim.tick(), kill_at);
         assert!(pulses(&last).contains(&(u, 1)), "{last:?}");
         let died = SimEvent::UnitDied {
             unit: u,
@@ -1045,7 +1111,11 @@ fn attrition_kills_through_the_common_death_path() {
             assert!(!m.view().pathing().has_request(u), "the request went too");
         } else {
             assert!(!last.contains(&died));
-            assert!(m.view().pathing().has_request(u), "the repath of step 63");
+            assert!(
+                m.view().pathing().has_request(u),
+                "the repath of step {}",
+                kill_at - 1
+            );
         }
         assert_eq!(hits(&all), 0);
     }
@@ -1154,10 +1224,10 @@ fn attrition_restore_mid_exposure_matches_uninterrupted() {
 /// applies to a unit that stands still: a pulse of `hp` when the counter
 /// reaches a multiple of `interval_ticks`, and no pulse and a counter of 0
 /// when it reports `None`. P1 is in the Masonry Age with both Harrying
-/// techs (32 ticks, 2 HP against Hearth intruders); the units are an
-/// exposed Skirmisher and Yeoman, an immune Scribe, a Skirmisher under its
-/// own Wain, one on neutral land, and P1 units on their own and on neutral
-/// land.
+/// techs (32 ticks, [`interval2`], and 2 HP against Hearth intruders); the
+/// units are an exposed Skirmisher and Yeoman, an immune Scribe, a
+/// Skirmisher under its own Wain, one on neutral land, and P1 units on
+/// their own and on neutral land.
 #[test]
 fn attrition_view_reports_the_pulse_the_step_applies() {
     let rules = load_rules();
@@ -1199,7 +1269,8 @@ fn attrition_view_reports_the_pulse_the_step_applies() {
     }
     extra.push((1, Command::AdvanceAge { player: P1 }));
     let (mut m, _) = attrition_field(&rules, 2, extra);
-    assert_eq!(m.view().attrition_pulse(P1, P0), Some((32, 2)));
+    let i2 = interval2(&rules);
+    assert_eq!(m.view().attrition_pulse(P1, P0), Some((i2, 2)));
     assert_eq!(m.view().attrition_pulse(P0, P1), None);
     let ids: Vec<UnitId> = m.view().units().map(|u| u.id).collect();
     assert_eq!(ids.len(), 8);
@@ -1236,7 +1307,7 @@ fn attrition_view_reports_the_pulse_the_step_applies() {
         m.view().attrition(UnitId(1)),
         Some(Exposure {
             owner: P1,
-            interval_ticks: 32,
+            interval_ticks: i2,
             hp: 2
         })
     );

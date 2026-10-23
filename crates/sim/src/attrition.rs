@@ -365,10 +365,15 @@ mod tests {
     }
 
     /// 64 ticks at Harrying I, halved per level, never 0 at any level up
-    /// to the maximum, whatever the base interval; `None` at level 0.
+    /// to the maximum, whatever the base interval; `None` at level 0. The
+    /// shipped 32 ds is set in memory, so a data-only edit of
+    /// `attrition_interval_ds` (the worked example in
+    /// `data/rules/README.md`) leaves this test alone; the rules crate's
+    /// `loads_repo_data` pins the shipped value.
     #[test]
     fn interval_halves_per_level_and_never_reaches_zero() {
         let mut r = rules();
+        r.attrition_interval_ds = 32;
         assert_eq!(r.attrition_interval_ticks(), 64);
         assert_eq!(interval_ticks(&r, 0), None);
         let got: Vec<u32> = (1..=MAX_HARRYING_LEVEL)

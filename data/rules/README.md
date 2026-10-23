@@ -566,8 +566,10 @@ differs from the merge base with main while the working-tree
 `scripts/check_fixture_policy.sh`, on the commits of every pull request).
 The sim reads `attrition_interval_ds` since M5a's attrition slice, but no
 golden fixture researches Harrying, so attrition never bites in them:
-every `.hash` stays the same and only the replay headers change. A change
-that a fixture does exercise, such as a unit's speed, changes its `.hash`
+every `.hash` stays the same and only the replay headers change.
+`cargo test -p sim` passes too, because the attrition tests read the
+interval from `Rules` (64 ticks at 32 ds, 80 at 40) instead of hard-coding
+it. A change that a fixture does exercise, such as a unit's speed, changes its `.hash`
 too, and the bump in the same commit is what makes that legal. `just rerecord move_500 group_spiral` re-records
 only the fixtures named.
 

@@ -1607,7 +1607,9 @@ pub const CAPTURE_SEAT_SEED: u64 = 31;
 pub const CAPTURE_SEAT_MAX_TICKS: u32 = 2400;
 /// The Seat's hit points after [`capture_seat`]'s tick-0 `DebugDamage`:
 /// one volley of the four Mangonels (4 x 120 against buildings) takes it
-/// to 0. The damage is computed from the Town's `hp` in the rules.
+/// to 0. The damage is computed from the Town's `hp` in the rules,
+/// saturating at 0: a Town with at most this many hit points takes no
+/// tick-0 damage, and the first volley still takes it to 0.
 pub const CAPTURE_SEAT_SEAT_HP: u32 = 300;
 /// Where [`capture_seat`] spawns its four Mangonels (`UnitId(11..=14)`).
 pub const CAPTURE_SEAT_MANGONELS: FxVec2 = FxVec2::from_ints(88, 64);
@@ -1697,7 +1699,7 @@ pub fn capture_seat(rules: &Rules) -> (MatchSetup, Stream) {
         0,
         damage(
             crate::ids::TargetId::Building(p1_seat),
-            town_hp - CAPTURE_SEAT_SEAT_HP,
+            town_hp.saturating_sub(CAPTURE_SEAT_SEAT_HP),
         ),
     ));
     tick0.push(cmd(0, spawn_kind("mangonel", CAPTURE_SEAT_MANGONELS, 4)));

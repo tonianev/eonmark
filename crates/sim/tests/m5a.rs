@@ -2923,6 +2923,48 @@ fn annexation_capture_seat_scenario_beats() {
     );
 }
 
+/// `capture_seat` survives data whose Town has no more hit points than
+/// `CAPTURE_SEAT_SEAT_HP` (300), a data-only edit the validator accepts:
+/// with the Town's `hp` at 250 and at 300 in memory the scenario builds,
+/// its tick-0 `DebugDamage` on P1's Seat is 0 (it saturates instead of
+/// underflowing), and the Mangonels' first volley still takes the Seat to
+/// 0 before `CAPTURE_SEAT_MOVE_TICK`.
+#[test]
+fn annexation_capture_seat_builds_when_the_town_has_at_most_the_seat_hp() {
+    use sim::scenarios::{CAPTURE_SEAT_MOVE_TICK, CAPTURE_SEAT_SEAT_HP};
+    let seat = BuildingId(2);
+    for hp in [CAPTURE_SEAT_SEAT_HP - 50, CAPTURE_SEAT_SEAT_HP] {
+        let mut rules = load_rules();
+        let town = bkind(&rules, "town");
+        rules.buildings[usize::from(town.0)].hp = hp;
+        let (setup, stream, _) = sim::scenarios::by_name("capture_seat", &rules).unwrap();
+        let on_seat: Vec<u32> = sim::scenarios::commands_at(&stream, 0)
+            .iter()
+            .filter_map(|c| match c.cmd {
+                Command::DebugDamage {
+                    target: TargetId::Building(b),
+                    amount,
+                } if b == seat => Some(amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(on_seat, [0], "Town hp {hp}");
+        let mut sim = Sim::new(setup, rules, Box::new(NoAi));
+        let mut zero = None;
+        while zero.is_none() && sim.tick() < CAPTURE_SEAT_MOVE_TICK {
+            let t = sim.tick();
+            sim.step(sim::scenarios::commands_at(&stream, t));
+            let events = sim.drain_events();
+            assert!(rejections(&events).is_empty(), "{events:?}");
+            if events.contains(&SimEvent::TownAtZeroHp { town: seat }) {
+                zero = Some(t);
+            }
+        }
+        let zero = zero.expect("the Seat reaches 0 before the ring walk");
+        println!("Town hp {hp}: no tick-0 damage on the Seat, at 0 HP in step {zero}");
+    }
+}
+
 /// The shipped rules with an in-memory `match_cap_ds` of 50 (100 ticks),
 /// so the outcome tests reach the cap quickly (`Rules::match_cap_ticks()`
 /// is read, not hard-coded).

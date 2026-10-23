@@ -559,7 +559,7 @@ impl AiController for NoAi {
 mod tests {
     use crate::command::{Command, PlayerCommand};
     use crate::fx::FxVec2;
-    use crate::ids::{BuildingId, BuildingKindId, PlayerId, Tile, UnitKindId};
+    use crate::ids::{BuildingId, BuildingKindId, PlayerId, Tile, UnitId, UnitKindId};
     use crate::state::{MatchSetup, Sim};
     use rules::Rules;
     use std::path::Path;
@@ -637,5 +637,117 @@ mod tests {
         assert_eq!(cap, max(tower));
         assert_eq!(hp, view.building(BuildingId(1)).unwrap().hp);
         assert!(hp < cap, "the guard hit the tower: {hp} / {cap}");
+    }
+
+    /// M5b: `check_gather` and `check_rally` answer as `Gather` and
+    /// `SetRally` would be applied: who takes a slot, and every rejection
+    /// the issuing player's checks or the validator make.
+    #[test]
+    fn check_gather_and_check_rally_answer_as_the_commands_apply() {
+        use crate::state::{RejectReason, SimEvent, StartKind};
+        let rules = Rules::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap();
+        let croft = BuildingKindId(rules.building_kind_by_id("croft").unwrap().0);
+        let mut setup = MatchSetup::scenario(&rules, 3);
+        setup.start = StartKind::Standard;
+        let delay = setup.cmd_delay;
+        let mut sim = Sim::new(setup, rules, Box::new(NoAi));
+        // The Seats are BuildingId(1) and (2); P0's Yeomen UnitId(1..=5).
+        sim.step(&[PlayerCommand::new(
+            PlayerId(0),
+            0,
+            Command::DebugPlaceBuilding {
+                owner: PlayerId(0),
+                kind: croft,
+                tile: Tile::new(28, 60),
+                complete: true,
+            },
+        )]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
+        let node = BuildingId(3);
+        let p0 = PlayerId(0);
+        let units = [UnitId(1), UnitId(2), UnitId(6)];
+        let view = sim.view();
+        assert_eq!(view.building(node).unwrap().kind, croft);
+        let slots = view.building(node).unwrap().slots;
+        assert_eq!(slots, 1, "a Croft has one Grain slot");
+        assert_eq!(view.check_gather(p0, &units, node), Ok(vec![UnitId(1)]));
+        assert_eq!(
+            view.check_gather(p0, &[UnitId(6)], node),
+            Err(RejectReason::NoValidUnits),
+            "P1's Yeoman"
+        );
+        assert_eq!(
+            view.check_gather(p0, &units, BuildingId(2)),
+            Err(RejectReason::UnknownBuilding),
+            "P1's Seat"
+        );
+        assert_eq!(
+            view.check_gather(PlayerId(7), &units, node),
+            Err(RejectReason::UnknownPlayer)
+        );
+        let target = FxVec2::from_ints(30, 64);
+        assert_eq!(view.check_rally(p0, BuildingId(1), target), Ok(()));
+        assert_eq!(
+            view.check_rally(p0, BuildingId(2), target),
+            Err(RejectReason::UnknownBuilding)
+        );
+        // Applying them agrees: the Gather takes the slot for Yeoman 1,
+        // the SetRally on P1's Seat is rejected for the same reason.
+        sim.drain_events();
+        sim.step(&[
+            PlayerCommand::new(
+                p0,
+                1,
+                Command::Gather {
+                    units: units.to_vec(),
+                    node,
+                },
+            ),
+            PlayerCommand::new(
+                p0,
+                2,
+                Command::SetRally {
+                    building: BuildingId(2),
+                    target,
+                },
+            ),
+        ]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
+        let rejected: Vec<_> = sim
+            .drain_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                SimEvent::CommandRejected { seq, reason, .. } => Some((seq, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected, [(2, RejectReason::UnknownBuilding)]);
+        let view = sim.view();
+        assert!(matches!(
+            view.unit(UnitId(1)).unwrap().job,
+            Some(crate::state::Job::Gather { node: n, .. }) if n == node
+        ));
+        assert_eq!(
+            view.check_gather(p0, &[UnitId(1)], node),
+            Ok(vec![]),
+            "already on it"
+        );
+        assert_eq!(
+            view.check_gather(p0, &[UnitId(2)], node),
+            Err(RejectReason::NoFreeSlot)
+        );
+        // A surrendered player is refused before any check.
+        sim.step(&[PlayerCommand::new(p0, 3, Command::Surrender)]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
+        assert_eq!(
+            sim.view().check_rally(p0, BuildingId(1), target),
+            Err(RejectReason::Surrendered)
+        );
     }
 }

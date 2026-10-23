@@ -15,8 +15,10 @@ use sim::{
 };
 
 /// The CSV header: the seven columns of docs/design/ai.md first, in their
-/// order, then the M5b diagnostics.
-pub const CSV_HEADER: &str = "seed,winner,outcome,tick,final_hash,age_reached_tick,first_attack_tick,reason,first_attack_units,first_attack_wains,second_town_tick,tower_tick,bo_done_tick_a,age_reached_tick_b,first_attack_tick_b,first_attack_units_b,first_attack_wains_b,territory_a,territory_b,units_lost_a,units_lost_b,min_enemy_town_hp_permille_a,min_enemy_town_hp_permille_b,rejected_a,rejected_b";
+/// order, then the M5b diagnostics (B's `second_town_tick`, `tower_tick`
+/// and `bo_done_tick` last, so the side swap reports what A's columns
+/// report).
+pub const CSV_HEADER: &str = "seed,winner,outcome,tick,final_hash,age_reached_tick,first_attack_tick,reason,first_attack_units,first_attack_wains,second_town_tick,tower_tick,bo_done_tick_a,age_reached_tick_b,first_attack_tick_b,first_attack_units_b,first_attack_wains_b,territory_a,territory_b,units_lost_a,units_lost_b,min_enemy_town_hp_permille_a,min_enemy_town_hp_permille_b,rejected_a,rejected_b,second_town_tick_b,tower_tick_b,bo_done_tick_b";
 
 /// The age whose arrival `age_reached_tick` records (by id).
 pub const AGE_REACHED: &str = "masonry";
@@ -454,6 +456,9 @@ impl GameRow {
             num(b.min_enemy_town_hp_permille),
             num(a.rejected),
             num(b.rejected),
+            opt(b.second_town_tick),
+            opt(b.tower_tick),
+            opt(b.bo_done_tick),
         ];
         cols.join(",")
     }
@@ -496,10 +501,14 @@ mod tests {
                 "first_attack_tick"
             ]
         );
-        assert_eq!(cols.len(), 25);
+        assert_eq!(cols.len(), 28);
+        assert_eq!(
+            cols[25..],
+            ["second_town_tick_b", "tower_tick_b", "bo_done_tick_b"]
+        );
         let row = GameRow::panicked(4).csv();
         assert_eq!(row.split(',').count(), cols.len());
-        assert_eq!(row, format!("4,panic{}", ",".repeat(23)));
+        assert_eq!(row, format!("4,panic{}", ",".repeat(26)));
     }
 
     #[test]

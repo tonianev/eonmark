@@ -88,15 +88,17 @@ down, in order. For each, within the plan's caps:
   site per step and plan);
 - it **saves up** when the stock is short: the step's cost is reserved,
   so later steps and army production cannot spend it. An `Advance` also
-  saves up while the techs it needs are still researching;
-- it **waits** while a trainer or host is busy, a predecessor tech is
-  still queued, every worker is busy or the plan's `check_build` probes
-  ran out;
+  saves up while the techs it needs are still researching, except while
+  the bot defends: then it keeps its place but reserves nothing, so the
+  stock goes to the army first;
+- it **waits** while every trainer or host of the step is busy or stands
+  in a contested Town, a predecessor tech is still queued, every worker is
+  busy or the plan's `check_build` probes ran out;
 - it is **blocked** for any other reason (no trainer or host built yet,
-  the age not reached, no site, the pop cap, a contested Town): it reserves
-  nothing and leaves the window for `blocked_retry_ds`, then is tried
-  again. It never becomes a permanent skip, and an `Advance` is never
-  blocked.
+  the age not reached, no site (a `NearTown` building with no uncontested
+  own Town to go beside has none), the pop cap): it reserves nothing and
+  leaves the window for `blocked_retry_ds`, then is tried again. It never
+  becomes a permanent skip, and an `Advance` is never blocked.
 
 Builders are idle workers, or, when none is idle, the gatherers of the
 resource most over its share. Sites come from the `at` policy: `NearTown`
@@ -109,11 +111,17 @@ tiles within `resource_radius_tiles` (20, the radius of a new Town's
 border) outside the first border, less `toward_enemy_penalty` per tile
 gained toward the enemy; `BorderEdge` the own grass tile nearest the enemy
 start, `tower_spacing_tiles` from other border buildings. Every site keeps
-a passable ring of `building_gap_tiles` free of other buildings (a yard or
-pit may touch its resource), has no unit on it, and passes `check_build`.
-A site without a builder gets one again (a free resume). Crossing the
-`Military` step (every non-optional step before it done) latches army
-production for good; a defence also starts it.
+a passable ring of `building_gap_tiles` free of other buildings, the sites
+chosen earlier in the same plan included (a yard or pit may touch its
+resource), has no unit on it, and passes `check_build`. A site without a
+builder gets one again (a free resume). Crossing the `Military` step
+(every non-optional step before it done) latches army production for
+good; a defence also starts it. Production keeps the army near the
+`army_mix` weights: each free trainer trains the kind it can train that
+is most under its share, and a kind over its share of the kinds the bot
+can field at all (a trainer of it standing, free or busy, and the stock
+paying for it) is never trained, so a busy Muster Hall does not let the
+Engine Yard fill the army with Mangonels.
 
 ## Personalities (`personalities.ron`)
 
@@ -146,7 +154,7 @@ production for good; a defence also starts it.
 | `ring_units`, `clear_defenders_units`, `continue_min_units`, `recall_below_units` | Units posted on a Town's ring to annex it, sent at its defenders, needed to go on to the next Town, below which a wave comes home | 1 to 64 |
 | `wave_max_ds`, `all_in_after_ds` | A wave ends after this long unless it is annexing; from this match time every armed unit joins and nothing is recalled | 1 to 72000; 0 to 72000 |
 | `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
-| `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave, or an assaulting one when the threatened Town is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
+| `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave, or an assaulting one when any threatened Town, the engaged one or another, is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
 
 M5b's economy slice reads every knob but the wave knobs
 (`assemble_radius_tiles`, `wave_requires_age` to `wave_interval_ds`,

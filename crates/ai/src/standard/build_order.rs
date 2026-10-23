@@ -6,9 +6,13 @@
 //! cooling down, in order; it stops at an unfinished `Wait`. Each window
 //! step, in order, either issues its command (paid from the plan's
 //! [`super::Ledger`]), saves up (its cost is reserved, so a later step or
-//! production cannot spend it), waits (a trainer or host is busy, or a
-//! predecessor tech is still queued), or is blocked (any other rejection,
-//! no site, no host): a blocked step is cooled down for
+//! production cannot spend it), waits (every trainer or host of the step
+//! is busy or stands in a contested Town, a predecessor tech is still
+//! queued, no worker is free, or the plan's `check_build` probes ran
+//! out), or is
+//! blocked (any other rejection, no trainer or host built yet, no site,
+//! which includes a `NearTown` building with no uncontested own Town to
+//! go beside): a blocked step is cooled down for
 //! `blocked_retry_ds` in `BotMemory::blocked` and then retried; it never
 //! becomes a permanent skip. An `Advance` is never cooled down: while the
 //! techs it needs finish or the stock fills, it saves up its cost, except

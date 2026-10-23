@@ -73,14 +73,16 @@
 //!     in `UnitId` order). Shooters fire at units only and keep no target:
 //!     the aim lasts the tick.
 //! - 5b `movement::step` takes the engagements: a holding unit stands and
-//!   faces its target, a chasing one steers straight at it.
+//!   faces its target, a chasing one steers straight at it. Then 5b'
+//!   (`attrition::step`, M5a) adds the attrition pulses to `damage_taken`.
 //! - 5c `resolve`: every attacker whose target is still valid and in
 //!   weapon range from the post-movement positions, and whose cooldown has
 //!   run out, hits, in `UnitId` order, then every shooter whose aim is
 //!   still in range, in `BuildingId` order; the hits are summed per target
-//!   and applied at once, so a unit killed this tick still lands its own
-//!   and a lower id has no first strike. Then `reap` removes the dead and
-//!   the destroyed.
+//!   and applied at once through `apply_damage`, so a unit killed this
+//!   tick (by a hit or a pulse) still lands its own and a lower id has no
+//!   first strike. Then `reap` removes the dead, attrition's included, and
+//!   the destroyed, also those `Command::DebugDamage` dealt in step 3.
 //!
 //! Range is measured edge to edge: a unit is in range of a unit target when
 //! `dist_sq_i64(a, t) <= (range + r_a + r_t)^2`, and of a building when the
@@ -1134,31 +1136,54 @@ pub(crate) fn resolve(
         let sum = dealt.entry(target).or_insert(0);
         *sum = sum.checked_add(damage).expect("damage sum fits i64");
     }
-    let clamp_i32 =
-        |v: i64| i32::try_from(v.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).expect("clamped");
     for (target, damage) in dealt {
-        match target {
-            TargetId::Unit(id) => {
-                let u = state.units.get_mut(&id).expect("validated target");
-                u.damage_taken = clamp_i32(i64::from(u.damage_taken) + damage);
-            }
-            TargetId::Building(id) => {
-                let b = state.buildings.get_mut(&id).expect("validated target");
-                let hp = i64::from(b.hp) - damage;
-                if b.town_state.is_some() {
-                    // A complete Town is never destroyed: it stays at 0.
-                    let before = b.hp;
-                    b.hp = clamp_i32(hp.max(0));
-                    if before > 0 && b.hp == 0 {
-                        events.push(SimEvent::TownAtZeroHp { town: id });
-                    }
-                } else {
-                    b.hp = clamp_i32(hp);
+        apply_damage(state, target, damage, events);
+    }
+    reap(state, rules, stats, events);
+}
+
+/// `v` clamped into `i32`.
+pub(crate) fn clamp_i32(v: i64) -> i32 {
+    i32::try_from(v.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).expect("clamped")
+}
+
+/// Deal `amount` damage to an existing `target` at once: a unit's
+/// `damage_taken` grows (clamped to `i32`); a complete Town's hit points
+/// fall and stay at 0, with `TownAtZeroHp` on the step that reaches 0; any
+/// other building or site loses `amount` hit points (clamped to `i32`).
+/// Nothing is removed here: `reap` (step 5c) removes the dead and the
+/// destroyed. `resolve` applies each target's summed hits through it, and
+/// `Command::DebugDamage` its amount.
+///
+/// # Panics
+///
+/// If `target` does not exist.
+pub(crate) fn apply_damage(
+    state: &mut State,
+    target: TargetId,
+    amount: i64,
+    events: &mut Vec<SimEvent>,
+) {
+    match target {
+        TargetId::Unit(id) => {
+            let u = state.units.get_mut(&id).expect("an existing target");
+            u.damage_taken = clamp_i32(i64::from(u.damage_taken).saturating_add(amount));
+        }
+        TargetId::Building(id) => {
+            let b = state.buildings.get_mut(&id).expect("an existing target");
+            let hp = i64::from(b.hp).saturating_sub(amount);
+            if b.town_state.is_some() {
+                // A complete Town is never destroyed: it stays at 0.
+                let before = b.hp;
+                b.hp = clamp_i32(hp.max(0));
+                if before > 0 && b.hp == 0 {
+                    events.push(SimEvent::TownAtZeroHp { town: id });
                 }
+            } else {
+                b.hp = clamp_i32(hp);
             }
         }
     }
-    reap(state, rules, stats, events);
 }
 
 /// Remove every unit whose damage has reached its hit points, in `UnitId`

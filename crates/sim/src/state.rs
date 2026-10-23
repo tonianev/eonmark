@@ -24,9 +24,15 @@
 //!      in id order, aims at the nearest enemy unit in range;
 //!    - 5b `movement::step` with those engagements; units that need a
 //!      repath get a new `PathRequest`;
+//!    - 5b' `attrition::step` (M5a): each unit in id order on another
+//!      player's land with Harrying and no friendly Supply Wain in range
+//!      counts one more exposed tick, any other unit's count drops to 0,
+//!      and a count that reaches a multiple of the owner's interval takes
+//!      a pulse of hit points;
 //!    - 5c `combat::resolve`: hits from the post-movement positions (units,
 //!      then the shooters' aims), summed per target and applied at once,
-//!      then the dead units and the destroyed buildings are removed.
+//!      then the dead units (attrition's included) and the destroyed
+//!      buildings are removed.
 //! 6. Economy and Towns, each in id order:
 //!    - 6a construction: sites whose builder is at work gain progress; a
 //!      finished site completes (a Town or Watchtower adds its border, its
@@ -43,6 +49,7 @@
 //! 7. `tick += 1`.
 
 use crate::ai_hook::{AiController, SimView};
+use crate::attrition;
 use crate::combat;
 use crate::command::{Command, PlayerCommand, sort_commands};
 use crate::construction::{self, BuildPlan};
@@ -150,7 +157,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Complete Watchtowers and Towns with hit points left shoot the nearest
 /// enemy unit in range (`Building::ready_at`). `DebugSpawnJittered` is
 /// appended to `Command` and draws two offsets per spawned unit.
-pub const SIM_VERSION: u32 = 14;
+///
+/// 15: M5a attrition. New hashed state `Unit::exposed_ticks` (sub-hash
+/// `units`). Step 5b' applies Harrying (the `HarryingLevel` rows: a pulse
+/// every 64 ticks at Harrying I, the interval halved per level), cancelled
+/// by the unit owner's Supply Wains within `supply_radius_tiles` (14),
+/// skipped for `immune_to_attrition` kinds, with the age-gap table and the
+/// late Harrying bonus; its dead are reaped in 5c. `Command::DebugDamage`
+/// is appended to `Command`, and `combat::apply_damage` applies both its
+/// damage and every hit. `AdvanceAge` counts only the techs that count
+/// toward an age from `rules_version` 18 on (behaviour-neutral for older
+/// data, which has no side tech).
+pub const SIM_VERSION: u32 = 15;
 
 /// Who drives a player slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +373,13 @@ pub struct Unit {
     pub target: Option<TargetId>,
     /// Why it has that target.
     pub intent: Intent,
+    /// Consecutive steps the unit has been exposed to attrition (M5a,
+    /// saturating): on another player's land, where that player has a
+    /// Harrying level, with no own Supply Wain in range and a kind that is
+    /// not immune. Any other step sets it to 0. A pulse lands when it is a
+    /// multiple of the owner's interval; the game reads `> 0` as
+    /// "bleeding".
+    pub exposed_ticks: u32,
 }
 
 impl Unit {
@@ -386,6 +411,7 @@ impl Unit {
             ready_at: 0,
             target: None,
             intent: Intent::Plain,
+            exposed_ticks: 0,
         }
     }
 
@@ -587,6 +613,7 @@ pub enum RejectReason {
     PlayerMismatch,
     /// `Attack`: the target does not exist, is the player's own, or is a
     /// building with no hit points left (a complete Town at 0 HP).
+    /// `DebugDamage`: the target does not exist.
     InvalidTarget,
 }
 
@@ -700,6 +727,14 @@ pub enum SimEvent {
     TownAtZeroHp {
         /// The Town.
         town: BuildingId,
+    },
+    /// An attrition pulse took hit points from a unit exposed on enemy land
+    /// (step 5b'); a unit it kills is removed in 5c with `UnitDied`.
+    Attrition {
+        /// The unit.
+        unit: UnitId,
+        /// Hit points taken.
+        damage: i32,
     },
 }
 
@@ -1036,6 +1071,9 @@ impl Sim {
                 order.repath_at = tick + self.rules.repath_interval_ticks();
             }
         }
+        // 5b'. Attrition from the post-movement positions; its dead are
+        //      reaped in 5c with the rest.
+        attrition::step(&mut self.state, &self.rules, &mut self.events);
         // 5c. Hits from the post-movement positions, then the dead and the
         //     destroyed.
         combat::resolve(
@@ -1391,6 +1429,28 @@ impl Sim {
                     Err(reason) => self.reject(&pc, reason),
                     Ok(attackers) => combat::apply_attack(&mut self.state, &attackers, *target),
                 }
+            }
+            Command::DebugDamage { target, amount } => {
+                if !self.setup.debug_commands {
+                    self.reject(&pc, RejectReason::DebugCommandsDisabled);
+                    return;
+                }
+                // Existence only, not `combat::locate`: any owner, a
+                // player's own buildings and a Town at 0 HP included.
+                let exists = match target {
+                    TargetId::Unit(id) => self.state.units.contains_key(id),
+                    TargetId::Building(id) => self.state.buildings.contains_key(id),
+                };
+                if !exists {
+                    self.reject(&pc, RejectReason::InvalidTarget);
+                    return;
+                }
+                combat::apply_damage(
+                    &mut self.state,
+                    *target,
+                    i64::from(*amount),
+                    &mut self.events,
+                );
             }
         }
     }

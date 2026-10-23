@@ -28,13 +28,15 @@
 //! | [`town`] | standard start, town count and limit, attribution to the nearest Town, tier and radius refresh |
 //! | [`training`] | `Train`, queue `Cancel`, `SetRally`, pop, the unit cost ramps, the training and research step |
 //! | [`tech`] | `TechState` (ages, researched techs), Modifier-resolved player stats, `Research`, `AdvanceAge`, `DebugResearch` |
+//! | [`attrition`] | Harrying levels, pulse intervals and sizes, the per-step `SupplyGrid` of Supply Wain tiles, immunities, step 5b' (M5a) |
 //! | [`combat`] | unit combat stats from the Modifier rows, explicit `Attack` (hold, direct chase, path chase, give up), target acquisition by guards and attack-movers, Watchtower and Town shooters, simultaneous hits, death and building destruction |
-//! | [`ai_hook`] | `AiController`, `SimView` (read-only quotes and checks; `building_hp` from M4b) |
+//! | [`ai_hook`] | `AiController`, `SimView` (read-only quotes and checks; `building_hp` from M4b; Harrying, supply and exposure from M5a) |
 //! | [`hash`] | xxh3 over postcard |
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod ai_hook;
+pub mod attrition;
 pub mod combat;
 pub mod command;
 pub mod construction;
@@ -55,6 +57,7 @@ pub mod town;
 pub mod training;
 
 pub use ai_hook::{AiController, SimView};
+pub use attrition::Exposure;
 pub use combat::{AttackStats, Engage, UnitStats};
 pub use command::{Command, PlayerCommand, sort_commands};
 pub use economy::{Economy, PlayerEconomy, RateInfo};

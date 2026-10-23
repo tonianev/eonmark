@@ -3,9 +3,9 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  // 18: M5a rules data (Harrying techs, attrition, annexation and match
-  // knobs, the attrition and annexation flags); no sim change yet.
-  rules_version: 18,
+  // 19: M5a attrition (SIM 15): every fixture re-recorded for the new
+  // hashed Unit::exposed_ticks; no RON content changed besides the version.
+  rules_version: 19,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

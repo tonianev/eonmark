@@ -217,10 +217,10 @@ fn selftest(tick: u32) -> Vec<PlayerCommand> {
 /// Stops for player 0, and invalid commands of every rejectable kind
 /// (unknown player, no valid units, unknown unit kind, not enough techs,
 /// unknown building (`Cancel`, `Gather`, `Train`, `SetRally`, `Research`),
-/// a `Build` by a unit that does not exist, an `Attack` on a unit that does
-/// not exist, and everything player 1 issues after it surrenders). Returns
-/// the
-/// per-tick commands and the `(player, seq)` keys the sim must reject.
+/// a `Build` by a unit that does not exist, an `Attack` or a `DebugDamage`
+/// on a unit that does not exist, and everything player 1 issues after it
+/// surrenders). Returns the per-tick commands and the `(player, seq)` keys
+/// the sim must reject.
 /// `movement` enables Move commands.
 pub fn random_commands(
     seed: u64,
@@ -415,6 +415,19 @@ pub fn random_commands(
                 Command::Attack {
                     units: vec![UnitId(1)],
                     target: TargetId::Unit(UnitId(0)),
+                },
+            ));
+            rejected.push((PlayerId(0), seq[0]));
+            seq[0] += 1;
+        } else if (65..69).contains(&bad) {
+            // InvalidTarget: a DebugDamage on UnitId(0), which is never
+            // allocated (M5a).
+            cmds.push(PlayerCommand::new(
+                PlayerId(0),
+                seq[0],
+                Command::DebugDamage {
+                    target: TargetId::Unit(UnitId(0)),
+                    amount: 1 + rng.next_u32() % 100,
                 },
             ));
             rejected.push((PlayerId(0), seq[0]));

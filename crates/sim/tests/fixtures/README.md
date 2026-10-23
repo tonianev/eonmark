@@ -23,6 +23,24 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-23 at `rules_version` 19, `SIM_VERSION` 15 with
+`just rerecord` (M5a attrition: `Unit` gained the hashed `exposed_ticks`,
+step 5b' applies Harrying, `Command::DebugDamage` is appended). No fixture
+researches Harrying, so nobody is ever exposed: re-simulating the eight
+fixtures emits no `Attrition` event and every `exposed_ticks` stays 0. A
+per-tick `sim-cli hash-dump --every 1` of each fixture as recorded at
+`SIM_VERSION` 14, run by that binary with its own `data/`, against the
+re-recorded fixture run by the `SIM_VERSION` 15 binary with the current
+`data/`, differs in the whole hash and the `units` column on every tick
+with a unit and in no other column, and the units hashed without the new
+field equal the old `units` column on every tick. Every `.hash` file
+changes for that reason only (each unit's encoding grew by one byte):
+`combat_skirmish` `0x4914c1138c1f4255`, `economy_second_town`
+`0xfd88a57c5cb6bf16`, `economy_walkthrough` `0xd783a5f9e81110a5`,
+`enemy_outpost_walkthrough` `0xe6127d167a9d064d`, `group_spiral`
+`0x723eae548d0a8f26`, `move_500` `0xdabf913fcf0dd1b0`, `move_500_short`
+`0x69cb2eaad81cf7f8`, `snapshot_restore` `0xc601c749c206ee7f`.
+
 Recorded 2026-10-22 at `rules_version` 18, `SIM_VERSION` 14 with
 `just rerecord` (M5a rules data: the Watchtower's Harrying I and II with
 `counts_toward_age: false`, the `HarryingLevel` stat path, the attrition,

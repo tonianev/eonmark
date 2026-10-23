@@ -5,6 +5,7 @@
 //! state, draws no randomness of its own, and its commands go through the
 //! same delay queue as a human's.
 
+use crate::attrition::{self, Exposure, Pulses, SupplyGrid};
 use crate::combat::{self, UnitStats};
 use crate::command::Command;
 use crate::construction::{self, BuildPlan};
@@ -285,6 +286,59 @@ impl<'a> SimView<'a> {
             .expect("a building's kind is in the rules");
         let max = i32::try_from(def.hp).expect("data-check bounds building hp");
         Some((b.hp, max))
+    }
+
+    /// `p`'s Harrying level (M5a): the `HarryingLevel` rows from base 0,
+    /// one per Harrying tech researched, clamped to `0..=8`. Enemy units
+    /// on `p`'s land are exposed to attrition from level 1.
+    ///
+    /// # Panics
+    ///
+    /// If the player does not exist.
+    pub fn harrying_level(&self, p: PlayerId) -> u32 {
+        attrition::harrying_level(self.state, self.rules, p)
+    }
+
+    /// The radius within which a Supply Wain covers its owner's units, in
+    /// tiles (`supply_radius_tiles`, tile to tile, inclusive).
+    pub fn supply_radius_tiles(&self) -> u32 {
+        self.rules.supply_radius_tiles
+    }
+
+    /// The tiles `p`'s Supply Wains (the kinds that `supplies`) stand on,
+    /// in `UnitId` order: the centres of `p`'s supply discs.
+    pub fn supply_wains(&self, p: PlayerId) -> Vec<Tile> {
+        SupplyGrid::new(self.state, self.rules).wains(p).to_vec()
+    }
+
+    /// Whether one of `p`'s Supply Wains covers `tile` now, as step 5b'
+    /// decides it (`dx² + dy² <= supply_radius_tiles²`).
+    pub fn supplied(&self, p: PlayerId, tile: Tile) -> bool {
+        SupplyGrid::new(self.state, self.rules).covers(p, tile)
+    }
+
+    /// What a pulse on `owner`'s land does to `intruder`'s units now:
+    /// `(interval_ticks, hp)` from `owner`'s Harrying level and both ages
+    /// (the step's own function), or `None` while `owner` has no Harrying
+    /// level.
+    ///
+    /// # Panics
+    ///
+    /// If either player does not exist.
+    pub fn attrition_pulse(&self, owner: PlayerId, intruder: PlayerId) -> Option<(u32, i32)> {
+        attrition::pulse(self.state, self.rules, owner, intruder)
+    }
+
+    /// Whether unit `id` is exposed to attrition where it stands now, and
+    /// to whose borders, how often and how hard: what step 5b' would apply
+    /// if the unit did not move. `None` when it is not exposed (immune,
+    /// on neutral or own land, the owner has no Harrying level, or an own
+    /// Supply Wain covers it) or does not exist. Builds the step's tables
+    /// on every call, so it is meant for single units; the unit's
+    /// `exposed_ticks` says whether it is bleeding.
+    pub fn attrition(&self, id: UnitId) -> Option<Exposure> {
+        let u = self.state.units.get(&id)?;
+        Pulses::new(self.state, self.rules)?.exposure(&self.state.map, &self.state.territory, u)
     }
 
     /// Whether `Attack { units, target }` from `p` would be accepted now,

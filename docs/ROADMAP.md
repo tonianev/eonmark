@@ -305,7 +305,7 @@ Headless completeness: attrition bleeds unsupplied invaders, Towns are annexed n
 
 ### Good first issues
 
-- Add an attrition table row for age gap 2 and a test (any OS).
+- Add an attrition table row for age gap 2 and a test (any OS). Filed as #44.
 
 ### Estimate
 

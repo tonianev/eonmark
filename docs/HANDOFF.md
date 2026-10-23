@@ -113,8 +113,21 @@ Surrender, Seat captured, all Towns lost, the 45-minute territory cap),
 the hashed `TownState::hold` and `State::outcome`, `TownContested`, the
 annex-hold guard rule, the Yield Cap decay knob (off), the `capture_seat`
 and `stalemate_45min` goldens and the `annexation_*` tests of acceptance
-line 2 (`cargo test -p sim annexation`). The game half (the outcome
-overlay, the freeze, the markers) and the bench and close follow.
+line 2 (`cargo test -p sim annexation`). Its fourth slice, the game half,
+bumps nothing: the live game freezes at the outcome
+(`TickOutcome::Decided`) after finishing its replay in the deciding step
+and printing an `outcome:` line, the outcome overlay shows Victory,
+Defeat or Draw with the reason, the time, the final hash and the replay's
+name (`crates/game/src/outcome.rs`), and `crates/game/src/markers.rs`
+draws the attrition indicator, the supply ring on a selected Supply Wain,
+the annexation timer and its readout; `just m5a-checks`
+(`scripts/m5a_checks.sh`, local only under decision 14) runs acceptance
+line 3's proxy. The bench and the close follow. The M5a good first issues
+are filed: #44 (the attrition table row for age gap 2 and a test, the
+ROADMAP's), #45 (a test that a Statecraft level researched mid-timer
+pushes the neutral kernel and the field equals `recomputed()`) and #46
+(`sim-cli data-check --verbose` printing the pulse table and the Harrying
+intervals).
 
 Under the owner's M4b decision 3, M5a may start while M4b's line 2 waits
 for that Mac session, as M3b's fps line does. A milestone is done when
@@ -128,8 +141,8 @@ command output in a merged PR.
 | Architecture and invariants | `docs/ARCHITECTURE.md`, `docs/DETERMINISM.md`, `docs/DATA_FORMAT.md` | Complete |
 | Per-system design | `docs/design/*.md` | Complete, with target numbers |
 | Dependency pins and policy | `docs/DEPENDENCIES.md`, `docs/adr/` | Complete |
-| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b (PR #38) adds the `enemy_outpost` scenarios, their golden and `SimView::building_hp`; M5a (attrition, supply, annexation, victory) in progress: rules data, attrition, annexation and the outcome done (sim); the game half, the bench and the close follow; `crates/ai` holds the M0 bots until M5b |
-| Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b on PR #38 (line 1 ticked; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window |
+| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b (PR #38) adds the `enemy_outpost` scenarios, their golden and `SimView::building_hp`; M5a (attrition, supply, annexation, victory) in progress: rules data, attrition, annexation and the outcome done (sim), and the game half; the bench and the close follow; `crates/ai` holds the M0 bots until M5b |
+| Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b on PR #38 (line 1 ticked; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window; M5a's game half: the freeze at the outcome, the outcome overlay with the final hash, the attrition indicator, the supply ring, the annexation timer and readout |
 | CI and release automation | `.github/workflows/`, `scripts/`, `justfile` | In use since M0: every PR runs check, headless, game-linux, deny and hash-parity |
 
 ## Read these first, in this order

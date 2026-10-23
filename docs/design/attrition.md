@@ -109,9 +109,10 @@ Supply is per player: a Wain covers only its owner's units. Alliances are out of
 
 - [ ] `cargo test -p sim attrition`: an enemy unit in researched borders loses exactly 1 HP at ticks 64, 128, 192; with a friendly Supply Wain within 14 tiles it loses 0 HP over 1200 ticks; before Harrying I it loses 0 HP; Harrying II doubles the rate.
 
-Good first issue from M5a:
+Good first issues from M5a:
 
-- [ ] Add an attrition table row for age gap 2 and a test (any OS).
+- [ ] Add an attrition table row for age gap 2 and a test (any OS). Filed as #44.
+- [ ] `sim-cli data-check --verbose` prints the pulse table (HP per pulse by age gap, with the late bonus) and the Harrying intervals per level (any OS). Filed as #46.
 
 ```bash
 cargo test -p sim attrition

@@ -220,6 +220,8 @@ cargo test -p sim annexation
 cargo run -p game --features dev -- --scenario capture_seat
 ```
 
+Good first issue from M5a: a test that a Statecraft level researched mid-timer pushes the neutral kernel's radius and the field still equals `recomputed()` (any OS; `town::refresh` keeps the neutral layer, territory.md). Filed as #45.
+
 ## Open tuning questions
 
 1. Town HP after a flip: the design is silent. Options are keeping 0 HP (the defender can immediately contest it back) or restoring a data-defined fraction. M5a must pick and put the value in `rules.ron`. Decided 2026-10-22 (owner decision 2): `annexation_town_hp_permille: 250`, 500 HP; see "M5a implementation notes".

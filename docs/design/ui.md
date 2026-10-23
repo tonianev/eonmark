@@ -2,7 +2,7 @@
 
 This document specifies the shipped user interface of Eonmark: the `bevy_ui` HUD and its panels, the three menus, the picking rules that keep HUD clicks and world clicks apart, the control scheme, the camera, HiDPI handling, how health bars and selection rings are drawn, and the developer-only egui panels. Shipped builds use `bevy_ui` only; `bevy_egui` and `bevy-inspector-egui` exist behind the `dev` feature and never reach a release. Everything here lives in `crates/game` (`hud.rs`, `selection.rs`, `orders.rs`, `camera.rs`, `present.rs`, `macos_menu.rs`, `dev_tools.rs`; `menu/` arrives with the main menu in M5b). The M2 state is marked inline: the HUD is a skeleton (two bars and one button), selection and orders are complete, menus and states do not exist yet.
 
-Area: `area:ui` and `area:game`. Milestones: M2 (selection, orders, camera, HUD skeleton), M3b (command card, resource bar, build ghost), M4b (research panel, age indicator, health bars), M6 (speed, pause, New Game selector, game-over stats), M7 (minimap, menus, fonts, panels). See [../ROADMAP.md](../ROADMAP.md).
+Area: `area:ui` and `area:game`. Milestones: M2 (selection, orders, camera, HUD skeleton), M3b (command card, resource bar, build ghost), M4b (research panel, age indicator, health bars), M5a (attrition indicator, supply ring, annexation timer, the outcome overlay), M6 (speed, pause, New Game selector, game-over stats), M7 (minimap, menus, fonts, panels). See [../ROADMAP.md](../ROADMAP.md).
 
 ## Target numbers
 
@@ -36,7 +36,8 @@ M2 skeleton (`hud.rs`, done): a full-window root node with `Pickable::IGNORE` (`
 | Bottom left | Selection panel | One selected unit or building: name, HP, owner, current order; for a building, its training or research queue with progress and a Cancel per slot (per-slot Cancel is not built yet: help-wanted issue #41). Several units: a grid of kind icons with counts; clicking an icon narrows the selection to that kind. |
 | Bottom right | Command card | Buttons for what the selection can do: build (Yeomen), train (Muster Hall, Engine Yard, Town), research (Scriptorium, Watchtower), rally, stop, attack-move. Each button shows its cost. A button is disabled with a tooltip when the player cannot afford it, is pop-capped, lacks the age or tech, or has no building site; the tooltip text is the same reason string the sim uses in `CommandRejected`. |
 | Bottom centre | Minimap | A CPU-painted 128 x 128 `Image` in an `ImageNode` painted from the territory and fog grids plus unit and building dots each frame (M7, see [fog.md](fog.md)). Left click moves the camera. Right click orders the selection. |
-| Above the command card | Message line | The last rejection or notice for a few seconds: "Outside your borders", "Not enough Ore", "Population cap reached", "Town annexed". Since M4b also "Letters I researched", "Masonry Age reached", "Watchtower destroyed" and "Muster Hall lost" (see Notices below). |
+| Above the command card | Message line | The last rejection or notice for a few seconds: "Outside your borders", "Not enough Ore", "Population cap reached", "Town annexed". Since M4b also "Letters I researched", "Masonry Age reached", "Watchtower destroyed" and "Muster Hall lost", and since M5a the annexation notices, "Town is being annexed", "Annexation stopped", "Town annexed" and "Town was lost" (see Notices below). |
+| Above the message line | Annexation readout (M5a) | Each running annexation timer the local player is part of, with the time left until the flip: "Annexing Town: 0:42" or "Town is being annexed: 0:42" (`markers::annex_readout_text`, the `annex.attacking` and `annex.defending` strings; the seconds are rounded up, so it reads 0:01 in the last step). It sits 24 px above the message line because M4b's top bar has no room left; empty when no timer runs. |
 
 Costs and names on buttons come from `data/rules/*.ron` and `data/rules/strings/en.ron`; the HUD never hard-codes a number.
 
@@ -83,7 +84,32 @@ M4b (`economy_hud::notice_text`, done): besides rejections and "Scriptorium comp
 | `BuildingDestroyed` of the local player's building or site | "Muster Hall lost" |
 | `TownAtZeroHp` of the local player's Town | "Town has fallen" |
 
+M5a adds the annexation events, for a Town the local player owns or annexes (a flip between two other players says nothing):
+
+| Event | Notice |
+| --- | --- |
+| `AnnexationStarted` at the local player's Town, or by the local player | "Town is being annexed" |
+| `AnnexationReset` at the local player's Town, or of a timer the local player was running | "Annexation stopped" |
+| `TownAnnexed` to the local player | "Town annexed" (the text this table's message line row has named since M2) |
+| `TownAnnexed` from the local player | "Town was lost" |
+
+A reset names only the Town, so the message line remembers the attacker of each timer it heard start (`MessageState::annexing`) to tell the attacker too (`annexation_notices_name_the_owner_and_the_attacker`). `MatchDecided` gets no notice: the outcome overlay shows it.
+
 The building's name comes from the event's own `owner` and `kind` (M4a), since the building is gone by the time the event is read; another player's research and age stay silent. `economy_hud::HUD_KEYS` lists every `hud` string key the game reads with the placeholders it fills, and `every_hud_key_the_game_reads_exists_with_whitelisted_placeholders` holds `en.ron` to it (each key exists, its value uses only those placeholders, all on the strings file's whitelist) and checks that every literal key in the game's sources is listed.
+
+## Outcome overlay (M5a)
+
+M5a (`outcome.rs` and `sim_driver.rs`, done): the minimal end of a match; the full game-over screen is M6 (Menus, below).
+
+| Part | Behaviour |
+| --- | --- |
+| Deciding step | The sim emits `MatchDecided` once, in the step that decides the match (`victory::step`, 6e). `sim_driver::step_sim` then, in that same fixed step: finishes the replay recorder (`finish_recorder`: a final hash record at the deciding tick, the trailer, the writer joined), so the replay ends at the outcome and a `kill -9` after the overlay still leaves a verified file; prints `outcome: victory player=0 decisive=true reason=seat_captured tick=1628 hash=0x2c9a9ef52a5184d0` on stdout (`outcome_line`; `outcome: draw reason=... tick=... hash=...` for a draw); and inserts `MatchOver { result, hash, replay }` |
+| Freeze | From then on `drive_tick` returns `TickOutcome::Decided` for a live source (local input or a scenario's stream merged with it) without asking the source or stepping: the live game freezes at the outcome, whatever the player queues. A replay never freezes (`--headless-run` plays it to its recorded end; `replays_never_freeze_at_an_outcome`). `Time<Virtual>` is not paused, because the camera reads it; instead `present::settle_at_outcome` sets every unit's `Interp` to its final pose once, after the deciding step, so units, bars and rings stand still instead of swinging between their last two poses as the overstep keeps cycling |
+| Overlay | A full-window node (all four edges at 0 px), hidden until `MatchOver` appears, on the `palette::OUTCOME_SCRIM` slate at 80 % alpha at `GlobalZIndex(50)`, with five centred lines (`overlay_texts`): "Victory", "Defeat" or "Draw" for the local player (32 px); the reason, "The Seat was captured", "Every Town was lost", "Surrender" or "Territory at the time limit: 1248 tiles to 1245" (the local player's tiles first); "1:21, tick 1628"; "Final hash 0x2c9a9ef52a5184d0"; "Replay 20261023-041314-31.eonreplay". The hash is the one `sim-cli verify` prints for that replay |
+| Input | The overlay keeps the `bevy_ui` picking default, so it blocks clicks on the world, the panels and the card under it; `hud::WorldInputSet` (drag box, orders, placement, keys) and the command card's systems stop with `run_if(not(resource_exists::<MatchOver>))`, and an order mode is left. The camera still pans and zooms |
+| Framing | `--scenario capture_seat` opens at 40 m over (100, 64), the Seat's ring seen from the west with the Mangonels (`app::default_framing`) |
+
+The acceptance run: `just m5a-checks` (`scripts/m5a_checks.sh`, background mode) verifies the golden, runs `--scenario capture_seat` with a screenshot at the deciding tick, and requires the `outcome:` line's hash to equal both `capture_seat.hash` and `sim-cli verify` of the game's own replay ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m5a), [../screenshots/m5a-victory-overlay.png](../screenshots/m5a-victory-overlay.png)).
 
 ## Menus
 
@@ -91,9 +117,9 @@ The building's name comes from the event's own `owner` and `kind` (M4a), since t
 | --- | --- | --- |
 | Main menu | app start, Quit to menu | New Game (difficulty Easy/Standard/Hard, seed, faction: Freeholders), Quit. The seed field defaults to a fresh value and accepts a typed number so a match can be replayed by hand. |
 | Pause menu | Esc during a match | Resume, UI scale, volume, Borderless fullscreen toggle (`WindowMode::BorderlessFullscreen` with `Window::borderless_game`; exclusive fullscreen is never used), Quit to menu. The sim does not tick while this menu is open. |
-| Game over | `Sim::outcome()` returns `Some` | Victory or Defeat, decisive or tiebreak, duration, units lost by kind, Towns annexed, ages reached, minutes spent at the Yield Cap, the replay's final hash and file name, Play Again (same settings, new seed), Main menu. |
+| Game over | `Sim::outcome()` returns `Some` | Victory or Defeat, decisive or tiebreak, duration, units lost by kind, Towns annexed, ages reached, minutes spent at the Yield Cap, the replay's final hash and file name, Play Again (same settings, new seed), Main menu. M6; M5a ships the minimal overlay below, without the statistics and buttons. |
 
-States: `Menu`, `Skirmish`, `Paused`, `GameOver` in `app.rs`, arriving with the menus (M5b New Game, M6 pause and game over); at M2 the app starts straight into a skirmish (or the `--scenario`) and has no states. Pause through the menu and pause through Space are the same sim state; the menu adds the overlay.
+States: `Menu`, `Skirmish`, `Paused`, `GameOver` in `app.rs`, arriving with the menus (M5b New Game, M6 pause and game over); at M2 the app starts straight into a skirmish (or the `--scenario`) and has no states. M5a marks the end of a match with the `sim_driver::MatchOver` resource instead of a state. Pause through the menu and pause through Space are the same sim state; the menu adds the overlay.
 
 The macOS application menu (M2, `macos_menu.rs`) is not a `bevy_ui` menu: it is a native muda menu whose only custom item is `Quit Eonmark` (id `quit`, Cmd+Q) routed to `AppExit::Success`; see [macos-packaging.md](macos-packaging.md).
 
@@ -159,7 +185,15 @@ Text uses the Inter variable font through a variable `TextFont`; the OFL license
 
 Health bars and selection rings are separate flat entities keyed by `UnitId`, never children of moving unit entities. This keeps unit transforms flat, lets bars be billboarded and scaled by distance independently, and avoids re-parenting when a unit dies. Selection rings and move markers are retained gizmos; `ClusteredDecal` is unavailable on Metal and is not used.
 
-M2 (`selection.rs`, done): two `GizmoAsset` circles are built once in `create_ring_assets` (`RingAssets { selection, marker }`, radius `RING_RADIUS_PER_UNIT_RADIUS` = 1.4 times the unit's collision radius, laid flat with `present::flat_on_ground()`, colours `palette::SELECTION_RING` and `palette::MOVE_MARKER`). `sync_selection_rings` keeps one `(SelectionRing(UnitId), Gizmo, Transform)` entity per selected unit and moves it to the unit's interpolated position each frame; `spawn_move_marker` places a `MoveMarker { expires_at }` ring at the order point and `expire_move_markers` despawns it. Units themselves are one shared mesh and one material per `(kind, team)` (`present::UnitVisuals`), tinted with `palette::TEAM[slot]`. The attrition indicator and supply radius ring (M5a) and the annexation timer (M5a) are drawn the same way. Bars follow the owner's fog visibility (see [fog.md](fog.md)).
+M2 (`selection.rs`, done): two `GizmoAsset` circles are built once in `create_ring_assets` (`RingAssets { selection, marker }`, radius `RING_RADIUS_PER_UNIT_RADIUS` = 1.4 times the unit's collision radius, laid flat with `present::flat_on_ground()`, colours `palette::SELECTION_RING` and `palette::MOVE_MARKER`). `sync_selection_rings` keeps one `(SelectionRing(UnitId), Gizmo, Transform)` entity per selected unit and moves it to the unit's interpolated position each frame; `spawn_move_marker` places a `MoveMarker { expires_at }` ring at the order point and `expire_move_markers` despawns it. Units themselves are one shared mesh and one material per `(kind, team)` (`present::UnitVisuals`), tinted with `palette::TEAM[slot]`. The attrition indicator and supply radius ring (M5a) and the annexation timer (M5a) are drawn the same way (below). Bars follow the owner's fog visibility (see [fog.md](fog.md)).
+
+M5a (`markers.rs`, done), all flat on the ground at `RING_Y`, steady (nothing pulses), no new hue:
+
+| Marker | Look and rule |
+| --- | --- |
+| Attrition indicator | A diamond (a gizmo circle of 4 segments) in `palette::ATTRITION`, the Yield Cap amber #D29B3B, under every unit with `exposed_ticks > 0`, the sim's own bleeding state, which stays on between pulses. Its half-diagonal is 1.8 unit radii, outside the 1.4 of the selection ring: at the plan's 0.8 the diamond would lie inside the unit's own footprint, under its body. One retained `Gizmo` entity per `UnitId`, never a child, placed at the unit's interpolated pose every frame (`sync_attrition_markers`) and despawned when the exposure ends or the unit dies. [../screenshots/m5a-attrition.png](../screenshots/m5a-attrition.png) |
+| Supply ring | A Timber circle (`palette::SUPPLY_RING`, #8B6B4A, the Wain's role colour) of radius `supply_radius_tiles + 0.5` = 14.5 m, the outer edge of the tiles step 5b' counts as covered, around each selected unit of a kind that `supplies`, centred on the tile it stands on (the sim's disc is tile to tile, so the ring steps a tile at a time with the Wain). One retained gizmo per `UnitId` (`sync_supply_rings`). The supply hatching in the field texture's A channel waits for M7 with fog (M5a owner decision 10) |
+| Annexation timer | For each Town under a running timer (`SimView::annexation`), an immediate-mode track circle in `palette::ANNEX_TRACK` (#3A3A3F at 80 %) of radius `max(w, h) / 2 + 2` m (3.5 m for a Town, just outside the units on the tiles around it) and the attacker's team-coloured arc over it, filled clockwise from north by `(ticks + overstep) / total`; both 3 px wide in their own gizmo group (`AnnexGizmos`), since the default group draws the 1 px grid. [../screenshots/m5a-markers.png](../screenshots/m5a-markers.png) shows it with the supply ring and the readout |
 
 Health bars appear in M4b together with distinct primitive silhouettes per unit kind; from M7 the primitives are replaced by glTF through `data/visuals.ron` without touching the HUD.
 
@@ -221,6 +255,10 @@ M4b:
 
 Line 1 was observed on Linux (ROADMAP M4b, plan decision 21, the M3b precedent): the `enemy_outpost_walkthrough` golden and its windowed run, and `scripts/m4b_outpost_drive.sh` playing the sequence on `--scenario enemy_outpost` with real X input, its replay verifying ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m4b)). Line 2 needs the dev Mac (owner decisions 2 and 3); the [owner's Mac checklist](../PLAYTEST.md#owners-mac-checklist-m4b) has the commands. Its Linux proxy under lavapipe, which renders in software at about 6 fps and so can neither pass nor fail the line: the dev build's background run of `--scenario enemy_outpost` printed `hierarchy_check: ok frames=1592 bar_targets_max=37 rings_max=0` and `frame_stats: fight frames=134 seconds=22.29 mean=166.34 p95=196.50 max=239.82 fps=6.0 ticks=151..576 on_screen_max=400 on_screen_min=400/400 units_at_first_hit=200/200` on 2026-10-22, at the S5 review-fix head (`on_screen_min=400/400`: every armed unit alive on screen in every timed frame). The sim's share of the frame is the M4a combat bench, `cargo run -p sim-cli --release -- bench --units 400 --ticks 1200 --combat`: a step mean of 0.51 to 0.56 ms and about 1.1 ms per fighting tick on the same VM, under the 5 ms budget ([../BUILD_TIMES.md](../BUILD_TIMES.md) has the rows).
 
+M5a:
+
+- [ ] `cargo run -p game --features dev -- --scenario capture_seat` shows the victory overlay with the final hash and the recorded replay verifies to it.
+
 M6:
 
 - [ ] Game speed x4 and pause work and the replay verifies with the same final hash as the x1 replay of the same scripted input (`--scenario scripted_match --speed 4`).
@@ -241,6 +279,8 @@ cargo run --release -p game -- --scenario economy_walkthrough
 cargo run -p game --features dev -- --scenario enemy_outpost
 cargo run --release -p game -- --scenario enemy_outpost
 scripts/m4b_outpost_drive.sh target/ci/eonmark target/release/sim-cli <out-dir>   # Linux, Xvfb + lavapipe
+cargo run -p game --features dev -- --scenario capture_seat
+just m5a-checks   # M5A_SECONDS=240 under lavapipe
 ```
 
 ## Open questions
@@ -249,4 +289,4 @@ scripts/m4b_outpost_drive.sh target/ci/eonmark target/release/sim-cli <out-dir> 
 - Whether the minimap draws the camera's view rectangle. Not in the design; cheap to add in M7 if the owner wants it.
 - Whether game speed x1/x2/x4 ships in release builds or stays `dev`-only. Listed as an owner decision in [../ROADMAP.md](../ROADMAP.md); this document assumes release.
 - Tooltip delay and whether tooltips also appear on enabled buttons (cost breakdown). M3b decides; `good first issue` for hover states exists.
-- Whether the selection panel shows a unit's attrition state as text in addition to the indicator on the unit (M5a).
+- Whether the selection panel shows a unit's attrition state as text in addition to the indicator on the unit. M5a ships the indicator only (`SimView::attrition` has the pulse, its interval and the owner for such a line); the text waits for the owner's playtest.

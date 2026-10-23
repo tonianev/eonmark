@@ -117,7 +117,7 @@ $ git status --short
 
 Only `economy_second_town` changes its final hash: it is the only fixture with a worked Croft. A test that hard-codes a number the data controls fails this walkthrough; read the value from `Rules` instead.
 
-Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, and since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, so with the repository at `rules_version` 20 and the bump to 21 of step 2, step 3 now prints a line of the form `OK rules_version=21 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 maps=plains_1v1 strings=en` (before the bump it prints `rules_version=20`).
+Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, and since M5b (`rules_version` 21) it counts the bot data under `data/ai/` (`personalities`, `build_orders`), which is in `rules_hash` too, so with the repository at `rules_version` 21 and the bump to 22 of step 2, step 3 now prints a line of the form `OK rules_version=22 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en` (before the bump it prints `rules_version=21`). An edit under `data/ai/` takes the same path: bump `rules_version`, `just rerecord`, run the tests.
 
 ## Golden replay fixtures
 

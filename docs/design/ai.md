@@ -25,10 +25,12 @@ All numbers are starting values and may move during the two to three M6 tuning i
 `AiController` is defined in `crates/sim` (`ai_hook.rs`) and implemented in `crates/ai`:
 
 ```text
-trait AiController {
-    fn think(&mut self, player: PlayerId, view: &SimView<'_>) -> Vec<Command>;
+trait AiController: Send {
+    fn think(&mut self, player: PlayerId, view: &SimView<'_>, memory: &mut AiMemory) -> Vec<Command>;
 }
 ```
+
+The `memory` parameter arrived in M5b (`SIM_VERSION` 17, owner decision 1 of 2026-10-23): it is the player's own `Player::ai_memory`, below.
 
 The controller is injected at `Sim::new(setup, rules, Box<dyn AiController>)` and called from inside `Sim::step`, once per AI player per tick, in `PlayerId` order, before that tick's queued commands are applied. The commands it returns are stamped with the AI's `PlayerId` and a per-player sequence number and enter the same delayed queue as human commands: issued at tick N, applied at tick N + `cmd_delay_ticks`. They are validated like any other command and may be rejected with `SimEvent::CommandRejected`; the bot must tolerate rejection and must not loop on it.
 
@@ -38,9 +40,9 @@ Because the bot runs inside the step, its commands are not written to the replay
 
 Determinism constraints on the crate (enforced by `crates/ai/clippy.toml` and CI): no `f32`/`f64`, no `HashMap`/`HashSet`, no `Instant`/`SystemTime`, no `rand::random`/`thread_rng`, no engine crates. Ties are broken by the lowest id or lowest tile index. The design permits randomness only from the single `Pcg32` inside the sim; `think` receives a shared `SimView`, so if a later rule needs a random draw the sim must expose one through the view (for example a per-tick `u64` drawn before `think` runs). No v0.1 rule needs it.
 
-Bot state. The controller may keep private state across ticks (build-order cursor, wave timers, last known enemy positions). `AiController` has no snapshot or restore method, so this state is not captured by `Sim::snapshot()`. In v0.1 nothing restores a match with bots mid-way (fixtures are verified from tick 0), but the bot should still derive what it can from `SimView` each call, so that the private state stays small. See open questions.
+Bot state (M5b). What a bot must remember between plans (wave rosters and timers, the defend latch, the military latch, blocked-step cooldowns, a chosen site) lives in the player's `AiMemory`, opaque bytes the bot encodes itself (the Standard bot uses postcard), stored in `Player::ai_memory` and hashed in the `meta` sub-hash. Step 2 takes every AI player's memory out of the state before it builds the view and hands each bot only its own, so no bot reads another's; a surrendered bot neither thinks nor has its memory touched. Because the memory is hashed state, `Sim::snapshot()` carries it and a restore reproduces the bot's next decision exactly, a lockstep peer agrees on it, and a bot divergence names `meta`. Everything that can be re-derived from `SimView` is recomputed every plan, so the memory stays small (`AI_MEMORY_GUIDE_BYTES`, 4096, is the design ceiling; the default Standard memory encodes to no bytes). Any other state a controller keeps must be a pure function of immutable inputs: the Standard bot's `MapAnalysis` is built once from the map's terrain and starts, the rules and its personality, never from the live view, so a controller rebuilt mid-match issues the same commands. Which bot drives which slot is in the replay header (`MatchSetup.ai_seats`: each AI slot's `bot`, `passive` or `standard`, and `personality`, a `data/ai/personalities.ron` id), and `ai::controller_for` builds the controller from it for every re-simulation. Bot code is versioned by `SIM_VERSION` (owner decision 2): from 17 on, a `crates/ai` change that can alter a decision bumps it, and the fixture policy then forces the `rules_version` bump and a re-record.
 
-Cadence. `think` is called every tick. Keeping under 0.5 ms mean means the bot does its planning on a cadence rather than every call; the natural cadence is the 10-tick influence-map refresh. The cadence and any per-rule timers are data in `difficulty.ron` or `personalities.ron`, not constants in Rust.
+Cadence. `think` is called every tick. Keeping under 0.5 ms mean means the bot does its planning on a cadence rather than every call; the natural cadence is the 10-tick influence-map refresh. The cadence and any per-rule timers are data in `difficulty.ron` or `personalities.ron`, not constants in Rust. From M5b the Standard bot plans every `think_every_ds` (5 ds, 10 ticks) on ticks where `tick % every == player x every / players` (P0 on 0, 10, ..., P1 on 5, 15, ...), and `rules::Rules::load` requires that cadence in ticks to exceed `cmd_delay_ticks`, so a plan's commands apply before the next plan reads the view. An off-cadence call, and every call once the match is decided, returns at once.
 
 ## Architecture of the scripted bot (M5b)
 
@@ -175,7 +177,7 @@ M6:
 
 ## Open questions
 
-- `AiController` has no snapshot/restore. If a feature ever restores a match with bots mid-way (save/load is out of scope for v0.1), either add `snapshot()`/`restore()` to the trait or move the bot's cursor and timers into hashed sim state. Record the decision in [../DETERMINISM.md](../DETERMINISM.md).
+- `AiController` has no snapshot/restore. If a feature ever restores a match with bots mid-way (save/load is out of scope for v0.1), either add `snapshot()`/`restore()` to the trait or move the bot's cursor and timers into hashed sim state. Record the decision in [../DETERMINISM.md](../DETERMINISM.md). Answered in M5b (owner decision 1 of 2026-10-23): the timers and latches are hashed sim state, `Player::ai_memory`, and the cursor is re-derived every plan (see "Where the bot runs" and DETERMINISM.md, "What M5b adds").
 - The difficulty cheat's bonus bundle amounts per interval are not fixed by the design; set them at M6 so that Standard beats Easy and Hard beats Standard at the 15/20 bar, then record them in this document's difficulty table.
 - Whether the enemy Seat's position may be assumed from the mirrored map (as above) or must be scouted. Assuming it is simpler and the map is symmetric; a second map would need a scouting rule.
 - One difficulty file or one file per level (`hard.ron`). Pick at M6.

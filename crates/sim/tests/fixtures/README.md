@@ -26,6 +26,23 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-23 at `rules_version` 21, `SIM_VERSION` 17 with
+`just rerecord` (M5b bot plumbing: the header gained `ai_seats` as its last
+field and every `Player` the hashed `ai_memory`, in the `meta` sub-hash;
+`data/ai` joined `rules_hash`). No fixture has a bot that writes a memory,
+so nothing behaves differently: a per-tick `sim-cli hash-dump --every 1`
+of each fixture as recorded at `SIM_VERSION` 16, run by that binary with its
+own `data/`, against the re-recorded fixture run by the `SIM_VERSION` 17
+binary with the current `data/`, differs in the whole hash and the `meta`
+column on every tick and in no other column. Every `.hash` file changes for
+that reason only: `capture_seat` `0xbd9f9df3f98fcc23`, `combat_skirmish`
+`0x9c42bb7bfd4dcef3`, `economy_second_town` `0x4b3429bcfd9ec100`,
+`economy_walkthrough` `0x88bb89e34ec941bd`, `enemy_outpost_walkthrough`
+`0xd0684c93f3398915`, `group_spiral` `0xf468c100c2b042e1`, `move_500`
+`0x02e11c8e91350d52`, `move_500_short` `0x46eaeacec41e1b86`,
+`snapshot_restore` `0x9625510823fec01f`, `stalemate_45min`
+`0x261fad6cc4323139`.
+
 Recorded 2026-10-23 at `rules_version` 20, `SIM_VERSION` 16 with
 `just rerecord` (M5a annexation and outcome: `TownState` gained the hashed
 `hold` and `State` the hashed `outcome`, in the `meta` sub-hash; step 5d

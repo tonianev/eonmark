@@ -5,17 +5,25 @@
 //! Wains come first: while the bot has fewer than `wains_per_wave` alive
 //! or queued, one is trained (or saved up for) at a complete trainer of
 //! the supply kind. Then every complete, uncontested trainer with fewer
-//! than `max_queue_per_building` entries trains the army-mix kind it can
-//! train with the largest deficit: kind `k`'s deficit is
+//! than `max_queue_per_building` entries trains one army-mix kind. Kind
+//! `k`'s deficit over a set of mix kinds is
 //! `weight_k × (N + 1) − have_k × W`, `have_k` its units alive or queued
 //! outside the attack wave, `N` and `W` the sums of `have` and of the
-//! weights over the mix kinds trainable this plan (a free trainer accepts
-//! the kind and the unreserved stock pays for it). A kind at or above its
-//! share never trains, so an Engine Yard never fills up with Mangonels;
-//! and a kind that cannot be trained this plan (its trainer busy, its cost
-//! not affordable) leaves the share base, so a Mangonel short of Lumber
-//! does not stall the Muster Hall. Ties go to the lowest kind id; a kind
-//! the pop cap or the unreserved stock does not allow is skipped.
+//! weights over the set. Two sets are used:
+//!
+//! - **the share base**: the mix kinds the bot can field at all now, those
+//!   with a complete, uncontested trainer, free or busy, that accepts the
+//!   kind and whose cost the plan's unreserved stock pays. A kind whose
+//!   deficit over the base is negative never trains, so an Engine Yard
+//!   never fills up with Mangonels while the Muster Hall is busy;
+//! - **the trainable mix**: the base kinds trainable this plan (a free
+//!   trainer accepts the kind and the stock pays for it). A trainer
+//!   trains the kind it can train with the largest positive deficit over
+//!   the trainable mix (ties to the lowest kind id), so a busy or
+//!   short-of-stock trainer's kinds do not hold the free ones back, and a
+//!   Mangonel short of Lumber does not stall the Muster Hall.
+//!
+//! A kind the pop cap or the unreserved stock does not allow is skipped.
 //!
 //! The rally is the first passable own tile of the spiral around the map
 //! analysis' rally seed ([`Ctx::rally`]); every trainer of a non-civilian
@@ -69,6 +77,40 @@ fn trainable_now(ctx: &Ctx<'_>, kind: UnitKindId, used: &BTreeSet<BuildingId>) -
         })
 }
 
+/// Whether `kind` is in the share base: an own complete, uncontested
+/// trainer of it, free or busy, accepts it (a full sim queue counts as
+/// accepting) and the plan's unreserved stock pays for it.
+fn in_share_base(ctx: &Ctx<'_>, kind: UnitKindId) -> bool {
+    let rules = ctx.view.rules();
+    let Some(trainer) = rules
+        .unit_kind(kind.0)
+        .and_then(|d| rules.building_kind_by_id(&d.trainer))
+    else {
+        return false;
+    };
+    ctx.facts
+        .complete
+        .get(&BuildingKindId(trainer.0))
+        .into_iter()
+        .flatten()
+        .filter(|b| !ctx.facts.contested.contains(b))
+        .any(|b| match ctx.view.check_train(ctx.me, *b, kind) {
+            Ok(cost) => ctx.ledger.affords(&cost),
+            Err(sim::RejectReason::QueueFull) => {
+                ctx.ledger.affords(&ctx.view.unit_cost(ctx.me, kind))
+            }
+            Err(_) => false,
+        })
+}
+
+/// Kind `i`'s deficit over the kinds of `set` (indices into `mix` and
+/// `have`): `weight_i × (N + 1) − have_i × W`.
+fn deficit(mix: &[(UnitKindId, u32)], have: &[u32], set: &[usize], i: usize) -> i64 {
+    let n: i64 = set.iter().map(|j| i64::from(have[*j])).sum();
+    let w: i64 = set.iter().map(|j| i64::from(mix[*j].1)).sum();
+    i64::from(mix[i].1) * (n + 1) - i64::from(have[i]) * w
+}
+
 /// Units of `kind` alive or queued outside the active wave.
 fn home_and_queued(ctx: &Ctx<'_>, mem: &BotMemory, kind: UnitKindId) -> u32 {
     let in_wave: u32 = mem.wave.as_ref().map_or(0, |w| {
@@ -120,30 +162,34 @@ pub fn produce(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         .army_mix
         .iter()
         .filter_map(|m| Some((unit_kind_id(ctx, &m.kind)?, m.weight)))
-        .filter(|(k, _)| trainable_now(ctx, *k, &used))
+        .filter(|(k, _)| in_share_base(ctx, *k))
         .collect();
-    if mix.is_empty() {
+    let base: Vec<usize> = (0..mix.len()).collect();
+    let now: Vec<usize> = base
+        .iter()
+        .copied()
+        .filter(|i| trainable_now(ctx, mix[*i].0, &used))
+        .collect();
+    if now.is_empty() {
         return;
     }
     let mut have: Vec<u32> = mix
         .iter()
         .map(|(k, _)| home_and_queued(ctx, mem, *k))
         .collect();
-    let w_sum: i64 = mix.iter().map(|(_, w)| i64::from(*w)).sum();
     let mut trainers: BTreeSet<BuildingId> = BTreeSet::new();
-    for (k, _) in &mix {
-        trainers.extend(free_trainers(ctx, *k));
+    for i in &now {
+        trainers.extend(free_trainers(ctx, mix[*i].0));
     }
     for b in trainers {
         if used.contains(&b) || ctx.commands_left == 0 {
             continue;
         }
-        let n: i64 = have.iter().map(|h| i64::from(*h)).sum();
-        let mut order: Vec<(i64, UnitKindId, usize)> = mix
+        let mut order: Vec<(i64, UnitKindId, usize)> = now
             .iter()
-            .enumerate()
-            .map(|(i, (k, w))| (i64::from(*w) * (n + 1) - i64::from(have[i]) * w_sum, *k, i))
+            .map(|i| (deficit(&mix, &have, &now, *i), mix[*i].0, *i))
             .filter(|(d, _, _)| *d > 0)
+            .filter(|(_, _, i)| deficit(&mix, &have, &base, *i) >= 0)
             .collect();
         order.sort_by_key(|(d, k, _)| (core::cmp::Reverse(*d), *k));
         for (_, k, i) in order {
@@ -260,7 +306,8 @@ mod tests {
 
     /// A kind at or above its share of the army is never trained: ten
     /// Skirmishers make the Muster Hall train a Bowman; five Mangonels
-    /// among nine units leave the Engine Yard idle.
+    /// among nine units leave the Engine Yard idle, also while the Muster
+    /// Hall is busy training.
     #[test]
     fn no_training_at_negative_deficit() {
         let r = crate::testkit::rules();
@@ -298,13 +345,38 @@ mod tests {
             grant_all(&r, P0, 1000),
         ]
         .concat();
-        let a = Arena::frozen(standard_vs_passive(&r), setup);
+        let mut a = Arena::frozen(standard_vs_passive(&r), setup);
         let ey = a.buildings_of(P0, "engine_yard")[0];
+        let mh = a.buildings_of(P0, "muster_hall")[0];
         let mut ctx = a.ctx(P0);
         produce(&mut ctx, &mut mem);
         let t = trains(&ctx.into_commands());
         assert!(t.iter().all(|(b, _)| *b != ey), "{t:?}");
         assert_eq!(t.len(), 1, "the Muster Hall still trains: {t:?}");
+
+        // The same army while the Muster Hall trains (its queue of one is
+        // full, as it is most of the time): its kinds still count toward
+        // the shares, so the free Engine Yard adds no sixth Mangonel, plan
+        // after plan.
+        a.issue(
+            P0,
+            vec![Command::Train {
+                building: mh,
+                kind: unit_kind(&r, "skirmisher"),
+            }],
+        );
+        assert_eq!(a.sim.view().building(mh).unwrap().queue.len(), 1);
+        for round in 0..4 {
+            let mut ctx = a.ctx(P0);
+            produce(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            assert!(
+                trains(&cmds).iter().all(|(b, _)| *b != ey),
+                "round {round}: five Mangonels of nine armed units, yet {cmds:?}"
+            );
+            a.issue(P0, cmds);
+        }
+        assert_eq!(a.units_of(P0, "mangonel").len(), 5);
     }
 
     /// Production waits for the `Military` latch or a defence.

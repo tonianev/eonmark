@@ -171,7 +171,10 @@ impl Plugin for CommandCardPlugin {
                     update_tooltip,
                     update_selection_info,
                 )
-                    .chain(),
+                    .chain()
+                    // The card freezes with the world at the outcome (M5a);
+                    // the overlay blocks its clicks.
+                    .run_if(not(resource_exists::<crate::sim_driver::MatchOver>)),
             );
     }
 }

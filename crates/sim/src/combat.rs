@@ -6,7 +6,9 @@
 //! Hashed state lives on the units and buildings: `Unit::damage_taken`,
 //! `ready_at`, `target` and `intent`, and `Building::hp` and `ready_at`.
 //! Nothing else carries over between ticks: `Stats` and `Plan` are
-//! rebuilt inside every step, so a restore has nothing to rebuild.
+//! rebuilt inside every step, and the rules-only `CombatTables` that
+//! `Stats` borrows are derived from the rules alone (built in `Sim::new`
+//! and `Sim::rebuild_derived`), so a restore has nothing else to rebuild.
 //!
 //! Each tick, inside step 5 of `Sim::step`:
 //!
@@ -170,14 +172,14 @@ struct ShooterStats {
     cooldown_ticks: u32,
 }
 
-/// Every player's [`UnitStats`] per kind, the counter table and the
-/// shooters, built once at the start of step 5 and read by `think` and
-/// `resolve`. Research completes in step 6b, so the table holds for the
-/// whole of step 5.
-pub(crate) struct Stats {
+/// The rules-only combat tables: the counter table, each kind's
+/// preference, the largest unit radius, the shooters and the variance.
+/// They depend on the rules alone, so the sim builds them once, in
+/// `Sim::new`, and again in `Sim::rebuild_derived` (derived state, never
+/// hashed or snapshotted), instead of in every step; [`Stats`] borrows
+/// them.
+pub(crate) struct CombatTables {
     kinds: usize,
-    /// `[player * kinds + kind]`.
-    units: Vec<UnitStats>,
     /// Permille, `[attacker * kinds + defender]`.
     counters: Vec<i64>,
     /// Permille against any building, `[attacker]`.
@@ -193,17 +195,10 @@ pub(crate) struct Stats {
     variance: i64,
 }
 
-impl Stats {
-    /// Resolve every player's stats for every kind.
-    pub(crate) fn new(state: &State, rules: &Rules) -> Stats {
+impl CombatTables {
+    /// Build the tables from the rules.
+    pub(crate) fn new(rules: &Rules) -> CombatTables {
         let kinds = rules.units.len();
-        let kind_id = |k: usize| UnitKindId(u16::try_from(k).expect("validated unit count"));
-        let mut units = Vec::with_capacity(state.players.len() * kinds);
-        for p in &state.players {
-            for k in 0..kinds {
-                units.push(unit_stats(state, rules, p.id, kind_id(k)));
-            }
-        }
         let mut counters = Vec::with_capacity(kinds * kinds);
         let mut vs_buildings = Vec::with_capacity(kinds);
         for a in &rules.units {
@@ -237,9 +232,8 @@ impl Stats {
                 })
             })
             .collect();
-        Stats {
+        CombatTables {
             kinds,
-            units,
             counters,
             vs_buildings,
             prefer,
@@ -248,27 +242,67 @@ impl Stats {
             variance: i64::from(rules.damage_variance_permille),
         }
     }
+}
+
+/// Every player's [`UnitStats`] per kind, with the rules-only
+/// [`CombatTables`], built at the start of step 5 and read by `think` and
+/// `resolve`. Research completes in step 6b, so the table holds for the
+/// whole of step 5.
+pub(crate) struct Stats<'a> {
+    tables: &'a CombatTables,
+    /// `[player * kinds + kind]`.
+    units: Vec<UnitStats>,
+}
+
+impl<'a> Stats<'a> {
+    /// Resolve every player's stats for every kind.
+    pub(crate) fn new(state: &State, rules: &Rules, tables: &'a CombatTables) -> Stats<'a> {
+        let kinds = tables.kinds;
+        let kind_id = |k: usize| UnitKindId(u16::try_from(k).expect("validated unit count"));
+        let mut units = Vec::with_capacity(state.players.len() * kinds);
+        for p in &state.players {
+            for k in 0..kinds {
+                units.push(unit_stats(state, rules, p.id, kind_id(k)));
+            }
+        }
+        Stats { tables, units }
+    }
 
     /// Player `p`'s stats for `kind`.
     pub(crate) fn unit(&self, p: PlayerId, kind: UnitKindId) -> &UnitStats {
-        &self.units[usize::from(p.0) * self.kinds + usize::from(kind.0)]
+        &self.units[usize::from(p.0) * self.tables.kinds + usize::from(kind.0)]
     }
 
     fn counter(&self, attacker: UnitKindId, defender: UnitKindId) -> i64 {
-        self.counters[usize::from(attacker.0) * self.kinds + usize::from(defender.0)]
+        self.tables.counters[usize::from(attacker.0) * self.tables.kinds + usize::from(defender.0)]
+    }
+
+    /// Permille of `attacker`'s hits against any building.
+    fn vs_buildings(&self, attacker: UnitKindId) -> i64 {
+        self.tables.vs_buildings[usize::from(attacker.0)]
+    }
+
+    /// The largest radius of any unit kind.
+    fn max_radius(&self) -> Fx {
+        self.tables.max_radius
+    }
+
+    /// `damage_variance_permille`.
+    fn variance(&self) -> i64 {
+        self.tables.variance
     }
 
     /// The tier of a target, a building or a unit, for an attacker of
     /// `kind`: 0 is taken first (enemy units, or enemy buildings for a kind
     /// with `prefer: Buildings`).
     fn tier(&self, kind: UnitKindId, building: bool) -> u8 {
-        let buildings_first = self.prefer[usize::from(kind.0)] == Prefer::Buildings;
+        let buildings_first = self.tables.prefer[usize::from(kind.0)] == Prefer::Buildings;
         u8::from(building != buildings_first)
     }
 
     /// The shot of building kind `kind`, if it shoots.
     fn shooter(&self, kind: BuildingKindId) -> Option<ShooterStats> {
-        self.shooters[usize::from(kind.0)]
+        self.tables.shooters[usize::from(kind.0)]
     }
 }
 
@@ -658,7 +692,7 @@ pub(crate) fn think(
     state: &mut State,
     rules: &Rules,
     grid: &SpatialGrid,
-    stats: &Stats,
+    stats: &Stats<'_>,
     tick: u32,
 ) -> Plan {
     let mut plan = Plan::default();
@@ -699,7 +733,7 @@ pub(crate) fn think(
 fn think_explicit(
     state: &mut State,
     rules: &Rules,
-    stats: &Stats,
+    stats: &Stats<'_>,
     id: UnitId,
     tick: u32,
     plan: &mut Plan,
@@ -829,7 +863,7 @@ struct Candidate {
 fn best_candidates(
     state: &State,
     grid: &SpatialGrid,
-    stats: &Stats,
+    stats: &Stats<'_>,
     targetable: &[Targetable],
     u: &Unit,
     attack: &AttackStats,
@@ -869,7 +903,7 @@ fn best_candidates(
         } else {
             attack.reach
         };
-        grid.for_each_in(u.pos, edge + u.radius + stats.max_radius, |other| {
+        grid.for_each_in(u.pos, edge + u.radius + stats.max_radius(), |other| {
             let Some(o) = state.units.get(&other).filter(|o| o.owner != u.owner) else {
                 return;
             };
@@ -927,7 +961,7 @@ fn think_acquiring(
     state: &mut State,
     rules: &Rules,
     grid: &SpatialGrid,
-    stats: &Stats,
+    stats: &Stats<'_>,
     targetable: &[Targetable],
     id: UnitId,
     scratch: &mut Vec<Candidate>,
@@ -1007,7 +1041,7 @@ fn think_shooters(
     state: &mut State,
     rules: &Rules,
     grid: &SpatialGrid,
-    stats: &Stats,
+    stats: &Stats<'_>,
     tick: u32,
     plan: &mut Plan,
 ) {
@@ -1030,7 +1064,7 @@ fn think_shooters(
         let half = Fx::from_ratio(i32::from(w.max(h)), 2);
         let mut best = i64::MAX;
         nearest.clear();
-        grid.for_each_in(centre, half + shot.range + stats.max_radius, |uid| {
+        grid.for_each_in(centre, half + shot.range + stats.max_radius(), |uid| {
             let Some(u) = state.units.get(&uid).filter(|u| u.owner != owner) else {
                 return;
             };
@@ -1063,7 +1097,7 @@ fn think_shooters(
 pub(crate) fn resolve(
     state: &mut State,
     rules: &Rules,
-    stats: &Stats,
+    stats: &Stats<'_>,
     aims: &[(BuildingId, UnitId)],
     tick: u32,
     events: &mut Vec<SimEvent>,
@@ -1086,7 +1120,7 @@ pub(crate) fn resolve(
         }
         let counter = match aim {
             Aim::Unit { kind: defender, .. } => stats.counter(u.kind, defender),
-            Aim::Building { .. } => stats.vs_buildings[usize::from(u.kind.0)],
+            Aim::Building { .. } => stats.vs_buildings(u.kind),
         };
         let damage = i64::from(attack.damage)
             .checked_mul(counter)
@@ -1114,11 +1148,11 @@ pub(crate) fn resolve(
     }
     let mut dealt: BTreeMap<TargetId, i64> = BTreeMap::new();
     for (attacker, target, base, cooldown) in hits {
-        let variance = if stats.variance == 0 {
+        let variance = if stats.variance() == 0 {
             1000
         } else {
-            let span = u32::try_from(2 * stats.variance + 1).expect("variance <= 500");
-            1000 + i64::from(rng_index(&mut state.rng, span)) - stats.variance
+            let span = u32::try_from(2 * stats.variance() + 1).expect("variance <= 500");
+            1000 + i64::from(rng_index(&mut state.rng, span)) - stats.variance()
         };
         let damage = base * variance / 1000;
         let ready_at = tick.checked_add(cooldown).expect("tick fits u32");
@@ -1195,7 +1229,12 @@ pub(crate) fn apply_damage(
 /// destroyed building was attributed to is then re-derived, in id order,
 /// and may fall back to tier 1. Emits `UnitDied`, `BuildingDestroyed` and
 /// one `TerritoryChanged` when a border source went.
-pub(crate) fn reap(state: &mut State, rules: &Rules, stats: &Stats, events: &mut Vec<SimEvent>) {
+pub(crate) fn reap(
+    state: &mut State,
+    rules: &Rules,
+    stats: &Stats<'_>,
+    events: &mut Vec<SimEvent>,
+) {
     let dead: Vec<UnitId> = state
         .units
         .values()

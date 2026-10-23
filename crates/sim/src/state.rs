@@ -4,7 +4,8 @@
 //! `State` is hashed and snapshotted. Derived structures live outside it on
 //! [`Sim`] or behind `#[serde(skip)]` and are rebuilt by the private
 //! `Sim::rebuild_derived`, which [`Sim::restore`] calls before returning: the
-//! map's connected components, the spatial grid, and the (cleared) path cache.
+//! map's connected components, the spatial grid, the rules-only combat
+//! tables, and the (cleared) path cache.
 //!
 //! Tick order inside [`Sim::step`]:
 //!
@@ -867,6 +868,8 @@ pub struct Sim {
     state: State,
     /// Derived: rebuilt every tick and on restore.
     grid: SpatialGrid,
+    /// Derived from the rules alone: built here and in `rebuild_derived`.
+    combat_tables: combat::CombatTables,
     /// Whether the (derived) path cache is in use; survives restore.
     path_cache_enabled: bool,
     /// Not hashed; drained by the caller.
@@ -929,12 +932,14 @@ impl Sim {
             town::apply_standard_start(&mut state, &rules, def, rules.tick_rate_hz);
         }
         let grid = SpatialGrid::new(&state.map);
+        let combat_tables = combat::CombatTables::new(&rules);
         Self {
             setup,
             rules,
             ai,
             state,
             grid,
+            combat_tables,
             path_cache_enabled: true,
             events: Vec::new(),
         }
@@ -1034,7 +1039,7 @@ impl Sim {
         //    the back of the queue and could starve it under a saturated
         //    budget. Its periodic timer is pushed back either way.
         self.grid.rebuild(&self.state.units);
-        let stats = combat::Stats::new(&self.state, &self.rules);
+        let stats = combat::Stats::new(&self.state, &self.rules, &self.combat_tables);
         let plan = combat::think(&mut self.state, &self.rules, &self.grid, &stats, tick);
         let repath = movement::step(
             &mut self.state.units,
@@ -1623,13 +1628,15 @@ impl Sim {
         Ok(())
     }
 
-    /// Rebuild every unhashed derived structure from `state`: map components,
-    /// spatial grid, and the path cache (empty, with its capacity and the
-    /// sim's enabled flag re-applied since `serde(skip)` reset it).
+    /// Rebuild every unhashed derived structure from `state` and the rules:
+    /// map components, spatial grid, the combat tables and the path cache
+    /// (empty, with its capacity and the sim's enabled flag re-applied since
+    /// `serde(skip)` reset it).
     fn rebuild_derived(&mut self) {
         self.state.map.rebuild_components();
         self.grid = SpatialGrid::new(&self.state.map);
         self.grid.rebuild(&self.state.units);
+        self.combat_tables = combat::CombatTables::new(&self.rules);
         self.state.pathing.cache =
             crate::pathing::PathCache::new(self.rules.path_cache_entries, self.path_cache_enabled);
         self.events.clear();

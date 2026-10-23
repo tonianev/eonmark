@@ -17,6 +17,7 @@ use sim::{
     SimView, TargetId, UnitId,
 };
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// A controller that logs, per call, the player, the tick and how many
@@ -1147,4 +1148,33 @@ fn bot_takes_seat() {
         "bot_takes_seat: launched {launched_at}, decided {}",
         result.tick
     );
+}
+
+/// The first match's golden (ROADMAP M5b acceptance 1):
+/// `m5_first_match.eonreplay`, the Standard bot against itself at seed 1
+/// to the step that decides the match, verifies with the bots rebuilt
+/// from its header (`ai::controller_for`) to the hash in
+/// `m5_first_match.hash`, which `play-bots --seeds 1..5 --a standard --b
+/// standard` prints for seed 1. Long (about 27500 ticks), so verified by
+/// `sim-cli verify --release` in CI (rule 18).
+#[test]
+#[ignore = "long golden; verified by sim-cli verify --release in CI"]
+fn golden_m5_first_match() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures");
+    let replay = dir.join("m5_first_match.eonreplay");
+    let expected = std::fs::read_to_string(dir.join("m5_first_match.hash")).unwrap();
+    let outcome = sim::verify_with(
+        &replay,
+        &common::data_dir(),
+        Box::new(|setup: &MatchSetup, rules: &Rules| {
+            ai::controller_for(setup, rules).map_err(|e| e.to_string())
+        }),
+    )
+    .unwrap();
+    match outcome {
+        sim::VerifyOutcome::Ok { final_hash, .. } => {
+            assert_eq!(format!("0x{final_hash:016x}"), expected.trim());
+        }
+        other => panic!("m5_first_match: {other}"),
+    }
 }

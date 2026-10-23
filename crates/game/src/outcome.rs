@@ -26,6 +26,8 @@ use crate::hud::{HUD_FONT_PX, PADDING_PX, spawn_hud};
 use crate::markers::clock;
 use crate::orders::OrderMode;
 use crate::palette;
+use crate::placement::PlacementGhost;
+use crate::selection::DragBox;
 use crate::sim_driver::{LOCAL_PLAYER, MatchOver, SimHandle};
 
 /// The overlay's z index: above every HUD panel, the drag box (10) and the
@@ -176,7 +178,12 @@ pub fn overlay_texts(
 
 /// Once, when [`MatchOver`] appears: fill the five lines
 /// ([`overlay_texts`]), show the overlay and leave any order mode (the
-/// attack-move crosshair would otherwise stay over it).
+/// attack-move crosshair would otherwise stay over it). World input stops
+/// with this frame, and with it the systems that would end a drag box or
+/// hide the placement ghost, so a drag box held at the outcome is dropped
+/// here (`selection::draw_drag_box` then hides its node) and the ghost is
+/// hidden.
+#[allow(clippy::too_many_arguments)]
 pub fn show_outcome(
     over: Res<MatchOver>,
     sim: NonSend<SimHandle>,
@@ -184,6 +191,8 @@ pub fn show_outcome(
     mut overlay: Query<&mut Node, With<OutcomeOverlay>>,
     mut lines: Query<(&OutcomeLine, &mut Text)>,
     mode: Option<ResMut<OrderMode>>,
+    drag: Option<ResMut<DragBox>>,
+    mut ghosts: Query<&mut Visibility, With<PlacementGhost>>,
 ) {
     let Some(strings) = strings else {
         return;
@@ -199,6 +208,12 @@ pub fn show_outcome(
     }
     if let Some(mut mode) = mode {
         *mode = OrderMode::Normal;
+    }
+    if let Some(mut drag) = drag {
+        drag.0 = None;
+    }
+    for mut visibility in &mut ghosts {
+        *visibility = Visibility::Hidden;
     }
 }
 
@@ -232,13 +247,37 @@ mod tests {
     fn overlay_texts_for_each_reason_and_side() {
         let rules = Rules::load(data()).unwrap();
         let s = strings();
-        // Two placed Towns: P0's Seat-sized Town owns 1245 tiles, P1 none.
+        // The standard start gives each player a Seat that owns 1245 tiles
+        // (m3a's `economy_standard_start_layout`); a complete P0 Watchtower
+        // at (43, 64) adds 3 to P0 (m3a's two-Towns-and-a-Watchtower
+        // golden), so the two counts differ and their order shows.
         let mut setup = MatchSetup::scenario(&rules, 1);
         setup.start = sim::StartKind::Standard;
-        let sim = SimHandle::from_setup(setup, rules.clone());
+        let delay = setup.cmd_delay;
+        let mut sim = SimHandle::from_setup(setup, rules.clone());
+        let (tower, tower_def) = rules.building_kind_by_id("watchtower").unwrap();
+        let golden_radii =
+            (rules.town_radius_tiles, tower_def.border_radius_tiles) == (20, Some(2));
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        sim.step(&[sim::PlayerCommand::new(
+            p0,
+            0,
+            sim::Command::DebugPlaceBuilding {
+                owner: p0,
+                kind: sim::BuildingKindId(tower),
+                tile: sim::Tile::new(43, 64),
+                complete: true,
+            },
+        )]);
+        for _ in 0..delay {
+            sim.step(&[]);
+        }
         let view = sim.view();
         let tiles = |p| view.territory().owned_tile_count(PlayerId(p));
-        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        assert!(tiles(0) > tiles(1), "{} : {}", tiles(0), tiles(1));
+        if golden_radii {
+            assert_eq!((tiles(0), tiles(1)), (1248, 1245));
+        }
         let win = |player| Outcome::Victory {
             player,
             decisive: true,
@@ -274,27 +313,22 @@ mod tests {
             OutcomeReason::Territory,
             54000,
         );
+        let line = |first: u32, second: u32| {
+            format!("Territory at the time limit: {first} tiles to {second}")
+        };
         let texts = overlay_texts(&cap, p0, &view, &rules, &s);
         assert_eq!(texts[0], "Victory");
-        assert_eq!(
-            texts[1],
-            format!(
-                "Territory at the time limit: {} tiles to {}",
-                tiles(0),
-                tiles(1)
-            )
-        );
+        assert_eq!(texts[1], line(tiles(0), tiles(1)), "P0's count first");
+        if golden_radii {
+            assert_eq!(texts[1], "Territory at the time limit: 1248 tiles to 1245");
+        }
         assert_eq!(texts[2], "45:00, tick 54000");
         let texts = overlay_texts(&cap, p1, &view, &rules, &s);
         assert_eq!(texts[0], "Defeat");
-        assert_eq!(
-            texts[1],
-            format!(
-                "Territory at the time limit: {} tiles to {}",
-                tiles(1),
-                tiles(0)
-            )
-        );
+        assert_eq!(texts[1], line(tiles(1), tiles(0)), "P1's count first");
+        if golden_radii {
+            assert_eq!(texts[1], "Territory at the time limit: 1245 tiles to 1248");
+        }
         // No recording: no replay line.
         let unrecorded = MatchOver {
             replay: None,
@@ -304,18 +338,28 @@ mod tests {
     }
 
     /// The overlay is hidden until `MatchOver` appears, then shows the
-    /// five lines once; world input stops and an order mode is left.
+    /// five lines once; world input stops, an order mode is left, a drag
+    /// box held at the outcome is dropped and its node hidden, a showing
+    /// placement ghost is hidden, and a move marker placed just before the
+    /// outcome still shrinks and expires (its timer is not world input).
     #[test]
     fn the_overlay_shows_once_the_match_is_over_and_input_stops() {
         use crate::hud::WorldInputSet;
+        use crate::selection::{DragBoxNode, DragRect, MOVE_MARKER_SECS, MoveMarker};
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
         let rules = Rules::load(data()).unwrap();
         let setup = MatchSetup::scenario(&rules, 1);
         #[derive(Resource, Default)]
         struct WorldInputRuns(u32);
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                100,
+            )))
             .insert_resource(strings())
             .init_resource::<OrderMode>()
+            .init_resource::<DragBox>()
             .init_resource::<WorldInputRuns>()
             .add_systems(Startup, spawn_outcome_overlay)
             .add_systems(
@@ -326,8 +370,23 @@ mod tests {
                 ),
             );
         crate::hud::gate_world_input(&mut app);
+        crate::selection::add_world_input_feedback(&mut app);
         app.world_mut()
             .insert_non_send(SimHandle::from_setup(setup, rules));
+        let drag_node = app
+            .world_mut()
+            .spawn((
+                DragBoxNode,
+                Node {
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .id();
+        let ghost = app
+            .world_mut()
+            .spawn((PlacementGhost, Visibility::Inherited))
+            .id();
         *app.world_mut().resource_mut::<OrderMode>() = OrderMode::AttackMove;
         app.update();
         let display = |app: &mut App| {
@@ -338,6 +397,25 @@ mod tests {
         };
         assert_eq!(display(&mut app), Display::None);
         assert_eq!(app.world().resource::<WorldInputRuns>().0, 1);
+        // The player is box-dragging and has just right-clicked a move.
+        app.world_mut().resource_mut::<DragBox>().0 = Some(DragRect {
+            start: Vec2::new(10.0, 10.0),
+            current: Vec2::new(200.0, 150.0),
+        });
+        let now = app.world().resource::<Time>().elapsed_secs();
+        let marker = app
+            .world_mut()
+            .spawn((
+                MoveMarker {
+                    expires_at: now + MOVE_MARKER_SECS,
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.update();
+        let node_display = |app: &App| app.world().get::<Node>(drag_node).unwrap().display;
+        assert_eq!(node_display(&app), Display::Flex, "the drag box shows");
+        assert_eq!(app.world().resource::<WorldInputRuns>().0, 2);
         app.insert_resource(over(
             Outcome::Victory {
                 player: LOCAL_PLAYER,
@@ -357,11 +435,34 @@ mod tests {
         assert_eq!(lines[0], (0, "Victory".to_string()));
         assert_eq!(lines[3], (3, "Final hash 0x2c9a9ef52a5184d0".to_string()));
         assert_eq!(*app.world().resource::<OrderMode>(), OrderMode::Normal);
+        assert_eq!(
+            app.world().resource::<DragBox>().0,
+            None,
+            "the drag box held at the outcome is dropped"
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(ghost),
+            Some(&Visibility::Hidden),
+            "the placement ghost is hidden"
+        );
         app.update();
         assert_eq!(
+            node_display(&app),
+            Display::None,
+            "the drag box node is hidden"
+        );
+        assert_eq!(
             app.world().resource::<WorldInputRuns>().0,
-            1,
+            2,
             "world input stopped at the outcome"
+        );
+        // The marker keeps shrinking and is gone once its time is up.
+        for _ in 0..10 {
+            app.update();
+        }
+        assert!(
+            app.world().get_entity(marker).is_err(),
+            "the move marker expired after the outcome"
         );
     }
 }

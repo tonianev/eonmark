@@ -40,7 +40,7 @@ use bevy::text::FontSize;
 use bevy::transform::TransformSystems;
 use rules::Rules;
 use rules::strings::fill;
-use sim::{Building, SimView, UnitId, UnitKindId};
+use sim::{Building, PlayerId, SimView, UnitId, UnitKindId};
 
 use crate::economy_hud::{MESSAGE_GAP_PX, UiStrings};
 use crate::hud::{BOTTOM_BAR_HEIGHT_PX, HUD_FONT_PX, HudRoot, PADDING_PX, spawn_hud};
@@ -382,19 +382,26 @@ pub fn draw_annexation_timers(
     }
 }
 
-/// The readout's text: one entry per running timer the local player is
-/// part of, attacking ("Annexing Town: 0:42") or defending ("Town is being
-/// annexed: 0:42"), in `BuildingId` order; empty when there is none.
-pub fn annex_readout_text(view: &SimView<'_>, rules: &Rules, strings: &UiStrings) -> String {
+/// The readout's text for `local` (the game passes `LOCAL_PLAYER`): one
+/// entry per running timer `local` is part of, attacking ("Annexing Town:
+/// 0:42") or defending ("Town is being annexed: 0:42"), in `BuildingId`
+/// order; timers between other players are left out, and the text is
+/// empty when there is none.
+pub fn annex_readout_text(
+    view: &SimView<'_>,
+    rules: &Rules,
+    strings: &UiStrings,
+    local: PlayerId,
+) -> String {
     let hz = rules.tick_rate_hz;
     let mut parts = Vec::new();
     for b in view.buildings() {
         let Some(timer) = view.annexation(b.id) else {
             continue;
         };
-        let template = if timer.attacker == LOCAL_PLAYER {
+        let template = if timer.attacker == local {
             strings.hud("annex.attacking")
-        } else if b.owner == LOCAL_PLAYER {
+        } else if b.owner == local {
             strings.hud("annex.defending")
         } else {
             continue;
@@ -453,7 +460,7 @@ pub fn update_annex_readout(
     let Some(strings) = strings else {
         return;
     };
-    let want = annex_readout_text(&sim.view(), sim.rules(), &strings);
+    let want = annex_readout_text(&sim.view(), sim.rules(), &strings, LOCAL_PLAYER);
     for mut text in &mut texts {
         if text.0 != want {
             text.0 = want.clone();
@@ -464,7 +471,7 @@ pub fn update_annex_readout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim::PlayerId;
+    use bevy::ecs::system::RunSystemOnce;
     use std::path::Path;
 
     /// `player`'s units that are bleeding now (`exposed_ticks > 0`).
@@ -732,6 +739,16 @@ mod tests {
         let mut q = app.world_mut().query::<&SupplyRing>();
         assert_eq!(q.iter(app.world()).count(), 0, "deselected");
 
+        // No timer runs yet: the readout is empty for every player.
+        {
+            let sim = app.world().non_send::<SimHandle>();
+            let view = sim.view();
+            assert!(view.annexation(sim::BuildingId(2)).is_none());
+            for p in [LOCAL_PLAYER, PlayerId(1)] {
+                assert_eq!(annex_readout_text(&view, sim.rules(), &strings, p), "");
+            }
+        }
+
         // The timer starts when the Skirmishers reach the ring: the land
         // turns neutral, so the Bowman stops bleeding and loses its diamond,
         // and the attacker's readout counts down.
@@ -755,8 +772,25 @@ mod tests {
             .expect("the Seat's timer runs");
         assert_eq!(timer.attacker, LOCAL_PLAYER);
         assert_eq!(view.unit(bowman).unwrap().exposed_ticks, 0);
-        let text = annex_readout_text(&view, sim.rules(), &strings);
-        assert_eq!(text, "Annexing Town: 1:00", "{timer:?}");
+        let readout = |p| annex_readout_text(&view, sim.rules(), &strings, p);
+        assert_eq!(readout(LOCAL_PLAYER), "Annexing Town: 1:00", "{timer:?}");
+        // The Seat's owner, P1, reads the defending text; a player who is
+        // neither the attacker nor the owner sees nothing.
+        assert_eq!(
+            view.building(sim::BuildingId(2)).unwrap().owner,
+            PlayerId(1)
+        );
+        assert_eq!(readout(PlayerId(1)), "Town is being annexed: 1:00");
+        assert_eq!(readout(PlayerId(2)), "", "a bystander");
+        // The HUD system writes the local player's text into the readout.
+        let readout_entity = app.world_mut().spawn((AnnexReadout, Text::new(""))).id();
+        app.world_mut()
+            .run_system_once(update_annex_readout)
+            .unwrap();
+        assert_eq!(
+            app.world().get::<Text>(readout_entity).unwrap().0,
+            "Annexing Town: 1:00"
+        );
         assert!(
             marked(&mut app).is_empty(),
             "no unit bleeds on neutral land"

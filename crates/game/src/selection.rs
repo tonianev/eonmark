@@ -287,13 +287,11 @@ impl Plugin for SelectionPlugin {
                     control_groups,
                     select_idle_builder,
                     clear_selection_on_escape,
-                    expire_move_markers,
                 )
                     .chain()
                     .before(crate::orders::order_mode_keys)
                     .in_set(WorldInputSet),
             )
-            .add_systems(Update, draw_drag_box.after(WorldInputSet))
             // Before `FrameCount` advances, so the frame number matches the
             // one `frame_stats` records for this frame.
             .add_systems(
@@ -306,6 +304,7 @@ impl Plugin for SelectionPlugin {
                     .chain()
                     .before(TransformSystems::Propagate),
             );
+        add_world_input_feedback(app);
     }
 }
 
@@ -604,6 +603,19 @@ pub fn select_in_rect(
         selection.set(hits);
     }
     n
+}
+
+/// The feedback that follows world input but is not input itself: the
+/// move and attack markers' shrink-and-expire timer and the drag-box node.
+/// Both run after [`WorldInputSet`] and outside it, so they keep running
+/// once the set stops at the outcome (M5a, `hud::gate_world_input`): a
+/// marker placed just before it still expires, and the drag box that
+/// `outcome::show_outcome` drops is hidden.
+pub fn add_world_input_feedback(app: &mut App) {
+    app.add_systems(
+        Update,
+        (expire_move_markers, draw_drag_box).after(WorldInputSet),
+    );
 }
 
 /// Shows the drag-box node over the current [`DragRect`] once it is past

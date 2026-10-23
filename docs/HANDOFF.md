@@ -100,6 +100,14 @@ sets into `data/rules/`:
 15. The local m1 proptest cases may be lowered if `cargo test -p sim` goes
     over 10 s on the dev Mac; CI keeps 256.
 
+Its second slice (`SIM_VERSION` 15, `rules_version` 19) implements
+attrition: `crates/sim/src/attrition.rs` runs as step 5b' between movement
+and combat resolution, with the hashed `Unit::exposed_ticks` counter, the
+per-step supply grid of Supply Wain tiles, `Command::DebugDamage` and the
+`attrition_*` tests of acceptance line 1 in `crates/sim/tests/m5a.rs`
+(`cargo test -p sim attrition`). Annexation, the outcome and the game half
+follow.
+
 Under the owner's M4b decision 3, M5a may start while M4b's line 2 waits
 for that Mac session, as M3b's fps line does. A milestone is done when
 every acceptance checkbox in `docs/ROADMAP.md` is ticked with pasted
@@ -112,7 +120,7 @@ command output in a merged PR.
 | Architecture and invariants | `docs/ARCHITECTURE.md`, `docs/DETERMINISM.md`, `docs/DATA_FORMAT.md` | Complete |
 | Per-system design | `docs/design/*.md` | Complete, with target numbers |
 | Dependency pins and policy | `docs/DEPENDENCIES.md`, `docs/adr/` | Complete |
-| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b (PR #38) adds the `enemy_outpost` scenarios, their golden and `SimView::building_hp`; next, M5a (attrition, supply, annexation, victory); `crates/ai` holds the M0 bots until M5b |
+| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b (PR #38) adds the `enemy_outpost` scenarios, their golden and `SimView::building_hp`; M5a (attrition, supply, annexation, victory) in progress: rules data and attrition done; `crates/ai` holds the M0 bots until M5b |
 | Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b on PR #38 (line 1 ticked; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window |
 | CI and release automation | `.github/workflows/`, `scripts/`, `justfile` | In use since M0: every PR runs check, headless, game-linux, deny and hash-parity |
 

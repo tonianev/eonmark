@@ -162,8 +162,10 @@ loaded, and name `rules.ron` and the field:
 M5a's rules data (`rules_version` 18) added the fields the design named
 for it: the age-gap table, the late Harrying bonus, the annexation knobs,
 the 45-minute cap and the Yield Cap decay, each with its validator rules.
-The sim reads them from the M5a attrition and annexation slices on; until
-then they are validated but unused.
+The attrition slice (`rules_version` 19) reads the attrition fields: the
+age-gap table and the late Harrying bonus, besides `supply_radius_tiles`
+and `attrition_interval_ds`. The annexation and match-end fields are read
+from the annexation slice on; until then they are validated but unused.
 
 ## resources.ron
 
@@ -540,7 +542,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (18 to 19), update the one-line
+2. Bump `rules_version` in `rules.ron` (19 to 20), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -552,8 +554,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=19 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 maps=plains_1v1 strings=en`
-(the repository is at 18, so before the edit it prints `rules_version=18`;
+`OK rules_version=20 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 maps=plains_1v1 strings=en`
+(the repository is at 19, so before the edit it prints `rules_version=19`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
@@ -561,15 +563,16 @@ from an independent `sim-cli verify` OK line, then fails if a fixture
 differs from the merge base with main while the working-tree
 `rules_version` is not larger than the base's (CI runs the same check,
 `scripts/check_fixture_policy.sh`, on the commits of every pull request).
-While the sim does not read the edited value yet (attrition arrives
-in M5a) every `.hash` stays the same and only the replay headers change;
-once it does, the `.hash` files change too, and the bump in the same commit
-is what makes that legal. `just rerecord move_500 group_spiral` re-records
+The sim reads `attrition_interval_ds` since M5a's attrition slice, but no
+golden fixture researches Harrying, so attrition never bites in them:
+every `.hash` stays the same and only the replay headers change. A change
+that a fixture does exercise, such as a unit's speed, changes its `.hash`
+too, and the bump in the same commit is what makes that legal. `just rerecord move_500 group_spiral` re-records
 only the fixtures named.
 
 A typo such as `attrition_interval_s` fails `data-check` with the file
 path, the span and the field:
 
 ```text
-error: data/rules/rules.ron: 58:3-58:23: Unexpected field named `attrition_interval_s` in `Rules`, expected one of `rules_version`, ... instead
+error: data/rules/rules.ron: 63:3-63:23: Unexpected field named `attrition_interval_s` in `Rules`, expected one of `rules_version`, ... instead
 ```

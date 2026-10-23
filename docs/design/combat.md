@@ -169,6 +169,17 @@ What the game shows of combat (details in [ui.md](ui.md)): a team-coloured healt
 
 Acceptance line 2 measures the prologue. With the frame-time lines on (both `enemy_outpost` scenarios), `frame_stats` prints `frame_stats: fight frames=<n> seconds=<s> mean=<ms> p95=<ms> max=<ms> fps=<f> ticks=<a>..<b> on_screen_max=<n> on_screen_min=<n>/<alive> units_at_first_hit=<p0>/<p1>` on exit, over the frames within 20 ticks of a `Hit` while both players keep at least 50 armed units (the bench's threshold). Both on-screen numbers count armed units by the drag box's projection between the HUD bars: `on_screen_max` the most in one fight frame, `on_screen_min` the fight frame that showed the smallest share of the armed units then alive. The default framing (106, 32 at 55 m) keeps every armed unit alive on screen in every fight frame (`on_screen_max=400 on_screen_min=400/400`), so a timed frame that drew less of the battle, after a pan, a zoom or Period, shows as a first number below the second; `on_screen_max` alone cannot show it, since it keeps the best frame. The line passes on the dev Mac with fight fps >= 60 and fight p95 <= 16.7 ms, `window focused=N/N occluded=0/N`, plus a `--max-fps 1000` headroom run (owner decision 2). Linux runs under lavapipe render in software at about 6 fps; their numbers are recorded in [../BUILD_TIMES.md](../BUILD_TIMES.md) as a proxy that cannot pass or fail the line.
 
+## M5a notes (sim)
+
+The M5a attrition slice (`SIM_VERSION` 15, `rules_version` 19) touches combat in three places; see [attrition.md](attrition.md), "M5a implementation notes".
+
+| Topic | As implemented |
+| --- | --- |
+| Tick order | Step 5 is now 5a `think`, 5b `movement::step`, 5b' `attrition::step` and 5c `resolve`. Attrition runs on the post-movement positions and only adds to `damage_taken`; it removes nothing. |
+| Attrition deaths | `resolve` ends in `reap` even when no hit lands, so a unit an attrition pulse takes to its maximum dies in the same step's 5c through the common death path: `UnitDied { unit, owner, kind }`, its path request cancelled, its slot, site and pop freed, with the hit points of the `Stats` built at the start of step 5. Such a unit still lands its own hit in 5c, as with simultaneous hits, and a shooter's aim at it still fires. |
+| `apply_damage` | `resolve`'s per-target apply is `combat::apply_damage(state, target, amount, events)`: a unit's `damage_taken` grows (clamped to `i32`); a complete Town falls to at least 0 with `TownAtZeroHp` on the step that reaches 0; any other building or site loses hit points. It removes nothing; `reap` does. |
+| `DebugDamage` | `Command::DebugDamage { target, amount }`, appended to `Command` after `DebugSpawnJittered` and gated like `DebugSpawn`, applies `amount` through `apply_damage` during step 3 (apply), with no attacker, range or counter and no `Hit` event; 5c then removes the dead and the destroyed. The target only has to exist (`InvalidTarget` otherwise), so any owner's unit or building qualifies, the issuer's own and a Town at 0 HP included, unlike `Attack`'s `locate`. It draws nothing from the RNG. Tests and scenarios use it to set hit points without depending on combat tuning (`attrition_debug_damage_kills_through_reap_and_clamps_towns`, `attrition_debug_damage_rejections_change_nothing`); `sim-cli fuzz` expects a `DebugDamage` on `UnitId(0)` to be rejected. |
+
 ## Interactions
 
 | System | Interaction |

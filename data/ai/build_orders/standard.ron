@@ -12,6 +12,7 @@
     Workers(count: 9, split: {"grain": 4, "lumber": 5}),
     Train(kind: "scribe", count: 3),
     Build(kind: "croft", count: 3, at: NearTown),
+    Build(kind: "lumber_yard", count: 2, at: Terrain),  // one yard has ~4 slots
     Build(kind: "ore_pit", count: 1, at: Terrain),
     Workers(count: 11, split: {"grain": 4, "lumber": 5, "ore": 2}),
     Build(kind: "town", count: 2, at: Expansion, optional: true),
@@ -24,12 +25,14 @@
     Build(kind: "watchtower", count: 1, at: BorderEdge, optional: true),
     Advance(age: "masonry"),
     Build(kind: "engine_yard", count: 1, at: NearTown),
+    Build(kind: "scriptorium", count: 2, at: NearTown), // Lore for the Charter techs
+    Train(kind: "scribe", count: 6),
     Research(tech: "harrying_1", optional: true),     // hosted by the Watchtower
     Research(tech: "arms_2"),
     Build(kind: "croft", count: 8, at: NearTown, optional: true),  // needs the 2nd Town
     Workers(count: 17, split: {"grain": 8, "lumber": 6, "ore": 3}),
+    Research(tech: "letters_1"),                // research 10% cheaper and faster
     Research(tech: "trade_2"),
-    Research(tech: "letters_1"),
     Research(tech: "statecraft_1"),
     Advance(age: "charter"),                    // 6 counting techs before it
     Research(tech: "arms_3"),

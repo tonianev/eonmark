@@ -2,12 +2,21 @@
 //! seat from immutable inputs (the map's terrain and starts, the rules and
 //! the personality), never from the live view. A controller rebuilt
 //! mid-match therefore holds exactly the same tables, which keeps the bot
-//! restore-exact. The per-plan site choice that filters these candidates
-//! against the live view (ownership, buildability, the free ring, units on
-//! the footprint, `check_build`) is the build-order rule's (M5b slice 2).
+//! restore-exact.
+//!
+//! [`site_for`] is the per-plan site choice: it walks a policy's
+//! candidates and filters them against the live view, cheapest test
+//! first: every footprint tile own land and passable, a free passable ring
+//! of `building_gap_tiles` around the footprint (for `Terrain`, only the
+//! ring's grass tiles must be free), no unit on the footprint, the
+//! policy's spacing, and only then `check_build` (a full-map search), at
+//! most `site_checks_per_think` per plan.
 
-use rules::{MapDef, Personality, Rules, Slots, Terrain};
-use sim::{BuildingKindId, MatchSetup, PlayerId, Tile};
+use super::ctx::Ctx;
+use super::facts::{kind_centre, kind_centre_tile, tiles_sq};
+use super::memory::BotMemory;
+use rules::{MapDef, Personality, Placement, Rules, Slots, Terrain};
+use sim::{BuildingId, BuildingKindId, MatchSetup, PlayerId, Tile, UnitId};
 use std::collections::BTreeMap;
 
 /// Expansion candidates kept, best first.
@@ -34,11 +43,15 @@ pub struct MapAnalysis {
     /// nearest the own start, then the lowest tile index.
     pub terrain: BTreeMap<BuildingKindId, Vec<Tile>>,
     /// `Expansion` candidates: Town footprint north-west tiles on grass
-    /// whose centre lies within `town_radius_grown_tiles + 3` of the own
-    /// start, best first by score (resource tiles near the centre outside
-    /// the Seat's first border, less a penalty for every tile gained
-    /// toward the enemy), then the lowest tile index; at most
-    /// [`EXPANSION_CANDIDATES`].
+    /// lying wholly inside the Seat's first border (every footprint tile
+    /// closer than `town_radius_tiles` to the own start, so it is own land
+    /// from the start) with the centre at least `expansion_min_tiles` from
+    /// the own start, best first by score, then the lowest tile index; at
+    /// most [`EXPANSION_CANDIDATES`]. The score is the Forest and Mountain
+    /// tiles closer than `resource_radius_tiles` to the centre that lie
+    /// outside the Seat's first border (what the new Town's border would
+    /// bring in), less `toward_enemy_penalty` per tile the centre is closer
+    /// to the enemy start than the own start is.
     pub expansion: Vec<Tile>,
     /// `BorderEdge` candidates: grass tiles within `border_scan_tiles` of
     /// the own start, nearest the enemy start first, then the lowest tile
@@ -185,8 +198,10 @@ impl MapAnalysis {
             u16::try_from(town.width_tiles).expect("validated <= 8"),
             u16::try_from(town.height_tiles).expect("validated <= 8"),
         );
-        let reach = i64::from(rules.town_radius_grown_tiles) + 3;
-        let seat_r = i64::from(rules.town_radius_tiles);
+        // A territory kernel of radius R owns the tiles with d² < R²
+        // (sim::territory::kernel).
+        let seat_r2 = i64::from(rules.town_radius_tiles).pow(2);
+        let min_r2 = i64::from(knobs.expansion_min_tiles).pow(2);
         let res_r = i32::try_from(knobs.resource_radius_tiles).expect("validated <= 64");
         let penalty = i64::from(knobs.toward_enemy_penalty);
         let home_to_enemy = d2(own_start, enemy_start).isqrt();
@@ -199,13 +214,19 @@ impl MapAnalysis {
             ) else {
                 continue;
             };
-            if d2(centre, own_start) > reach * reach || !footprint_on_grass(def, *nw, tw, th) {
+            if d2(centre, own_start) < min_r2 || !footprint_on_grass(def, *nw, tw, th) {
+                continue;
+            }
+            let inside = (0..th).all(|dy| {
+                (0..tw).all(|dx| d2(Tile::new(nw.x + dx, nw.y + dy), own_start) < seat_r2)
+            });
+            if !inside {
                 continue;
             }
             let mut resources: i64 = 0;
             for dy in -res_r..=res_r {
                 for dx in -res_r..=res_r {
-                    if dx * dx + dy * dy > res_r * res_r {
+                    if dx * dx + dy * dy >= res_r * res_r {
                         continue;
                     }
                     let Some(t) = tile_at(def, i32::from(centre.x) + dx, i32::from(centre.y) + dy)
@@ -214,7 +235,7 @@ impl MapAnalysis {
                     };
                     let is_resource =
                         matches!(def.tile(t.x, t.y), Terrain::Forest | Terrain::Mountain);
-                    if is_resource && d2(t, own_start) > seat_r * seat_r {
+                    if is_resource && d2(t, own_start) >= seat_r2 {
                         resources += 1;
                     }
                 }
@@ -253,6 +274,219 @@ impl MapAnalysis {
             border_edge: border.into_iter().map(|c| c.2).collect(),
             rally_seed,
         }
+    }
+}
+
+/// What [`site_for`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteSearch {
+    /// `check_build` accepts `builder` building the kind at `tile`.
+    Found {
+        /// The builder, nearest the footprint centre of the pool.
+        builder: UnitId,
+        /// The footprint's north-west tile.
+        tile: Tile,
+    },
+    /// No unit may build (the pool is empty): wait.
+    NoBuilder,
+    /// No candidate passes: the step is blocked.
+    NoSite,
+    /// The plan's `check_build` probes ran out first: try again next plan.
+    OutOfProbes,
+}
+
+/// The own complete, uncontested Town a `NearTown` building of `kind` goes
+/// around: for a kind with `max_per_town`, the one with the fewest of the
+/// kind attributed to it (sites included) while under the limit; for any
+/// other kind, the first. Towns are taken Seat first, then by id.
+pub fn near_town_anchor(ctx: &Ctx<'_>, kind: BuildingKindId) -> Option<BuildingId> {
+    let rules = ctx.view.rules();
+    let def = rules.building_kind(kind.0)?;
+    let mut towns = ctx
+        .facts
+        .towns
+        .iter()
+        .copied()
+        .filter(|t| !ctx.facts.contested.contains(t));
+    match def.max_per_town {
+        None => towns.next(),
+        Some(max) => towns
+            .map(|t| (ctx.facts.per_town.get(&(t, kind)).copied().unwrap_or(0), t))
+            .filter(|(n, _)| *n < max)
+            .min_by_key(|(n, _)| *n)
+            .map(|(_, t)| t),
+    }
+}
+
+/// Whether the footprint of `kind` at `nw` passes the cheap tests: on the
+/// map, own land, passable and with no unit on it, inside a ring of
+/// `building_gap_tiles` that is on the map and passable (for `Terrain`,
+/// only the ring's grass tiles need be passable, so a yard may touch its
+/// forest, and the ring may leave the map).
+pub fn fits(ctx: &mut Ctx<'_>, kind: BuildingKindId, nw: Tile, at: Placement) -> bool {
+    let view = ctx.view;
+    let rules = view.rules();
+    let Some(def) = rules.map(&view.setup().map) else {
+        return false;
+    };
+    let Some(k) = rules.building_kind(kind.0) else {
+        return false;
+    };
+    let (w, h) = (
+        i32::try_from(k.width_tiles).expect("validated <= 8"),
+        i32::try_from(k.height_tiles).expect("validated <= 8"),
+    );
+    let map = view.map();
+    let territory = view.territory();
+    let (x0, y0) = (i32::from(nw.x), i32::from(nw.y));
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            let Some(t) = tile_at(def, x, y) else {
+                return false;
+            };
+            if !territory.is_buildable(ctx.me, t) || !map.passable(t) {
+                return false;
+            }
+        }
+    }
+    let gap = i32::try_from(ctx.knobs.building_gap_tiles).expect("validated <= 64");
+    for y in y0 - gap..y0 + h + gap {
+        for x in x0 - gap..x0 + w + gap {
+            if (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y) {
+                continue;
+            }
+            match tile_at(def, x, y) {
+                None if at == Placement::Terrain => {}
+                None => return false,
+                Some(t) => {
+                    let grass = def.tile(t.x, t.y) == Terrain::Grass;
+                    let needs_free = at != Placement::Terrain || grass;
+                    if needs_free && !map.passable(t) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    let occupied = ctx.occupied();
+    !(y0..y0 + h)
+        .any(|y| (x0..x0 + w).any(|x| tile_at(def, x, y).is_some_and(|t| occupied.contains(&t))))
+}
+
+/// Choose a site and a builder from `pool` for a building of `kind` placed
+/// by policy `at`, for build-order step `step`. The step's remembered site
+/// (`mem.site`) is tried first and forgotten when it fails; a site found
+/// is remembered. Each candidate that passes [`fits`] and the policy's
+/// spacing gets the pool's unit nearest its centre (ties to the lowest
+/// id) and one `check_build` probe.
+pub fn site_for(
+    ctx: &mut Ctx<'_>,
+    mem: &mut BotMemory,
+    step: u16,
+    kind: BuildingKindId,
+    at: Placement,
+    pool: &[UnitId],
+) -> SiteSearch {
+    if pool.is_empty() {
+        return SiteSearch::NoBuilder;
+    }
+    if let Some((s, tile)) = mem.site
+        && s == step
+    {
+        match probe(ctx, kind, tile, at, pool) {
+            Some(SiteSearch::Found { builder, tile }) => {
+                return SiteSearch::Found { builder, tile };
+            }
+            Some(SiteSearch::OutOfProbes) => return SiteSearch::OutOfProbes,
+            _ => mem.site = None,
+        }
+    }
+    let candidates: Vec<Tile> = match at {
+        Placement::NearTown => {
+            let Some(town) = near_town_anchor(ctx, kind) else {
+                return SiteSearch::NoSite;
+            };
+            let Some(b) = ctx.view.building(town) else {
+                return SiteSearch::NoSite;
+            };
+            let c = kind_centre_tile(ctx.view.rules(), b.kind, b.tile);
+            ctx.map
+                .near_town_offsets
+                .iter()
+                .filter_map(|(dx, dy)| {
+                    let x = u16::try_from(i32::from(c.x) + dx).ok()?;
+                    let y = u16::try_from(i32::from(c.y) + dy).ok()?;
+                    Some(Tile::new(x, y))
+                })
+                .collect()
+        }
+        Placement::Terrain => ctx.map.terrain.get(&kind).cloned().unwrap_or_default(),
+        Placement::Expansion => ctx.map.expansion.clone(),
+        Placement::BorderEdge => ctx.map.border_edge.clone(),
+    };
+    for tile in candidates {
+        match probe(ctx, kind, tile, at, pool) {
+            Some(SiteSearch::Found { builder, tile }) => {
+                mem.site = Some((step, tile));
+                return SiteSearch::Found { builder, tile };
+            }
+            Some(SiteSearch::OutOfProbes) => return SiteSearch::OutOfProbes,
+            _ => {}
+        }
+    }
+    SiteSearch::NoSite
+}
+
+/// Test one candidate: `None` when it fails a cheap test, else the probe's
+/// verdict (`Found`, `OutOfProbes`, or `NoSite` when `check_build`
+/// rejects it).
+fn probe(
+    ctx: &mut Ctx<'_>,
+    kind: BuildingKindId,
+    tile: Tile,
+    at: Placement,
+    pool: &[UnitId],
+) -> Option<SiteSearch> {
+    if !fits(ctx, kind, tile, at) || !spaced(ctx, kind, tile, at) {
+        return None;
+    }
+    if ctx.probes_left == 0 {
+        return Some(SiteSearch::OutOfProbes);
+    }
+    let centre = kind_centre(ctx.view.rules(), kind, tile);
+    let builder = pool
+        .iter()
+        .filter_map(|id| ctx.view.unit(*id))
+        .min_by_key(|u| (u.pos.dist_sq_i64(centre), u.id))?
+        .id;
+    ctx.probes_left -= 1;
+    Some(match ctx.view.check_build(ctx.me, builder, kind, tile) {
+        Ok(_) => SiteSearch::Found { builder, tile },
+        Err(_) => SiteSearch::NoSite,
+    })
+}
+
+/// The policy's spacing: a second Town keeps `expansion_min_tiles` from
+/// every own Town (sites included), centre to centre; a border building
+/// keeps `tower_spacing_tiles` from every own building of a border kind
+/// (sites included).
+fn spaced(ctx: &Ctx<'_>, kind: BuildingKindId, tile: Tile, at: Placement) -> bool {
+    let rules = ctx.view.rules();
+    match at {
+        Placement::Expansion => {
+            let c = kind_centre(rules, kind, tile);
+            let min = tiles_sq(ctx.knobs.expansion_min_tiles);
+            ctx.facts
+                .town_centres
+                .iter()
+                .all(|t| t.dist_sq_i64(c) >= min)
+        }
+        Placement::BorderEdge => {
+            let c = kind_centre_tile(rules, kind, tile);
+            let min = i64::from(ctx.knobs.tower_spacing_tiles).pow(2);
+            ctx.facts.towers.iter().all(|t| d2(*t, c) >= min)
+        }
+        Placement::NearTown | Placement::Terrain => true,
     }
 }
 
@@ -336,5 +570,163 @@ mod tests {
         );
         assert_eq!(p0.rally_seed, Tile::new(36, 64));
         assert_eq!(p1.rally_seed, Tile::new(91, 64));
+    }
+
+    /// Every expansion candidate lies on own land at the standard start,
+    /// at least `expansion_min_tiles` from the Seat, and the site the bot
+    /// picks is pinned (computed once, on `plains_1v1`): south of each
+    /// Seat, toward the forest beyond the first border. P1's pick (106, 81)
+    /// is not the exact mirror of P0's (18, 81), which is (107, 81): equal
+    /// scores break to the lowest tile index on both sides.
+    #[test]
+    fn expansion_site_is_own_buildable_and_pinned() {
+        use crate::testkit::{Arena, P0, P1};
+        let r = rules();
+        let mut setup = MatchSetup::bots(&r, 1, ("standard", "standard"), ("standard", "standard"));
+        setup.debug_commands = true;
+        let a = Arena::frozen(setup, Vec::new());
+        let town = BuildingKindId(r.town_kind());
+        for (p, pinned) in [(P0, Tile::new(18, 81)), (P1, Tile::new(106, 81))] {
+            let map = a.map(p);
+            assert_eq!(map.expansion[0], pinned, "{p:?}");
+            let view = a.sim.view();
+            for nw in &map.expansion {
+                for dy in 0..3 {
+                    for dx in 0..3 {
+                        let t = Tile::new(nw.x + dx, nw.y + dy);
+                        assert!(view.territory().is_buildable(p, t), "{p:?} {nw:?}");
+                    }
+                }
+                let c = Tile::new(nw.x + 1, nw.y + 1);
+                assert!(d2(c, map.own_start) >= 14 * 14);
+            }
+            let mut ctx = a.ctx(p);
+            let mut mem = BotMemory::default();
+            let pool = view.idle_workers(p);
+            let found = site_for(&mut ctx, &mut mem, 9, town, Placement::Expansion, &pool);
+            assert!(
+                matches!(found, SiteSearch::Found { tile, .. } if tile == pinned),
+                "{p:?} {found:?}"
+            );
+            assert_eq!(mem.site, Some((9, pinned)), "remembered");
+            assert_eq!(ctx.probes_left, 3, "one probe");
+        }
+    }
+
+    /// The border Watchtower goes on the own grass tile nearest the enemy
+    /// start that keeps a free ring: (43, 64) for P0 and (84, 64) for P1
+    /// (the Seats' first borders end 19 tiles out on row 64).
+    #[test]
+    fn border_edge_tower_is_the_owned_tile_nearest_the_enemy_start() {
+        use crate::testkit::{Arena, P0, P1};
+        let r = rules();
+        let mut setup = MatchSetup::bots(&r, 1, ("standard", "standard"), ("standard", "standard"));
+        setup.debug_commands = true;
+        let grants = [
+            crate::testkit::grant_all(&r, P0, 100),
+            crate::testkit::grant_all(&r, P1, 100),
+        ]
+        .concat();
+        let mut a = Arena::frozen(setup, grants);
+        let tower = BuildingKindId(r.building_kind_by_id("watchtower").unwrap().0);
+        for (p, want) in [(P0, Tile::new(43, 64)), (P1, Tile::new(84, 64))] {
+            let view = a.sim.view();
+            let mut ctx = a.ctx(p);
+            let mut mem = BotMemory::default();
+            let pool = view.idle_workers(p);
+            let found = site_for(&mut ctx, &mut mem, 16, tower, Placement::BorderEdge, &pool);
+            let SiteSearch::Found { tile, .. } = found else {
+                panic!("{p:?} {found:?}");
+            };
+            assert_eq!(tile, want, "{p:?}");
+            let enemy = a.map(p).enemy_start;
+            let nearer_owned = (0..128u16)
+                .flat_map(|y| (0..128u16).map(move |x| Tile::new(x, y)))
+                .filter(|t| view.territory().is_buildable(p, *t))
+                .any(|t| d2(t, enemy) < d2(want, enemy));
+            assert!(!nearer_owned, "{p:?}: no own tile is nearer the enemy");
+        }
+        // A second tower keeps `tower_spacing_tiles` from the first.
+        a.issue(
+            P0,
+            vec![crate::testkit::place(&r, P0, "watchtower", 43, 64)],
+        );
+        let view = a.sim.view();
+        let mut ctx = a.ctx(P0);
+        let mut mem = BotMemory::default();
+        let pool = view.idle_workers(P0);
+        let SiteSearch::Found { tile, .. } =
+            site_for(&mut ctx, &mut mem, 16, tower, Placement::BorderEdge, &pool)
+        else {
+            panic!("a second site");
+        };
+        assert!(d2(tile, Tile::new(43, 64)) >= 8 * 8, "{tile:?}");
+    }
+
+    /// Buildings placed one after another by `NearTown` never touch: each
+    /// footprint keeps a ring of `building_gap_tiles` free of other
+    /// footprints, and the Seat's own ring stays free.
+    #[test]
+    fn near_town_keeps_a_free_ring() {
+        use crate::testkit::{Arena, P0, grant_all, standard_vs_passive};
+        let r = rules();
+        let setup = [
+            grant_all(&r, P0, 2000),
+            vec![crate::testkit::spawn(&r, P0, "yeoman", 24, 70, 4)],
+        ]
+        .concat();
+        let mut a = Arena::frozen(standard_vs_passive(&r), setup);
+        let kinds = [
+            "croft",
+            "croft",
+            "scriptorium",
+            "croft",
+            "muster_hall",
+            "croft",
+            "croft",
+            "scriptorium",
+        ];
+        for kind in kinds {
+            let k = BuildingKindId(r.building_kind_by_id(kind).unwrap().0);
+            let view = a.sim.view();
+            let mut ctx = a.ctx(P0);
+            let mut mem = BotMemory::default();
+            let pool = view.idle_workers(P0);
+            let found = site_for(&mut ctx, &mut mem, 1, k, Placement::NearTown, &pool);
+            let SiteSearch::Found { builder, tile } = found else {
+                panic!("a site for {kind}: {found:?} {:?}", a.sim.tick());
+            };
+            a.issue(
+                P0,
+                vec![sim::Command::Build {
+                    unit: builder,
+                    kind: k,
+                    tile,
+                }],
+            );
+        }
+        let view = a.sim.view();
+        let rects: Vec<(i32, i32, i32, i32)> = view
+            .buildings()
+            .filter(|b| b.owner == P0)
+            .map(|b| {
+                let d = r.building_kind(b.kind.0).unwrap();
+                let (x, y) = (i32::from(b.tile.x), i32::from(b.tile.y));
+                (
+                    x,
+                    y,
+                    x + i32::try_from(d.width_tiles).unwrap() - 1,
+                    y + i32::try_from(d.height_tiles).unwrap() - 1,
+                )
+            })
+            .collect();
+        assert_eq!(rects.len(), 1 + kinds.len(), "the Seat and every site");
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                // Grown by the gap of 1, `a` must not overlap `b`.
+                let apart = a.2 + 1 < b.0 || b.2 < a.0 - 1 || a.3 + 1 < b.1 || b.3 < a.1 - 1;
+                assert!(apart, "{a:?} and {b:?} touch");
+            }
+        }
     }
 }

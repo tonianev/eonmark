@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(p.recall_wave, RecallWave::WhileStaging);
         assert_eq!(p.wave_requires_age.as_deref(), Some("masonry"));
         let order = rules.ai.build_order("standard").unwrap();
-        assert_eq!(order.steps.len(), 28);
+        assert_eq!(order.steps.len(), 31);
         assert_eq!(
             order.steps[0],
             Step::Workers {
@@ -967,8 +967,8 @@ mod tests {
                 split: BTreeMap::from([("grain".into(), 3), ("lumber".into(), 4)]),
             }
         );
-        assert!(order.steps[9].optional(), "the second Town is optional");
-        assert!(matches!(order.steps[11], Step::Military));
+        assert!(order.steps[10].optional(), "the second Town is optional");
+        assert!(matches!(order.steps[12], Step::Military));
         assert_eq!(
             worker_kind(&rules).map(|(i, u)| (i, u.id.as_str())),
             Some((0, "yeoman"))
@@ -1023,7 +1023,8 @@ mod tests {
     }
 
     /// Every validator: each edit of the shipped data fails to load with an
-    /// error naming the file, the field and the reason.
+    /// error naming the file, the field and the reason. The step indices
+    /// are those of the shipped `standard.ron`.
     #[test]
     fn every_ai_validator_names_the_file_and_the_field() {
         let cases: &[(&str, &[(&str, &str, &str)], &[&str])] = &[
@@ -1100,17 +1101,17 @@ mod tests {
                     "Research(tech: \"arms_1\")",
                     "Research(tech: \"arms_9\")",
                 )],
-                &["steps[12].tech", "tech id"],
+                &["steps[13].tech", "tech id"],
             ),
             (
                 "age",
                 &[(BO, "Advance(age: \"masonry\")", "Advance(age: \"bronze\")")],
-                &["steps[17].age", "age id"],
+                &["steps[18].age", "age id"],
             ),
             (
                 "wait",
                 &[(BO, "    Military,", "    Wait(until_ds: 72001),")],
-                &["steps[11].until_ds", "0..=72000"],
+                &["steps[12].until_ds", "0..=72000"],
             ),
             (
                 "unknown-field",
@@ -1156,7 +1157,7 @@ mod tests {
                     "Build(kind: \"muster_hall\", count: 1, at: NearTown)",
                     "Build(kind: \"muster_hall\", count: 1, at: BorderEdge)",
                 )],
-                &["steps[10].at", "border_radius_tiles"],
+                &["steps[11].at", "border_radius_tiles"],
             ),
             // Static reachability.
             (
@@ -1165,12 +1166,12 @@ mod tests {
                     (BO, "Advance(age: \"masonry\"),", "Wait(until_ds: 0),"),
                     (BO, "Advance(age: \"charter\"),", "Wait(until_ds: 0),"),
                 ],
-                &["steps[18].kind", "\"engine_yard\"", "masonry", "optional"],
+                &["steps[19].kind", "\"engine_yard\"", "masonry", "optional"],
             ),
             (
                 "advance-techs",
                 &[(BO, "Research(tech: \"trade_1\"),", "Wait(until_ds: 0),")],
-                &["steps[17].age", "needs 2 techs", "research 1"],
+                &["steps[18].age", "needs 2 techs", "research 1"],
             ),
             (
                 "trainer",
@@ -1195,16 +1196,16 @@ mod tests {
                         "Train(kind: \"scribe\", count: 3, optional: true)",
                     ),
                 ],
-                &["steps[12].tech", "researched at a \"scriptorium\""],
+                &["steps[13].tech", "researched at a \"scriptorium\""],
             ),
             (
                 "predecessor",
                 &[(
                     BO,
-                    "Research(tech: \"trade_2\")",
+                    "Research(tech: \"letters_1\")",
                     "Research(tech: \"letters_2\")",
                 )],
-                &["steps[23].tech", "needs \"letters_1\" first"],
+                &["steps[26].tech", "needs \"letters_1\" first"],
             ),
             (
                 "per-town",
@@ -1213,12 +1214,12 @@ mod tests {
                     "Build(kind: \"croft\", count: 8, at: NearTown, optional: true)",
                     "Build(kind: \"croft\", count: 8, at: NearTown)",
                 )],
-                &["steps[21].count", "max_per_town"],
+                &["steps[24].count", "max_per_town"],
             ),
             (
                 "ages-go-up",
                 &[(BO, "Advance(age: \"charter\")", "Advance(age: \"masonry\")")],
-                &["steps[26].age", "must go up"],
+                &["steps[29].age", "must go up"],
             ),
             // Personalities.
             (

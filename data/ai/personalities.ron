@@ -7,7 +7,7 @@
       think_every_ds: 5, lookahead: 3, max_commands_per_think: 16,
       site_checks_per_think: 4, rebalance_per_think: 2, blocked_retry_ds: 300,
       building_gap_tiles: 1, near_town_min_tiles: 4, near_town_max_tiles: 12,
-      expansion_min_tiles: 14, resource_radius_tiles: 8, toward_enemy_penalty: 2,
+      expansion_min_tiles: 14, resource_radius_tiles: 20, toward_enemy_penalty: 2,
       border_scan_tiles: 40, tower_spacing_tiles: 8,
       army_mix: [(kind: "skirmisher", weight: 3), (kind: "bowman", weight: 2),
                  (kind: "shieldbearer", weight: 1), (kind: "mangonel", weight: 2)],

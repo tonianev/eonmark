@@ -3,10 +3,70 @@
 
 use rules::{Rules, UnitClass};
 use sim::{
-    BuildingId, BuildingKindId, Construction, Job, PlayerId, QueueItem, SimView, TechId, UnitId,
-    UnitKindId,
+    BuildingId, BuildingKindId, Construction, Fx, FxVec2, Hold, Job, PlayerId, QueueItem, SimView,
+    TechId, Tile, UnitId, UnitKindId,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The centre of a `w` x `h` footprint whose north-west tile is `nw`, in
+/// world coordinates (a 3x3 footprint's centre is the middle of its middle
+/// tile).
+pub fn footprint_centre(nw: Tile, w: u32, h: u32) -> FxVec2 {
+    let half = |n: u32| Fx::from_ratio(i32::try_from(n).expect("validated <= 8"), 2);
+    FxVec2::new(
+        Fx::from_int(i32::from(nw.x)) + half(w),
+        Fx::from_int(i32::from(nw.y)) + half(h),
+    )
+}
+
+/// The centre of building `kind` placed at `nw` (see [`footprint_centre`]).
+///
+/// # Panics
+///
+/// If `kind` is not in the rules.
+pub fn kind_centre(rules: &Rules, kind: BuildingKindId, nw: Tile) -> FxVec2 {
+    let def = rules
+        .building_kind(kind.0)
+        .expect("a building's kind exists");
+    footprint_centre(nw, def.width_tiles, def.height_tiles)
+}
+
+/// The tile that holds the centre of building `kind` placed at `nw`: the
+/// footprint's middle tile for odd sizes, the one south-east of the centre
+/// for even ones.
+pub fn kind_centre_tile(rules: &Rules, kind: BuildingKindId, nw: Tile) -> Tile {
+    let def = rules
+        .building_kind(kind.0)
+        .expect("a building's kind exists");
+    let half = |n: u32| u16::try_from(n / 2).expect("validated <= 8");
+    Tile::new(nw.x + half(def.width_tiles), nw.y + half(def.height_tiles))
+}
+
+/// `r` tiles squared in the scale of [`FxVec2::dist_sq_i64`].
+pub fn tiles_sq(r: u32) -> i64 {
+    (i64::from(r) * i64::from(r)) << 32
+}
+
+/// A gathering building of the bot's: where it is and how many of its
+/// slots a unit holds (walking or working).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Node {
+    /// The building.
+    pub id: BuildingId,
+    /// Its footprint centre.
+    pub centre: FxVec2,
+    /// Its slots.
+    pub slots: u8,
+    /// Slots a unit's gather job holds.
+    pub taken: u8,
+}
+
+impl Node {
+    /// Slots no unit holds.
+    pub fn free(&self) -> u8 {
+        self.slots.saturating_sub(self.taken)
+    }
+}
 
 /// Per unit kind, what a plan needs to sort units: whether the kind is
 /// the worker kind, armed (non-civilian with an attack), a supplier.
@@ -55,6 +115,19 @@ pub struct Facts {
     pub researched_or_queued: BTreeSet<TechId>,
     /// Own buildings per kind, sites included.
     pub buildings: BTreeMap<BuildingKindId, u32>,
+    /// Own buildings, sites included, per `(Town attributed to, kind)`.
+    pub per_town: BTreeMap<(BuildingId, BuildingKindId), u32>,
+    /// Own complete buildings the worker kind gathers at, per resource
+    /// index, in id order.
+    pub nodes: Vec<Vec<Node>>,
+    /// Own complete Towns whose annexation timer runs (no training or
+    /// research there).
+    pub contested: BTreeSet<BuildingId>,
+    /// The centre tiles of own buildings and sites of non-Town kinds that
+    /// project a border (Watchtowers).
+    pub towers: Vec<Tile>,
+    /// The centres of own Towns, sites included.
+    pub town_centres: Vec<FxVec2>,
     /// Own complete buildings per kind.
     pub complete: BTreeMap<BuildingKindId, Vec<BuildingId>>,
     /// Own construction sites.
@@ -76,6 +149,7 @@ impl Facts {
     pub fn gather(view: &SimView<'_>, me: PlayerId) -> Facts {
         let rules: &Rules = view.rules();
         let worker = rules::ai::worker_kind(rules).map(|(i, _)| UnitKindId(i));
+        let worker_id = rules::ai::worker_kind(rules).map(|(_, k)| k.id.as_str());
         let flags: Vec<KindFlags> = rules
             .units
             .iter()
@@ -114,6 +188,11 @@ impl Facts {
             queued_units: BTreeMap::new(),
             researched_or_queued: view.researched(me).clone(),
             buildings: BTreeMap::new(),
+            per_town: BTreeMap::new(),
+            nodes: vec![Vec::new(); rules.resources.resources.len()],
+            contested: BTreeSet::new(),
+            towers: Vec::new(),
+            town_centres: Vec::new(),
             complete: BTreeMap::new(),
             sites: Vec::new(),
             towns: Vec::new(),
@@ -123,6 +202,7 @@ impl Facts {
         };
         let territory = view.territory();
         let map = view.map();
+        let mut taken: BTreeMap<BuildingId, u8> = BTreeMap::new();
         for u in view.units() {
             let k = flag(u.kind);
             if u.owner != me {
@@ -140,6 +220,8 @@ impl Facts {
             }
             match u.job {
                 Some(Job::Gather { node, .. }) => {
+                    let n = taken.entry(node).or_default();
+                    *n = n.saturating_add(1);
                     if let Some(r) = resource_of(node) {
                         f.gatherers[r].push(u.id);
                     }
@@ -171,16 +253,39 @@ impl Facts {
                 continue;
             }
             *f.buildings.entry(b.kind).or_default() += 1;
+            if let Some(t) = b.town {
+                *f.per_town.entry((t, b.kind)).or_default() += 1;
+            }
+            let def = rules.building_kind(b.kind.0);
+            if b.kind == town_kind {
+                f.town_centres.push(kind_centre(rules, b.kind, b.tile));
+            } else if def.is_some_and(|d| d.border_radius_tiles.is_some()) {
+                f.towers.push(kind_centre_tile(rules, b.kind, b.tile));
+            }
             if !complete {
                 f.sites.push(b.id);
                 continue;
             }
             f.complete.entry(b.kind).or_default().push(b.id);
+            if let Some(g) = def.and_then(|d| d.gather.as_ref())
+                && worker_id.is_some_and(|w| w == g.worker)
+                && let Some(r) = rules.resource_index(&g.resource)
+            {
+                f.nodes[r].push(Node {
+                    id: b.id,
+                    centre: kind_centre(rules, b.kind, b.tile),
+                    slots: b.slots,
+                    taken: taken.get(&b.id).copied().unwrap_or(0),
+                });
+            }
             if b.kind == town_kind {
                 if b.town_state.is_some_and(|t| t.seat) {
                     seat = Some(b.id);
                 } else {
                     f.towns.push(b.id);
+                }
+                if b.town_state.is_some_and(|t| t.hold != Hold::Held) {
+                    f.contested.insert(b.id);
                 }
             }
             for entry in &b.queue {

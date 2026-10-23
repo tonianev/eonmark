@@ -47,7 +47,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated, and for any edit under `data/rules/` or `data/ai/` (both are in `rules_hash`); the comment above it gives the reason for the current number | 21 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated, and for any edit under `data/rules/` or `data/ai/` (both are in `rules_hash`); the comment above it gives the reason for the current number | 22 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -174,7 +174,9 @@ notes"). `stays_on_annexation` in `buildings.ron` is read from the same
 slice. M5b's first slice (`rules_version` 21) changed no value here: the
 bump re-recorded every fixture for the new replay header field `ai_seats`
 and the hashed bot memory (`SIM_VERSION` 17), and `rules_hash` now also
-covers `../ai/`.
+covers `../ai/`. M5b's economy slice (`rules_version` 22) changed only
+`../ai/` (the Standard build order and `resource_radius_tiles`); the
+re-recorded fixtures differ in their headers only.
 
 ## resources.ron
 
@@ -551,7 +553,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (21 to 22), update the one-line
+2. Bump `rules_version` in `rules.ron` (22 to 23), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -563,8 +565,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=22 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
-(the repository is at 21, so before the edit it prints `rules_version=21`;
+`OK rules_version=23 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
+(the repository is at 22, so before the edit it prints `rules_version=22`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`

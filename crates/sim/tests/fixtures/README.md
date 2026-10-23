@@ -26,6 +26,13 @@ The `snapshot_restore` recording snapshots the sim before tick 300, restores
 the bytes into a fresh sim and continues recording on that sim; `verify`
 re-simulates without the swap, so an `OK` proves the restore was exact.
 
+Recorded 2026-10-23 at `rules_version` 22, `SIM_VERSION` 17 with
+`just rerecord` (M5b economy slice: only `data/ai/` changed, the Standard
+build order and `resource_radius_tiles`, and no fixture has a Standard
+seat). Each file differs from its `rules_version` 21 recording in the
+header's `rules_version` and `rules_hash` only (10 bytes before, 11 after;
+every other byte is equal), and no `.hash` file changed.
+
 Recorded 2026-10-23 at `rules_version` 21, `SIM_VERSION` 17 with
 `just rerecord` (M5b bot plumbing: the header gained `ai_seats` as its last
 field and every `Player` the hashed `ai_memory`, in the `meta` sub-hash;

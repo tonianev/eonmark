@@ -4,8 +4,21 @@
 use super::facts::Facts;
 use super::sites::MapAnalysis;
 use rules::{BuildOrder, Personality};
-use sim::{Command, PlayerId, SimView, UnitId};
-use std::collections::BTreeSet;
+use sim::{Command, FxVec2, PlayerId, SimView, Tile, Unit, UnitId};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Where `u` is headed or holds: its order's goal, else its post's goal.
+/// (A unit's order becomes a post on arrival, so "has an order goal near
+/// X" alone is not a stable fact.)
+pub fn goal_or_post(u: &Unit) -> Option<FxVec2> {
+    u.order.as_ref().map(|o| o.goal).or(u.post.map(|p| p.goal))
+}
+
+/// Whether `u` is already heading for, or holding, a point within
+/// `tolerance_tiles` of `goal` ("on station": it gets no new order).
+pub fn on_station(u: &Unit, goal: FxVec2, tolerance_tiles: u32) -> bool {
+    goal_or_post(u).is_some_and(|g| g.dist_sq_i64(goal) <= super::facts::tiles_sq(tolerance_tiles))
+}
 
 /// The stock one plan may still spend: what the stockpile holds, less
 /// what was spent or reserved earlier in the same plan. All arithmetic
@@ -91,6 +104,8 @@ pub struct Ctx<'a> {
     /// Commands left in this plan.
     pub commands_left: u32,
     out: Vec<Command>,
+    occupied: Option<BTreeSet<Tile>>,
+    rally: Option<FxVec2>,
 }
 
 impl<'a> Ctx<'a> {
@@ -126,6 +141,82 @@ impl<'a> Ctx<'a> {
             probes_left: knobs.site_checks_per_think,
             commands_left: knobs.max_commands_per_think,
             out: Vec::new(),
+            occupied: None,
+            rally: None,
+        }
+    }
+
+    /// The plan's tick.
+    pub fn tick(&self) -> u32 {
+        self.view.tick
+    }
+
+    /// `ds` deciseconds in ticks.
+    pub fn ticks(&self, ds: u32) -> u32 {
+        self.view.rules().ticks_from_ds(ds)
+    }
+
+    /// The tiles any unit stands on, gathered once per plan on first use
+    /// (a site with a unit on its footprint is rejected).
+    pub fn occupied(&mut self) -> &BTreeSet<Tile> {
+        let view = self.view;
+        self.occupied
+            .get_or_insert_with(|| view.units().map(|u| view.map().tile_of(u.pos)).collect())
+    }
+
+    /// The army's rally point: the centre of the first tile of the square
+    /// spiral around the map analysis' rally seed that is passable and the
+    /// bot's own land (the own start when no such tile is near), computed
+    /// once per plan on first use.
+    pub fn rally(&mut self) -> FxVec2 {
+        if let Some(r) = self.rally {
+            return r;
+        }
+        let map = self.view.map();
+        let territory = self.view.territory();
+        let seed = self.map.rally_seed;
+        let reach = i32::try_from(self.knobs.rally_tiles_from_seat).unwrap_or(0);
+        // The spiral yields whole rings in order and skips tiles off the
+        // map, so this many tiles covers at most the rings up to `reach`.
+        let tile = map
+            .spiral(seed)
+            .take(rally_search_tiles(reach))
+            .find(|t| map.passable(*t) && territory.owner_at(*t) == Some(self.me))
+            .unwrap_or(self.map.own_start);
+        let r = map.center_of(tile);
+        self.rally = Some(r);
+        r
+    }
+
+    /// Issue `make(units)` as one command, unless `units` is empty (then
+    /// nothing is issued). `false` when the plan's command cap is reached.
+    pub fn order(&mut self, units: Vec<UnitId>, make: impl FnOnce(Vec<UnitId>) -> Command) -> bool {
+        if units.is_empty() {
+            return true;
+        }
+        self.push(make(units))
+    }
+
+    /// Issue one command per distinct point of `orders` (units grouped by
+    /// the point they go to, in point order), within the cap.
+    pub fn order_grouped(
+        &mut self,
+        orders: Vec<(UnitId, FxVec2)>,
+        make: impl Fn(Vec<UnitId>, FxVec2) -> Command,
+    ) {
+        let mut by_point: BTreeMap<(i64, i64), (FxVec2, Vec<UnitId>)> = BTreeMap::new();
+        for (u, p) in orders {
+            by_point
+                .entry((p.x.to_bits(), p.y.to_bits()))
+                .or_insert_with(|| (p, Vec::new()))
+                .1
+                .push(u);
+        }
+        for (_, (p, mut units)) in by_point {
+            units.sort();
+            if !self.push(make(units, p)) {
+                return;
+            }
         }
     }
 
@@ -155,6 +246,13 @@ impl<'a> Ctx<'a> {
     pub fn into_commands(self) -> Vec<Command> {
         self.out
     }
+}
+
+/// Tiles of the square spiral searched for the rally point: rings up to
+/// `reach`.
+fn rally_search_tiles(reach: i32) -> usize {
+    let side = usize::try_from(2 * reach.max(0) + 1).expect("non-negative");
+    side * side
 }
 
 #[cfg(test)]

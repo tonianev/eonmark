@@ -23,6 +23,14 @@ pub mod harness;
 pub mod seats;
 pub mod standard;
 
+// The unit tests share the integration tests' testkit, which names this
+// crate `ai`.
+#[cfg(test)]
+extern crate self as ai;
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+pub(crate) mod testkit;
+
 use rules::Rules;
 use sim::{
     AiController, AiMemory, Command, FxVec2, MatchSetup, PlayerCommand, PlayerId, SimView, UnitId,
@@ -157,6 +165,62 @@ pub fn controller_for(
         by_player.insert(seat.player, bot);
     }
     Ok(Box::new(seats::Seats::new(by_player)))
+}
+
+/// One line about `player`'s bot for the dev panel and debugging (M5b):
+/// for a Standard seat, the build-order window (step index and label),
+/// the `Military` latch, the wave (phase and size, the next launch tick,
+/// waves launched) and the defend latch (Town and age, defences
+/// released), read from the view and the player's memory; `passive` for a
+/// Passive seat, `human` for a slot with no seat. Call it outside
+/// `think`, where `view.ai_memory` shows the memory.
+pub fn describe(view: &SimView<'_>, player: PlayerId) -> String {
+    let Some(seat) = view.setup().ai_seats.iter().find(|s| s.player == player) else {
+        return "human".to_string();
+    };
+    if seat.bot != BOT_STANDARD {
+        return seat.bot.clone();
+    }
+    let rules = view.rules();
+    let Some(knobs) = rules.ai.personality(&seat.personality) else {
+        return format!("standard {}: unknown personality", seat.personality);
+    };
+    let Some(order) = rules.ai.build_order(&knobs.build_order) else {
+        return format!("standard {}: unknown build order", seat.personality);
+    };
+    let mem = standard::BotMemory::decode(view.ai_memory(player));
+    let facts = standard::Facts::gather(view, player);
+    let lookahead = usize::try_from(knobs.lookahead).unwrap_or(1);
+    let window: Vec<String> =
+        standard::build_order::window_of(order, &facts, rules, &mem, lookahead)
+            .into_iter()
+            .map(|i| format!("{i} {}", standard::build_order::step_label(&order.steps[i])))
+            .collect();
+    let wave = mem.wave.as_ref().map_or_else(
+        || "none".to_string(),
+        |w| format!("{:?}x{}", w.phase, w.units.len()),
+    );
+    let defend = mem.defend.map_or_else(
+        || "none".to_string(),
+        |d| {
+            format!(
+                "town {} for {}",
+                d.town.0,
+                view.tick.saturating_sub(d.since)
+            )
+        },
+    );
+    format!(
+        "standard {} window=[{}] military={} wave={} next_wave={} waves={} defend={} defends={}",
+        seat.personality,
+        window.join(", "),
+        if mem.military { "yes" } else { "no" },
+        wave,
+        mem.next_wave_at,
+        mem.waves_launched,
+        defend,
+        mem.defends
+    )
 }
 
 /// A bot that never acts and never writes memory. Used by tests, benches

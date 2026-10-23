@@ -9,18 +9,26 @@
 //! so a plan's commands apply before the next plan reads the view), so two
 //! bots never plan on the same tick.
 //!
-//! M5b slice 1 is the skeleton: the cadence gate, the memory codec, the
-//! facts, the plan context and the static map analysis, and no rule yet,
-//! so a plan issues nothing. The pipeline (defend, build order, economy,
-//! production, waves, rally upkeep) fills in from slice 2 on.
+//! The rules run in a fixed order over one plan context, each claiming
+//! the units it orders so a later rule leaves them alone:
+//!
+//! 1. [`defend`]: the defend latch, the home guard, wave recall;
+//! 2. [`build_order`]: the `Military` latch, the window, the site keeper;
+//! 3. [`economy`]: idle workers and the gather split;
+//! 4. [`army::produce`]: Supply Wains, then the army mix;
+//! 5. waves (M5b slice 3);
+//! 6. [`army::rally_upkeep`]: trainers rallied to the army's rally point.
 
+pub mod army;
 pub mod build_order;
 pub mod ctx;
+pub mod defend;
+pub mod economy;
 pub mod facts;
 pub mod memory;
 pub mod sites;
 
-pub use ctx::{Ctx, Ledger};
+pub use ctx::{Ctx, Ledger, goal_or_post, on_station};
 pub use facts::Facts;
 pub use memory::{BotMemory, BotStats, stats};
 pub use sites::MapAnalysis;
@@ -90,16 +98,24 @@ impl StandardBot {
     /// directly.
     pub fn plan(&self, me: PlayerId, view: &SimView<'_>, memory: &mut AiMemory) -> Vec<Command> {
         let knobs = self.knobs(view.rules());
-        let mem = BotMemory::decode(memory.bytes());
-        let ctx = Ctx::new(*view, me, knobs, &self.map);
-        // The rules run here in their fixed order from M5b slice 2 on:
-        // defend, build order, economy, production, waves, rally upkeep.
+        let mut mem = BotMemory::decode(memory.bytes());
+        let mut ctx = Ctx::new(*view, me, knobs, &self.map);
+        run_rules(&mut ctx, &mut mem);
         let bytes = mem.encode();
         if bytes != memory.bytes() {
             memory.set(bytes);
         }
         ctx.into_commands()
     }
+}
+
+/// The plan pipeline over `ctx` and `mem`, in its fixed order.
+pub fn run_rules(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
+    defend::step(ctx, mem);
+    build_order::step(ctx, mem);
+    economy::step(ctx, mem);
+    army::produce(ctx, mem);
+    army::rally_upkeep(ctx);
 }
 
 impl AiController for StandardBot {

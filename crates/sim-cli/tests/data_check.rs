@@ -184,13 +184,24 @@ fn a_mul_written_as_1_25_exits_1_naming_techs_ron() {
 /// fails data-check (an Advance is never optional).
 #[test]
 fn an_advance_without_its_techs_exits_1_naming_the_build_order_step() {
+    // The step's index comes from the shipped build order, so tuning the
+    // steps before it moves the expected field instead of failing it.
+    let rules = rules::Rules::load(repo_data()).unwrap();
+    let masonry = rules
+        .ai
+        .build_order("standard")
+        .unwrap()
+        .steps
+        .iter()
+        .position(|s| matches!(s, rules::Step::Advance { age } if age == "masonry"));
+    let field = format!("steps[{}].age: ", masonry.unwrap());
     rejects_edit(
         "advance-techs",
         "ai/build_orders/standard.ron",
         "    Research(tech: \"trade_1\"),",
         "    Wait(until_ds: 0),",
         &[
-            "steps[17].age: ",
+            field.as_str(),
             "\"masonry\" needs 2 techs that count toward an age",
         ],
     );

@@ -46,7 +46,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 19 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated; the comment above it gives the reason for the current number | 20 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -165,8 +165,12 @@ for it: the age-gap table, the late Harrying bonus, the annexation knobs,
 the 45-minute cap and the Yield Cap decay, each with its validator rules.
 The attrition slice (`rules_version` 19) reads the attrition fields: the
 age-gap table and the late Harrying bonus, besides `supply_radius_tiles`
-and `attrition_interval_ds`. The annexation and match-end fields are read
-from the annexation slice on; until then they are validated but unused.
+and `attrition_interval_ds`. The annexation slice (`rules_version` 20)
+reads the rest: `annexation_ds`, the annexation knobs and selectors,
+`annexation_town_hp_permille`, `match_cap_ds` and the Yield Cap decay
+(`docs/design/towns.md` and `docs/design/economy.md`, "M5a implementation
+notes"). `stays_on_annexation` in `buildings.ron` is read from the same
+slice.
 
 ## resources.ron
 
@@ -543,7 +547,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (19 to 20), update the one-line
+2. Bump `rules_version` in `rules.ron` (20 to 21), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -555,8 +559,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=20 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 maps=plains_1v1 strings=en`
-(the repository is at 19, so before the edit it prints `rules_version=19`;
+`OK rules_version=21 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 maps=plains_1v1 strings=en`
+(the repository is at 20, so before the edit it prints `rules_version=20`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
@@ -564,13 +568,22 @@ from an independent `sim-cli verify` OK line, then fails if a fixture
 differs from the merge base with main while the working-tree
 `rules_version` is not larger than the base's (CI runs the same check,
 `scripts/check_fixture_policy.sh`, on the commits of every pull request).
-The sim reads `attrition_interval_ds` since M5a's attrition slice, but no
-golden fixture researches Harrying, so attrition never bites in them:
-every `.hash` stays the same and only the replay headers change.
-`cargo test -p sim` passes too, because the attrition tests read the
-interval from `Rules` (64 ticks at 32 ds, 80 at 40) instead of hard-coding
-it. A change that a fixture does exercise, such as a unit's speed, changes its `.hash`
-too, and the bump in the same commit is what makes that legal. `just rerecord move_500 group_spiral` re-records
+The sim reads `attrition_interval_ds` since M5a's attrition slice, and
+one golden fixture researches Harrying: in `capture_seat` P1 has Harrying
+I and P0's Bowman bleeds on its land until the annexation timer turns it
+neutral, so its pulses land every 80 ticks instead of 64 and
+`capture_seat.hash` changes. Every other fixture has no Harrying, so
+attrition never bites in them: their `.hash` files stay the same and only
+the replay headers change. `cargo test -p sim` passes too, because the
+attrition tests read the interval from `Rules` (64 ticks at 32 ds, 80 at
+40) instead of hard-coding it, and the annexation and outcome tests read
+`annexation_ds`, the defender radius, the flipped Town's hit points and
+the match cap the same way. `cargo test -p rules` passes but for one
+test, `loads_repo_data`, which pins the shipped values on purpose
+(`attrition_interval_ticks() == 64` among them): it is the one test a
+data edit must update, in the same commit, to the new value (80). A
+change that a fixture does exercise, such as a unit's speed, changes its
+`.hash` too, and the bump in the same commit is what makes that legal. `just rerecord move_500 group_spiral` re-records
 only the fixtures named.
 
 A typo such as `attrition_interval_s` fails `data-check` with the file

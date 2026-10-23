@@ -50,7 +50,7 @@ Lore is exempt from the Yield Cap. Instead its stockpile stops at 999; Lore inco
 
 A faction Modifier can scale the cap: `yield_cap Mul 1250` gives 70 * 1250 / 1000 = 87 at Trade level 0 (floor). This is the M9 Tidewater League example and the M4a acceptance test.
 
-An optional late-game pressure knob in `rules.ron` can decay the Yield Cap after minute 30. It exists for the M6 fun gate and is off by default.
+An optional late-game pressure knob in `rules.ron` can decay the Yield Cap after minute 30. It exists for the M6 fun gate and is off by default. Since the M5a annexation slice (`SIM_VERSION` 16) the sim implements it in `tech::yield_cap`: from `yield_cap_decay_after_ds` (18000 ds, tick 36000) on, the resolved cap (with the Trade rows) loses `yield_cap_decay_step * (1 + (tick - after) / every)`, `every` being `yield_cap_decay_every_ds` in ticks (3000 ds, 6000 ticks), floored at 0. It reads the sim's tick, so step 6d and `SimView::income` agree. The shipped `yield_cap_decay_step` is 0, so the cap never moves until a fun-gate iteration sets it (`late_game_yield_cap_decay_is_off_in_the_shipped_data_and_lowers_the_cap_when_set`); the validator keeps the step at most `yield_cap_base`.
 
 ## Income algorithm (integer micro-units)
 

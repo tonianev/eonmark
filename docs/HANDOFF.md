@@ -105,8 +105,16 @@ attrition: `crates/sim/src/attrition.rs` runs as step 5b' between movement
 and combat resolution, with the hashed `Unit::exposed_ticks` counter, the
 per-step supply grid of Supply Wain tiles, `Command::DebugDamage` and the
 `attrition_*` tests of acceptance line 1 in `crates/sim/tests/m5a.rs`
-(`cargo test -p sim attrition`). Annexation, the outcome and the game half
-follow.
+(`cargo test -p sim attrition`). Its third slice (`SIM_VERSION` 16,
+`rules_version` 20) implements annexation and the outcome:
+`crates/sim/src/annexation.rs` (step 5d: the timer of a Town at 0 HP, its
+neutral land, the flip) and `crates/sim/src/victory.rs` (step 6e:
+Surrender, Seat captured, all Towns lost, the 45-minute territory cap),
+the hashed `TownState::hold` and `State::outcome`, `TownContested`, the
+annex-hold guard rule, the Yield Cap decay knob (off), the `capture_seat`
+and `stalemate_45min` goldens and the `annexation_*` tests of acceptance
+line 2 (`cargo test -p sim annexation`). The game half (the outcome
+overlay, the freeze, the markers) and the bench and close follow.
 
 Under the owner's M4b decision 3, M5a may start while M4b's line 2 waits
 for that Mac session, as M3b's fps line does. A milestone is done when

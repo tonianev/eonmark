@@ -78,10 +78,13 @@ numbered in the ROADMAP's M5b Notes. M5b has started:
 - slice 1 (`SIM_VERSION` 17, `rules_version` 21): bot seats in the header,
   the hashed `Player::ai_memory`, `data/ai/` and `sim-cli play-bots`;
 - slice 2 (`rules_version` 22): the Standard bot's economy, build order,
-  sites, defence and army production.
+  sites, defence and army production;
+- slice 3 (`rules_version` 23): attack waves (stage, siege, ring hold,
+  all-in), `sim-cli bench --bots`, the `m5_first_match` golden and the
+  play-bots acceptance runs in CI.
 
-Attack waves, `m5_first_match`, `bench --bots`, New Game and the overlay
-proxy follow in slices 3 to 5.
+New Game, the overlay proxy and the milestone close follow in slices 4
+and 5.
 
 Open owner checks on the dev Mac, batched into one session under the owner's
 decision 3 in the ROADMAP's M4b Notes (an exception to rule 1 in
@@ -119,7 +122,7 @@ ticked with pasted command output in a merged PR.
 | Architecture and invariants | `docs/ARCHITECTURE.md`, `docs/DETERMINISM.md`, `docs/DATA_FORMAT.md` | Complete |
 | Per-system design | `docs/design/*.md` | Complete, with target numbers |
 | Dependency pins and policy | `docs/DEPENDENCIES.md`, `docs/adr/` | Complete |
-| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b merged (PR #38: the `enemy_outpost` scenarios, their golden and `SimView::building_hp`); M5a closed on PR #43, done when it merges (attrition, supply, annexation, the outcome, `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens); M5b under way: `crates/ai` holds the bot seats, the play-bots harness and the Standard bot (slices 1 and 2, `SIM_VERSION` 17, `rules_version` 22) |
+| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b merged (PR #38: the `enemy_outpost` scenarios, their golden and `SimView::building_hp`); M5a closed on PR #43, done when it merges (attrition, supply, annexation, the outcome, `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens); M5b under way: `crates/ai` holds the bot seats, the play-bots harness and the Standard bot with its attack waves (slices 1 to 3, `SIM_VERSION` 17, `rules_version` 23) |
 | Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b merged (PR #38; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window; M5a's game half on PR #43: the freeze at the outcome, the outcome overlay with the final hash, the attrition indicator, the supply ring, the annexation timer and readout |
 | CI and release automation | `.github/workflows/`, `scripts/`, `justfile` | In use since M0: every PR runs check, headless, game-linux, deny and hash-parity |
 

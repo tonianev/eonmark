@@ -124,6 +124,33 @@ CSV columns:
 
 Additional flags: `--faction-a`/`--faction-b` (one faction in v0.1), `--personality-a`/`--personality-b` (comma-separated list cycled across seeds). A `--summary` mode printing win rates by personality is a `good first issue`. CI runs five seeded games on ubuntu from M5b and asserts that two runs of seed 7 print identical hashes on both ubuntu and macos from M6.
 
+### As built (M5b)
+
+`sim-cli play-bots --seeds <A..B | N> [--a passive|standard] [--b passive|standard] [--personality-a <id,...>] [--personality-b <id,...>] [--max-ticks <N>] [--jobs <N>] [--allow-undecided]` (`crates/sim-cli/src/play_bots.rs`, the engine-free `ai::harness`). `A..B` is inclusive and `N` is `N..N`; `--a` is player A (`PlayerId(0)`) and `--b` player B, both `standard` by default; personalities default to `standard` (none for `passive`) and cycle over the seeds; `--max-ticks` defaults to the match cap (54000), which decides every game; `--jobs` defaults to 1. Each game is `MatchSetup::bots` from the standard start with the bots `ai::controller_for` builds from the header, owns its `Sim`, `Rules` and controller, and runs under `catch_unwind`, so a panic becomes a `panic` row for its seed. No `--faction` flag exists yet (one faction in v0.1) and no `--summary`.
+
+The CSV goes to stdout in seed order and holds no wall time, so two runs of the same seeds print the same bytes whatever `--jobs` is. The seven columns above come first, unchanged in order; `winner` can also be `draw` (an exact territory tie at the cap, M5a owner decision 1) or `panic`, and `outcome` also `draw`, or empty when undecided. Diagnostics follow:
+
+| Column | Meaning |
+| --- | --- |
+| `reason` | `seat_captured`, `all_towns_lost`, `surrender`, `territory`, or empty |
+| `first_attack_units`, `first_attack_wains` | at `first_attack_tick`: A's non-civilian units committed to B's land (order goal, post goal, attack target or position on it), Supply Wains included, and how many of them supply |
+| `second_town_tick`, `tower_tick` | first tick A owns a second complete Town, a complete Watchtower |
+| `bo_done_tick_a` | first tick every non-optional step of A's build order is done (a `standard` seat) |
+| `age_reached_tick_b`, `first_attack_tick_b`, `first_attack_units_b`, `first_attack_wains_b` | the same facts for B, for the side swap |
+| `territory_a`, `territory_b` | owned tiles at the end |
+| `units_lost_a`, `units_lost_b` | `UnitDied` events by owner |
+| `min_enemy_town_hp_permille_a`, `_b` | the lowest hit points, per mille, any enemy Town reached: the pressure a side put on the other |
+| `rejected_a`, `rejected_b` | `CommandRejected` events by player |
+| `second_town_tick_b`, `tower_tick_b`, `bo_done_tick_b` | B's second Town, Watchtower and build order |
+
+`first_attack_tick` is the tick (`Sim::tick()` after the step) at which one of A's units first has the `AttackMove` intent with its goal on B's land. The Standard bot attack-moves into enemy land only at a wave's assault: its stage point lies off enemy land with a margin for the group's spread, its defence attack-moves to threats on its own land, it clears defenders and focuses siege with `Attack`, holds the ring with `Move`, and recalls to its own rally. So the first such tick is the first wave's assault order, in which every armed unit of the wave attack-moves to the target Town and its Wain moves to the Wain point, all applied in one tick, and the units and Wains committed at that tick are the wave's.
+
+stderr gets one line per game as it ends, `game seed=1 ticks=… wall_s=… step_ms_mean=… ai_ms_mean=…` (`ai_ms_mean` is the time inside the bots' `think` per tick), and a summary, `play-bots: games=5 jobs=5 wall_s=… a=… b=… draw=… none=… panic=… decisive=… tiebreak=…`. The exit code is 0 when every game has a declared winner (`a` or `b`), 1 when any row is `draw`, `none` or `panic` (with `--allow-undecided` only a panic exits 1), and 2 for usage, rules or bot-id errors. `sim-cli record --scenario m5_first_match --seed N` records Standard against Standard at seed N to its outcome, and seed 1 is the `m5_first_match` golden.
+
+`scripts/check_first_wave.sh [--side a|b] [--decisive] <csv>` checks ROADMAP M5b's second line on such a CSV: for every row, `age_reached_tick` is set, `age_reached_tick <= first_attack_tick < 18000`, `first_attack_units >= 8` and `first_attack_wains >= 1` (the `_b` columns with `--side b`); `--decisive` adds owner decision 4's gates against Passive: the side wins every game by Seat capture, with its second Town and Watchtower standing before tick 18000. CI's headless job runs it from both sides.
+
+`sim-cli bench --units 400 --ticks 1200 --bots` measures what the bots add per tick (ROADMAP M5b's third line): two Standard seats at Masonry with 2000 of each resource and 200 units a side (half at the own rally with 2 Mangonels and a Supply Wain, half 12 tiles north of the enemy Seat, on its land), a tick-0 stream at sequence numbers from `1 << 30`. It prints `ai_ms` (the time inside `think` per tick: mean, p95, max, the plans, the slowest plan and the commands), the whole step against `control_step_ms` (the same stream with Passive seats), and `waves_launched`, `defends`, `engaged`, `rejected`, `path_queue_max` and the final hash, and exits 1 only when the bots were not exercised (fewer than 200 plans, 2 waves or 1 defence), never on the budget.
+
 ## The M6 fun gate
 
 The gate is quoted verbatim from the design decision "Human fun gate" so that no tuning pass can quietly weaken it:

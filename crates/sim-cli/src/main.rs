@@ -95,6 +95,11 @@ enum Cmd {
         /// sides that attack-move at each other.
         #[arg(long, conflicts_with_all = ["astar", "territory"])]
         combat: bool,
+        /// With --combat: switch attrition on (M5a). Both players research
+        /// Harrying I and II, P1 owns a Town beside the arena, and each side
+        /// attack-moves a Supply Wain with its army.
+        #[arg(long, requires = "combat")]
+        harrying: bool,
         /// Border sources placed before the timed edits (--territory).
         #[arg(long, default_value_t = 16)]
         sources: u32,
@@ -178,11 +183,12 @@ fn main() -> ExitCode {
         Cmd::Verify { replay } => verify(&cli.data, &replay),
         Cmd::Bench {
             combat: true,
+            harrying,
             units,
             ticks,
             seed,
             ..
-        } => bench_combat(&cli.data, units, ticks, seed),
+        } => bench_combat(&cli.data, units, ticks, seed, harrying),
         Cmd::Bench {
             territory: true,
             sources,
@@ -999,28 +1005,97 @@ const COMBAT_MIN_FIGHTING_TICKS: usize = 100;
 
 /// What `bench --combat` measured.
 struct CombatBench {
-    /// Units spawned: `--units` rounded down to a multiple of 8.
+    /// Units spawned in the armies: `--units` rounded down to a multiple of
+    /// 8 (the `--harrying` Wains not included).
     units: u16,
     /// Milliseconds per step, every tick.
     step_ms: Vec<f64>,
     /// Milliseconds per step over the fighting ticks: ticks with at least
     /// one `Hit` after whose step both sides still have a quarter of their
-    /// units (50 of 200 at the acceptance size, 400 units).
+    /// armed units (50 of 200 at the acceptance size, 400 units).
     fighting_ms: Vec<f64>,
     /// `Hit` events.
     hits: u64,
-    /// `UnitDied` events per owner.
+    /// `UnitDied` events per owner (a `--harrying` Wain's death included).
     deaths: [u32; 2],
     /// `BuildingDestroyed` events.
     destroyed: u32,
+    /// `--harrying` only: what attrition did (`None` without the flag).
+    attrition: Option<AttritionCounts>,
     /// Hash after the last tick.
     final_hash: u64,
 }
 
-/// Run [`sim::scenarios::combat_bench`] for `ticks` ticks, timing each
-/// `step` alone (events and unit counts are read outside the timed region).
-fn run_combat_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> CombatBench {
-    let (setup, stream) = sim::scenarios::combat_bench(rules, units, seed);
+/// What attrition did in a `bench --combat --harrying` run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AttritionCounts {
+    /// `Attrition` events: pulses that took hit points.
+    pulses: u64,
+    /// Unit-ticks, counted after each step, of a unit that stood where
+    /// attrition would bite (not immune, on another player's land whose
+    /// Harrying level is at least 1) but that one of its own Supply Wains
+    /// covered: the attrition that supply prevented.
+    supplied: u64,
+    /// Unit-ticks, counted after each step, of a unit whose exposure
+    /// counter was running (`exposed_ticks > 0`): bleeding, unsupplied.
+    exposed: u64,
+}
+
+/// One step's share of [`AttritionCounts::supplied`] and
+/// [`AttritionCounts::exposed`], read from the view after the step.
+fn attrition_unit_ticks(view: &SimView<'_>, rules: &Rules) -> (u64, u64) {
+    let players = [PlayerId(0), PlayerId(1)];
+    let harrying = players.map(|p| view.harrying_level(p) > 0);
+    let wains = players.map(|p| view.supply_wains(p));
+    let r2 = i64::from(view.supply_radius_tiles()).pow(2);
+    let (mut supplied, mut exposed) = (0, 0);
+    for u in view.units() {
+        if u.exposed_ticks > 0 {
+            exposed += 1;
+        }
+        if rules
+            .unit_kind(u.kind.0)
+            .is_none_or(|k| k.immune_to_attrition)
+        {
+            continue;
+        }
+        let tile = view.map().tile_of(u.pos);
+        let Some(owner) = view.territory().owner_at(tile) else {
+            continue;
+        };
+        if owner == u.owner || !harrying.get(usize::from(owner.0)).copied().unwrap_or(false) {
+            continue;
+        }
+        let covered = wains.get(usize::from(u.owner.0)).is_some_and(|ws| {
+            ws.iter().any(|w| {
+                let dx = i64::from(tile.x) - i64::from(w.x);
+                let dy = i64::from(tile.y) - i64::from(w.y);
+                dx * dx + dy * dy <= r2
+            })
+        });
+        if covered {
+            supplied += 1;
+        }
+    }
+    (supplied, exposed)
+}
+
+/// Run [`sim::scenarios::combat_bench`] (or, with `harrying`,
+/// [`sim::scenarios::combat_bench_harrying`]) for `ticks` ticks, timing each
+/// `step` alone (events, unit counts and attrition counts are read outside
+/// the timed region).
+fn run_combat_bench(
+    rules: &Rules,
+    units: u16,
+    ticks: u32,
+    seed: u64,
+    harrying: bool,
+) -> CombatBench {
+    let (setup, stream) = if harrying {
+        sim::scenarios::combat_bench_harrying(rules, units, seed)
+    } else {
+        sim::scenarios::combat_bench(rules, units, seed)
+    };
     let mut sim = scenarios::build(&setup, rules);
     let per_side_quarter = usize::from(units / 8);
     let mut b = CombatBench {
@@ -1030,6 +1105,7 @@ fn run_combat_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> CombatB
         hits: 0,
         deaths: [0; 2],
         destroyed: 0,
+        attrition: harrying.then(AttritionCounts::default),
         final_hash: 0,
     };
     for t in 0..ticks {
@@ -1044,28 +1120,53 @@ fn run_combat_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> CombatB
                 SimEvent::Hit { .. } => tick_hits += 1,
                 SimEvent::UnitDied { owner, .. } => b.deaths[usize::from(owner.0)] += 1,
                 SimEvent::BuildingDestroyed { .. } => b.destroyed += 1,
+                SimEvent::Attrition { .. } => {
+                    if let Some(a) = b.attrition.as_mut() {
+                        a.pulses += 1;
+                    }
+                }
                 _ => {}
             }
         }
         b.hits += tick_hits;
+        let view = sim.view();
         let mut alive = [0usize; 2];
-        for u in sim.view().units() {
-            alive[usize::from(u.owner.0)] += 1;
+        for u in view.units() {
+            if rules
+                .unit_kind(u.kind.0)
+                .is_some_and(|k| k.attack.is_some())
+            {
+                alive[usize::from(u.owner.0)] += 1;
+            }
         }
         if tick_hits > 0 && alive.iter().all(|&n| n >= per_side_quarter) {
             b.fighting_ms.push(ms);
+        }
+        if let Some(a) = b.attrition.as_mut() {
+            let (supplied, exposed) = attrition_unit_ticks(&view, rules);
+            a.supplied += supplied;
+            a.exposed += exposed;
         }
     }
     b.final_hash = sim.hash();
     b
 }
 
-/// The `bench --combat` report, one line per entry.
+/// The `bench --combat` report, one line per entry; `--harrying` adds
+/// ` harrying` to the first line and an attrition line before the hash.
 fn combat_bench_report(b: &CombatBench, ticks: u32, seed: u64) -> Vec<String> {
     let (mean, p95, max) = stats_ms(&b.step_ms);
     let (f_mean, f_p95, _) = stats_ms(&b.fighting_ms);
-    vec![
-        format!("bench combat units={} ticks={ticks} seed={seed}", b.units),
+    let variant = if b.attrition.is_some() {
+        " harrying"
+    } else {
+        ""
+    };
+    let mut lines = vec![
+        format!(
+            "bench combat units={} ticks={ticks} seed={seed}{variant}",
+            b.units
+        ),
         format!("step_ms mean={mean:.3} p95={p95:.3} max={max:.3}"),
         format!(
             "fighting_ticks={} fighting_mean_ms={f_mean:.3} fighting_p95_ms={f_p95:.3}",
@@ -1075,21 +1176,30 @@ fn combat_bench_report(b: &CombatBench, ticks: u32, seed: u64) -> Vec<String> {
             "hits={} deaths_p0={} deaths_p1={} destroyed={}",
             b.hits, b.deaths[0], b.deaths[1], b.destroyed
         ),
-        format!("final_hash=0x{:016x}", b.final_hash),
-    ]
+    ];
+    if let Some(a) = b.attrition {
+        lines.push(format!(
+            "attrition_pulses={} supplied={} exposed={}",
+            a.pulses, a.supplied, a.exposed
+        ));
+    }
+    lines.push(format!("final_hash=0x{:016x}", b.final_hash));
+    lines
 }
 
 /// `bench --combat`: step time while `units` units fight, half on each side
 /// (ROADMAP M4a: mean step < 5 ms with 200 vs 200 fighting; the PR also
 /// reads the fighting-tick mean against 5 ms and its p95 against 10 ms).
+/// With `harrying` (M5a) the same battle runs with attrition on; the PR
+/// reads its mean against the plain run's (it may add at most 0.1 ms).
 /// Exits 1 only when fewer than [`COMBAT_MIN_FIGHTING_TICKS`] ticks were
 /// fighting ticks, not on the timing budget, like the other benches.
-fn bench_combat(data: &Path, units: u16, ticks: u32, seed: u64) -> ExitCode {
+fn bench_combat(data: &Path, units: u16, ticks: u32, seed: u64, harrying: bool) -> ExitCode {
     let rules = match load_rules(data) {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let b = run_combat_bench(&rules, units, ticks, seed);
+    let b = run_combat_bench(&rules, units, ticks, seed, harrying);
     for line in combat_bench_report(&b, ticks, seed) {
         println!("{line}");
     }
@@ -1569,6 +1679,114 @@ mod tests {
         for other in ["--astar", "--territory"] {
             assert!(Cli::try_parse_from(["sim-cli", "bench", "--combat", other]).is_err());
         }
+        let cli = Cli::try_parse_from([
+            "sim-cli",
+            "bench",
+            "--units",
+            "400",
+            "--ticks",
+            "1200",
+            "--combat",
+            "--harrying",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Bench {
+                combat: true,
+                harrying: true,
+                units: 400,
+                ticks: 1200,
+                ..
+            }
+        ));
+        // --harrying is a variant of the battle only.
+        assert!(Cli::try_parse_from(["sim-cli", "bench", "--harrying"]).is_err());
+    }
+
+    /// The Harrying bench at a tenth of its size: P0's army is supplied
+    /// while its Wain lives, then bleeds, and the report adds its line.
+    #[test]
+    fn bench_combat_harrying_small_run_bleeds_and_supplies() {
+        let rules = load_rules(&data()).unwrap();
+        let b = run_combat_bench(&rules, 40, 400, 1, true);
+        assert_eq!(b.units, 40, "the Wains are not counted");
+        let a = b.attrition.expect("--harrying counts attrition");
+        assert!(a.pulses > 0 && a.supplied > 0 && a.exposed > 0, "{a:?}");
+        assert!(!b.fighting_ms.is_empty());
+        assert_eq!(b.destroyed, 0, "the Town never fights");
+        assert_eq!(
+            run_combat_bench(&rules, 40, 400, 1, true).final_hash,
+            b.final_hash
+        );
+        assert_ne!(
+            run_combat_bench(&rules, 40, 400, 1, false).final_hash,
+            b.final_hash
+        );
+        let report = combat_bench_report(&b, 400, 1);
+        let prefixes = [
+            "bench combat units=40 ticks=400 seed=1 harrying",
+            "step_ms mean=",
+            "fighting_ticks=",
+            "hits=",
+            "attrition_pulses=",
+            "final_hash=0x",
+        ];
+        assert_eq!(report.len(), prefixes.len());
+        for (line, prefix) in report.iter().zip(prefixes) {
+            assert!(line.starts_with(prefix), "{line}");
+        }
+        assert_eq!(
+            report[4],
+            format!(
+                "attrition_pulses={} supplied={} exposed={}",
+                a.pulses, a.supplied, a.exposed
+            )
+        );
+    }
+
+    /// The bench's own supplied and exposed counts agree, unit by unit and
+    /// tick by tick, with the sim's view: a unit counts as supplied exactly
+    /// when the view says one of its Wains covers its tile on land where
+    /// attrition would otherwise bite (and then `SimView::attrition` says it
+    /// is not exposed).
+    #[test]
+    fn bench_attrition_counts_agree_with_the_view() {
+        let rules = load_rules(&data()).unwrap();
+        let (setup, stream) = sim::scenarios::combat_bench_harrying(&rules, 40, 1);
+        let mut sim = scenarios::build(&setup, &rules);
+        let (mut total_supplied, mut total_exposed) = (0, 0);
+        for t in 0..400 {
+            sim.step(sim::scenarios::commands_at(&stream, t));
+            let view = sim.view();
+            let (mut supplied, mut exposed) = (0, 0);
+            for u in view.units() {
+                if u.exposed_ticks > 0 {
+                    exposed += 1;
+                }
+                let tile = view.map().tile_of(u.pos);
+                let bites = !rules.unit_kind(u.kind.0).unwrap().immune_to_attrition
+                    && view
+                        .territory()
+                        .owner_at(tile)
+                        .is_some_and(|o| o != u.owner && view.harrying_level(o) > 0);
+                let covered = view.supplied(u.owner, tile);
+                if bites && covered {
+                    supplied += 1;
+                }
+                if bites {
+                    assert_eq!(view.attrition(u.id).is_none(), covered, "{:?} at {t}", u.id);
+                }
+            }
+            assert_eq!(
+                attrition_unit_ticks(&view, &rules),
+                (supplied, exposed),
+                "{t}"
+            );
+            total_supplied += supplied;
+            total_exposed += exposed;
+        }
+        assert!(total_supplied > 0 && total_exposed > 0);
     }
 
     /// The acceptance bench at a tenth of its size: the lines fight, both
@@ -1576,7 +1794,7 @@ mod tests {
     #[test]
     fn bench_combat_small_run_fights() {
         let rules = load_rules(&data()).unwrap();
-        let b = run_combat_bench(&rules, 43, 300, 1);
+        let b = run_combat_bench(&rules, 43, 300, 1, false);
         assert_eq!(b.units, 40, "rounded down to a multiple of 8");
         assert_eq!(b.step_ms.len(), 300);
         assert!(b.hits > 0);
@@ -1585,7 +1803,7 @@ mod tests {
         assert_eq!(b.destroyed, 0, "no buildings on the field");
         // 43 rounds down to the same 40-unit battle, and it repeats exactly.
         assert_eq!(
-            run_combat_bench(&rules, 40, 300, 1).final_hash,
+            run_combat_bench(&rules, 40, 300, 1, false).final_hash,
             b.final_hash
         );
         let report = combat_bench_report(&b, 300, 1);
@@ -1605,7 +1823,7 @@ mod tests {
         );
         assert!(report[3].contains(" deaths_p0=") && report[3].contains(" destroyed=0"));
         // Exit 1 only for too few fighting ticks: 50 ticks cannot hold 100.
-        assert_eq!(bench_combat(&data(), 40, 50, 1), ExitCode::FAILURE);
+        assert_eq!(bench_combat(&data(), 40, 50, 1, false), ExitCode::FAILURE);
     }
 
     #[test]

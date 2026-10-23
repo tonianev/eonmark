@@ -29,7 +29,8 @@
 //! ([`enemy_outpost_beats`]).
 //!
 //! [`capture_seat`] (M5a) takes a Seat by annexation and decides the
-//! match; [`stalemate_45min`] (M5a) runs to the 45-minute cap with no unit.
+//! match; [`stalemate_45min`] (M5a) runs to the 45-minute cap with no unit;
+//! [`combat_bench_harrying`] (M5a) is [`combat_bench`] with attrition on.
 //!
 //! Scenarios start empty ([`StartKind::Empty`]) except
 //! [`economy_second_town`], [`economy_walkthrough`], the two outpost
@@ -1027,6 +1028,98 @@ pub fn combat_bench(rules: &Rules, units: u16, seed: u64) -> (MatchSetup, Stream
             ],
         ),
     ];
+    (setup, stream)
+}
+
+/// The Harrying techs both players get in [`combat_bench_harrying`], in
+/// research order: Harrying II needs Harrying I's row too (each adds one
+/// `HarryingLevel`), so both give level 2, a pulse every 32 ticks.
+pub const COMBAT_BENCH_HARRYING_TECHS: [&str; 2] = ["harrying_1", "harrying_2"];
+/// North-west tile of P1's complete Town in [`combat_bench_harrying`]:
+/// north of the arena, on grass. Its footprint is at least 12 tiles from
+/// every tile of the arena's rows 27 to 37, where the groups spawn and
+/// fight, beyond the Town's 7-tile shot and a unit's 6-tile acquisition, so
+/// at seeds 1 to 10 it never shoots and is never hit. Its tier-1 border (20
+/// tiles from the centre, 22.5, 13.5) reaches row 33 on the battle line
+/// (column 22) and covers P0's north-east group, so P0's army fights on
+/// P1's land, supplied while its Wain lives.
+pub const COMBAT_BENCH_HARRYING_TOWN: Tile = Tile::new(21, 12);
+/// Where each side's Supply Wain spawns in [`combat_bench_harrying`],
+/// indexed by player: the middle of its own groups (the other side's goal).
+pub const COMBAT_BENCH_WAINS: [FxVec2; 2] = [COMBAT_BENCH_P1_GOAL, COMBAT_BENCH_P0_GOAL];
+
+/// The `sim-cli bench --combat --harrying` battle (M5a): [`combat_bench`]
+/// with attrition switched on. During tick 0, after the same spawns, each
+/// player `DebugResearch`es [`COMBAT_BENCH_HARRYING_TECHS`] and P1 places a
+/// complete Town at [`COMBAT_BENCH_HARRYING_TOWN`] (`BuildingId(1)`), so
+/// P0's units bleed on P1's land unless P0's Wain covers them. During tick
+/// 1 each side `DebugSpawn`s one Supply Wain at [`COMBAT_BENCH_WAINS`]
+/// before its attack-move, which then includes the Wain (a unit without an
+/// attack just moves): P0's Wain is `UnitId(units / 2 + 1)` and P1's
+/// `UnitId(units / 2 + 2)`, so every army id is [`combat_bench`]'s. Fewer
+/// than 8 units gives an empty stream.
+pub fn combat_bench_harrying(rules: &Rules, units: u16, seed: u64) -> (MatchSetup, Stream) {
+    let (setup, mut stream) = combat_bench(rules, units, seed);
+    if stream.is_empty() {
+        return (setup, stream);
+    }
+    let per_side = u32::from(units / 8) * 4;
+    // combat_bench's tick-0 seqs are 0..=3 for each player.
+    let mut seq = [4u32; 2];
+    let mut next = |owner: u8| {
+        let s = &mut seq[usize::from(owner)];
+        *s += 1;
+        *s - 1
+    };
+    let mut setup_cmds = Vec::new();
+    setup_cmds.push(PlayerCommand::new(
+        PlayerId(1),
+        next(1),
+        Command::DebugPlaceBuilding {
+            owner: PlayerId(1),
+            kind: building_kind(rules, "town"),
+            tile: COMBAT_BENCH_HARRYING_TOWN,
+            complete: true,
+        },
+    ));
+    for owner in [0u8, 1] {
+        for tech in COMBAT_BENCH_HARRYING_TECHS {
+            setup_cmds.push(PlayerCommand::new(
+                PlayerId(owner),
+                next(owner),
+                Command::DebugResearch {
+                    owner: PlayerId(owner),
+                    tech: tech_id(rules, tech),
+                },
+            ));
+        }
+    }
+    stream[0].1.extend(setup_cmds);
+    let wain = unit_kind(rules, "supply_wain");
+    let mut orders = Vec::new();
+    for (owner, (army, goal)) in [
+        (1..=per_side, COMBAT_BENCH_P0_GOAL),
+        (per_side + 1..=2 * per_side, COMBAT_BENCH_P1_GOAL),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let owner = u8::try_from(owner).expect("two players");
+        orders.push(PlayerCommand::new(
+            PlayerId(owner),
+            next(owner),
+            Command::DebugSpawn {
+                owner: PlayerId(owner),
+                kind: wain,
+                at: COMBAT_BENCH_WAINS[usize::from(owner)],
+                count: 1,
+            },
+        ));
+        let mut moving = ids(army);
+        moving.push(UnitId(2 * per_side + 1 + u32::from(owner)));
+        orders.push(attack_move(owner, next(owner), moving, goal));
+    }
+    stream[1].1 = orders;
     (setup, stream)
 }
 
@@ -2131,6 +2224,72 @@ mod tests {
             assert_eq!(u.kind, unit_kind(&rules, COMBAT_BENCH_KINDS[group]));
         }
         assert!(combat_bench(&rules, 7, 1).1.is_empty());
+    }
+
+    /// The Harrying variant is the same battle plus P1's Town, both
+    /// Harrying techs for both players and a Wain in each attack-move: the
+    /// armies keep [`combat_bench`]'s ids, kinds, owners and orders, the
+    /// Wains come next, and nothing is rejected.
+    #[test]
+    fn combat_bench_harrying_adds_a_town_both_harrying_levels_and_a_wain_a_side() {
+        let rules = rules();
+        let map = crate::map::Map::from_def(rules.map(&rules.default_map).unwrap());
+        let town = COMBAT_BENCH_HARRYING_TOWN;
+        let def = &rules.buildings[usize::from(building_kind(&rules, "town").0)];
+        let (w, h) = (
+            u16::try_from(def.width_tiles).unwrap(),
+            u16::try_from(def.height_tiles).unwrap(),
+        );
+        for y in town.y..town.y + h {
+            for x in town.x..town.x + w {
+                assert!(map.passable(Tile::new(x, y)), "({x}, {y})");
+            }
+        }
+        // The footprint keeps at least 12 tiles from the rows the groups
+        // spawn and fight in (27 to 37), beyond the Town's shot and a
+        // unit's acquisition.
+        let gap = 27 - i32::from(town.y + h);
+        assert!(gap >= 12, "{gap}");
+        for at in COMBAT_BENCH_WAINS {
+            assert!(map.passable(map.tile_of(at)));
+        }
+        let (setup, stream) = combat_bench_harrying(&rules, 403, COMBAT_BENCH_SEED);
+        let (_, plain) = combat_bench(&rules, 403, COMBAT_BENCH_SEED);
+        assert_eq!(setup.seed, COMBAT_BENCH_SEED);
+        // The plain spawns come first and unchanged.
+        assert_eq!(commands_at(&stream, 0)[..8], *commands_at(&plain, 0));
+        let delay = setup.cmd_delay;
+        let mut sim = run(setup, rules.clone(), &stream, 1 + delay + 1);
+        let events = sim.drain_events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, crate::SimEvent::CommandRejected { .. })),
+            "{events:?}"
+        );
+        let view = sim.view();
+        assert_eq!(view.unit_count(), 402);
+        let wain = unit_kind(&rules, "supply_wain");
+        for u in view.units() {
+            assert!(u.order.is_some(), "{:?} attack-moves", u.id);
+            if u.id.0 <= 400 {
+                let owner = if u.id.0 <= 200 { 0 } else { 1 };
+                assert_eq!(u.owner, PlayerId(owner), "{:?}", u.id);
+                let group = usize::try_from((u.id.0 - 1) % 200 / 50).unwrap();
+                assert_eq!(u.kind, unit_kind(&rules, COMBAT_BENCH_KINDS[group]));
+            } else {
+                assert_eq!(u.kind, wain, "{:?}", u.id);
+                assert_eq!(u.owner, PlayerId(u8::try_from(u.id.0 - 401).unwrap()));
+            }
+        }
+        for p in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(view.harrying_level(p), 2, "{p:?}");
+        }
+        let b = view.building(BuildingId(1)).expect("P1's Town");
+        assert_eq!((b.owner, b.tile), (PlayerId(1), town));
+        assert_eq!(b.construction, crate::state::Construction::Complete);
+        assert_eq!(view.buildings().count(), 1);
+        assert!(combat_bench_harrying(&rules, 7, 1).1.is_empty());
     }
 
     #[test]

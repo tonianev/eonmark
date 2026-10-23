@@ -1571,19 +1571,22 @@ fn random_attrition_commands(seed: u64, ticks: u32) -> Vec<Vec<PlayerCommand>> {
     out
 }
 
-/// Run `stream` on the delay-0 sim with [`stream_rules`] and `seed`,
-/// restoring into a fresh sim after step `restore_after` (never when it is
-/// past the end): the hash after every step, and the events.
+/// The delay-0 sim of the random streams, with [`stream_rules`] and `seed`.
+fn stream_sim(seed: u64) -> Sim {
+    let mut setup = MatchSetup::scenario(stream_rules(), seed);
+    setup.cmd_delay = 0;
+    Sim::new(setup, stream_rules().clone(), Box::new(NoAi))
+}
+
+/// Run `stream` on [`stream_sim`], restoring into a fresh sim after step
+/// `restore_after` (never when it is past the end): the hash after every
+/// step, and the events.
 fn run_attrition_stream(
     seed: u64,
     stream: &[Vec<PlayerCommand>],
     restore_after: Option<usize>,
 ) -> (Vec<u64>, Vec<SimEvent>) {
-    let fresh = || {
-        let mut setup = MatchSetup::scenario(stream_rules(), seed);
-        setup.cmd_delay = 0;
-        Sim::new(setup, stream_rules().clone(), Box::new(NoAi))
-    };
+    let fresh = || stream_sim(seed);
     let mut sim = fresh();
     let mut hashes = Vec::with_capacity(stream.len());
     let mut events = Vec::new();
@@ -1602,14 +1605,24 @@ fn run_attrition_stream(
 
 /// The random attrition stream really exercises attrition: over 8 seeds
 /// of 200 ticks, pulses land on both players' units (P0's Harrying comes on
-/// seeds divisible by 3), some at Harrying II's interval, units die,
-/// counters reset, and `DebugDamage` is both accepted and rejected.
+/// seeds divisible by 3), some at Harrying II's interval (two pulses on one
+/// unit [`interval2`] ticks apart, which only Harrying II allows: at
+/// Harrying I they are at least [`interval1`] apart, a reset in between
+/// included), units die, some of them to an attrition pulse alone
+/// (`UnitDied` in the step that pulsed them, with no `Hit` on them and no
+/// `DebugDamage` aimed at them in that step), counters reset (a living
+/// unit's counter drops from above 0 to 0), and `DebugDamage` is both
+/// accepted and rejected (`InvalidTarget`, which no other command in the
+/// stream can cause).
 #[test]
 fn m5a_attrition_stream_exercises_attrition() {
+    let rules = stream_rules();
+    let (i1, i2) = (interval1(rules), interval2(rules));
+    assert!(i2 < i1, "{i1} {i2}");
     let (mut on, mut died, mut rejected) = ([0usize; 2], 0, 0);
+    let (mut killed, mut fast, mut resets, mut accepted) = (0, 0, 0, 0);
     for seed in 0..8 {
         let stream = random_attrition_commands(seed, 200);
-        let (_, events) = run_attrition_stream(seed, &stream, None);
         let owner: BTreeMap<UnitId, PlayerId> = {
             let mut next = 0u32;
             let mut map = BTreeMap::new();
@@ -1621,23 +1634,76 @@ fn m5a_attrition_stream_exercises_attrition() {
             }
             map
         };
-        for e in &events {
-            match e {
-                SimEvent::Attrition { unit, .. } => on[usize::from(owner[unit].0)] += 1,
-                SimEvent::UnitDied { .. } => died += 1,
-                SimEvent::CommandRejected {
-                    reason: RejectReason::InvalidTarget,
-                    ..
-                } => rejected += 1,
-                _ => {}
+        let mut sim = stream_sim(seed);
+        let mut last_pulse: BTreeMap<UnitId, u32> = BTreeMap::new();
+        for cmds in &stream {
+            let before: BTreeMap<UnitId, u32> = sim
+                .view()
+                .units()
+                .map(|u| (u.id, u.exposed_ticks))
+                .collect();
+            sim.step(cmds);
+            let events = sim.drain_events();
+            let t = sim.tick();
+            let pulsed: Vec<UnitId> = pulses(&events).into_iter().map(|p| p.0).collect();
+            let struck: Vec<TargetId> = cmds
+                .iter()
+                .filter_map(|pc| match pc.cmd {
+                    Command::DebugDamage { target, .. } => Some(target),
+                    _ => None,
+                })
+                .chain(events.iter().filter_map(|e| match e {
+                    SimEvent::Hit { target, .. } => Some(*target),
+                    _ => None,
+                }))
+                .collect();
+            for &unit in &pulsed {
+                on[usize::from(owner[&unit].0)] += 1;
+                if let Some(prev) = last_pulse.insert(unit, t) {
+                    assert!(t - prev >= i2, "{unit:?} pulsed at {prev} and {t}");
+                    fast += usize::from(t - prev == i2);
+                }
             }
+            let mut refused = Vec::new();
+            for e in &events {
+                match e {
+                    SimEvent::UnitDied { unit, .. } => {
+                        died += 1;
+                        killed += usize::from(
+                            pulsed.contains(unit) && !struck.contains(&TargetId::Unit(*unit)),
+                        );
+                    }
+                    SimEvent::CommandRejected {
+                        player,
+                        seq,
+                        reason: RejectReason::InvalidTarget,
+                    } => {
+                        rejected += 1;
+                        refused.push((*player, *seq));
+                    }
+                    _ => {}
+                }
+            }
+            accepted += cmds
+                .iter()
+                .filter(|pc| matches!(pc.cmd, Command::DebugDamage { .. }))
+                .filter(|pc| !refused.contains(&(pc.player, pc.seq)))
+                .count();
+            resets += sim
+                .view()
+                .units()
+                .filter(|u| u.exposed_ticks == 0 && before.get(&u.id).is_some_and(|&n| n > 0))
+                .count();
         }
     }
     eprintln!(
-        "m5a attrition stream, 8 seeds: pulses on P0, P1 units {on:?}, died {died}, rejected DebugDamage {rejected}"
+        "m5a attrition stream, 8 seeds: pulses on P0, P1 units {on:?}, {fast} at Harrying II's interval ({i2} ticks), died {died} ({killed} to a pulse alone), counters reset {resets}, DebugDamage accepted {accepted} and rejected {rejected}"
     );
     assert!(on[0] > 0 && on[1] > 0, "{on:?}");
-    assert!(died > 0 && rejected > 0, "{died} {rejected}");
+    assert!(fast > 0, "no pulse at Harrying II's interval");
+    assert!(died > 0 && killed > 0, "{died} {killed}");
+    assert!(resets > 0);
+    assert!(accepted > 0 && rejected > 0, "{accepted} {rejected}");
 }
 
 /// Proptest case count: `PROPTEST_CASES` when set, else 256 in CI and 8

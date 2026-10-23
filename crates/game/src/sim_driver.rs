@@ -76,37 +76,47 @@ pub struct SimHandle {
     sim: Sim,
 }
 
-/// A controller for slots no scenario has: scenario setups are two human
-/// slots, so it is never consulted.
-struct NoSlots;
-
-impl AiController for NoSlots {
-    fn think(&mut self, _player: PlayerId, _view: &SimView<'_>) -> Vec<Command> {
-        Vec::new()
-    }
-}
-
 impl SimHandle {
-    /// A skirmish from loaded rules and a seed with the passive bot in slot 1.
+    /// A skirmish from loaded rules and a seed with the passive bot in slot
+    /// 1 (`MatchSetup::skirmish`; `--headless-run <ticks>`).
     pub fn skirmish(rules: Rules, seed: u64) -> Self {
         let setup = MatchSetup::skirmish(&rules, seed);
-        Self {
-            sim: Sim::new(setup, rules, Box::new(ai::Passive)),
-        }
+        Self::from_setup(setup, rules)
     }
 
-    /// A match from an explicit setup (a scenario's or a replay header's).
-    /// Human-only setups get a never-consulted controller; a setup with an
-    /// AI slot gets the passive bot, which is what M0-M2 skirmishes use.
-    pub fn from_setup(setup: MatchSetup, rules: Rules) -> Self {
-        let ai: Box<dyn AiController> = if setup.players.iter().any(|p| p.is_ai) {
-            Box::new(ai::Passive)
-        } else {
-            Box::new(NoSlots)
-        };
-        Self {
+    /// A match against a bot (M5b): the local player in slot 0, `bot` with
+    /// `personality` in slot 1 (`MatchSetup::vs_bot`). A plain launch plays
+    /// the Standard bot.
+    ///
+    /// # Panics
+    ///
+    /// If the bot or the personality is unknown (see
+    /// [`SimHandle::try_from_setup`]).
+    pub fn vs_bot(rules: Rules, seed: u64, bot: &str, personality: &str) -> Self {
+        let setup = MatchSetup::vs_bot(&rules, seed, bot, personality);
+        Self::from_setup(setup, rules)
+    }
+
+    /// A match from an explicit setup (a scenario's or a replay header's)
+    /// with the bots its `ai_seats` name, built by `ai::controller_for`
+    /// exactly as `sim-cli verify` builds them (M5b); the error names an
+    /// unknown bot or personality, or seats that do not match the AI slots.
+    pub fn try_from_setup(setup: MatchSetup, rules: Rules) -> Result<Self, String> {
+        let ai: Box<dyn AiController> =
+            ai::controller_for(&setup, &rules).map_err(|e| e.to_string())?;
+        Ok(Self {
             sim: Sim::new(setup, rules, ai),
-        }
+        })
+    }
+
+    /// [`SimHandle::try_from_setup`] for setups known to be valid (the
+    /// scenarios, tests).
+    ///
+    /// # Panics
+    ///
+    /// With `try_from_setup`'s error.
+    pub fn from_setup(setup: MatchSetup, rules: Rules) -> Self {
+        Self::try_from_setup(setup, rules).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Advance one tick with the commands issued during the current tick.

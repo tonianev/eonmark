@@ -2,8 +2,9 @@
 //!
 //! Running the AI inside the step means bot-vs-bot replays and future
 //! lockstep peers agree on every decision: the bot sees only the hashed
-//! state, draws no randomness of its own, and its commands go through the
-//! same delay queue as a human's.
+//! state and its own hashed memory ([`AiMemory`], M5b), draws no randomness
+//! of its own, and its commands go through the same delay queue as a
+//! human's.
 
 use crate::annexation::AnnexView;
 use crate::attrition::{self, Exposure, Pulses, SupplyGrid};
@@ -11,6 +12,7 @@ use crate::combat::{self, UnitStats};
 use crate::command::Command;
 use crate::construction::{self, BuildPlan};
 use crate::economy::{self, PlayerEconomy, RateInfo};
+use crate::fx::FxVec2;
 use crate::gather;
 use crate::ids::{
     BuildingId, BuildingKindId, PlayerId, TargetId, TechId, Tile, UnitId, UnitKindId,
@@ -25,11 +27,46 @@ use crate::territory::TerritoryField;
 use crate::town;
 use crate::training;
 use rules::Rules;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+
+/// The size a bot's memory is designed to stay under, in bytes (M5b). Not
+/// enforced by the sim: a bot's tests check it, since the memory is hashed
+/// and snapshotted with the state every tick.
+pub const AI_MEMORY_GUIDE_BYTES: usize = 4096;
+
+/// A bot's memory between plans (M5b): opaque bytes the bot encodes and
+/// decodes itself, stored in [`Player::ai_memory`] and hashed in the
+/// `meta` sub-hash, so a snapshot carries it and a restore reproduces the
+/// bot's next decision exactly. During [`AiController::think`] each bot
+/// gets only its own memory; every bot's memory reads empty in the view.
+/// It holds only what cannot be re-derived from the view (wave rosters,
+/// timers, latches); everything else is recomputed every plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiMemory(Vec<u8>);
+
+impl AiMemory {
+    /// The stored bytes (empty until the bot first writes).
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Replace the stored bytes.
+    pub fn set(&mut self, bytes: Vec<u8>) {
+        self.0 = bytes;
+    }
+
+    /// Whether nothing is stored.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// Read-only view of the sim handed to AI controllers and the presenter.
 /// Every economy accessor calls the same function `Sim::step` uses, so a
 /// quote or a check here always matches what applying the command does.
+/// It is a handful of references, so it is `Copy`.
+#[derive(Clone, Copy)]
 pub struct SimView<'a> {
     /// Current tick.
     pub tick: u32,
@@ -384,6 +421,41 @@ impl<'a> SimView<'a> {
         combat::validate_attack(self.state, self.rules, p, units, target)
     }
 
+    /// Whether `Gather { units, node }` from `p` would be accepted now, and
+    /// which of the units would take a slot (in id order; empty when every
+    /// valid unit already works the node, which is accepted and changes
+    /// nothing). M5b.
+    pub fn check_gather(
+        &self,
+        p: PlayerId,
+        units: &[UnitId],
+        node: BuildingId,
+    ) -> Result<Vec<UnitId>, RejectReason> {
+        self.check_player(p)?;
+        gather::validate_gather(self.state, self.rules, p, units, node)
+            .map(|plan| plan.into_iter().map(|(unit, _)| unit).collect())
+    }
+
+    /// Whether `SetRally { building, target }` from `p` would be accepted
+    /// now (M5b). Any point is accepted for an own building.
+    pub fn check_rally(
+        &self,
+        p: PlayerId,
+        building: BuildingId,
+        _target: FxVec2,
+    ) -> Result<(), RejectReason> {
+        self.check_player(p)?;
+        training::validate_rally(self.state, p, building)
+    }
+
+    /// `p`'s bot memory bytes (M5b), for the dev panel and the bot
+    /// harness; empty for a human slot, a bot that never wrote and an
+    /// unknown player. During [`AiController::think`] it is empty for
+    /// every bot: each bot receives its own memory as an argument.
+    pub fn ai_memory(&self, p: PlayerId) -> &'a [u8] {
+        self.player(p).map_or(&[], |pl| pl.ai_memory.bytes())
+    }
+
     /// The rules this match runs under.
     pub fn rules(&self) -> &'a Rules {
         self.rules
@@ -443,14 +515,44 @@ impl<'a> SimView<'a> {
 /// A scripted opponent that runs *inside* [`crate::Sim::step`] so bot-vs-bot
 /// replays and future lockstep peers agree on every decision.
 ///
-/// Implementations must be deterministic functions of the view (and, later,
-/// of randomness handed to them by the sim). `Send` is required so matches
-/// can run on worker threads in `sim-cli play-bots`.
+/// Implementations must be deterministic functions of the view and of the
+/// player's own [`AiMemory`] (and, later, of randomness handed to them by
+/// the sim): any other state a controller keeps must be a pure function of
+/// immutable inputs (the rules, the setup), so a controller rebuilt
+/// mid-match, or a sim restored from a snapshot, issues the same commands.
+/// `Send` is required so matches can run on worker threads in
+/// `sim-cli play-bots`.
 pub trait AiController: Send {
-    /// Produce this tick's commands for `player` from a read-only view. The
-    /// sim stamps them with the player's next sequence numbers and delays
-    /// them by `cmd_delay_ticks` like any other command.
-    fn think(&mut self, player: PlayerId, view: &SimView<'_>) -> Vec<Command>;
+    /// Produce this tick's commands for `player` from a read-only view and
+    /// the player's own memory, which the bot may rewrite (it is hashed in
+    /// `meta`). The sim takes every bot's memory out of the state before it
+    /// builds the view, so `view.players()` shows no bot's memory. The sim
+    /// stamps the commands with the player's next sequence numbers and
+    /// delays them by `cmd_delay_ticks` like any other command.
+    fn think(
+        &mut self,
+        player: PlayerId,
+        view: &SimView<'_>,
+        memory: &mut AiMemory,
+    ) -> Vec<Command>;
+}
+
+/// A controller that never acts and never writes memory (M5b): for new
+/// code that needs a controller for a setup without AI slots, or one whose
+/// AI slots should stay idle. `ai::Passive` is the same bot as reached
+/// through a header's `passive` seat.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoAi;
+
+impl AiController for NoAi {
+    fn think(
+        &mut self,
+        _player: PlayerId,
+        _view: &SimView<'_>,
+        _memory: &mut AiMemory,
+    ) -> Vec<Command> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -462,13 +564,7 @@ mod tests {
     use rules::Rules;
     use std::path::Path;
 
-    struct NoAi;
-
-    impl super::AiController for NoAi {
-        fn think(&mut self, _player: PlayerId, _view: &super::SimView<'_>) -> Vec<Command> {
-            Vec::new()
-        }
-    }
+    use super::NoAi;
 
     /// `building_hp` reads the building's hit points and its kind's `hp`:
     /// full on placement, a site included, lower once a guard chips at it,

@@ -3,10 +3,11 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  // 20: M5a annexation and outcome (SIM 16): every fixture re-recorded for
-  // the new hashed TownState::hold and State::outcome; no RON content
-  // changed besides the version.
-  rules_version: 20,
+  // 21: M5b bot plumbing (SIM 17): data/ai joins rules_hash and every
+  // fixture is re-recorded for the header's ai_seats and the hashed
+  // Player::ai_memory; no RON content in data/rules changed besides the
+  // version.
+  rules_version: 21,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

@@ -47,7 +47,11 @@ pub fn load_rules(cli: &Cli) -> Option<Rules> {
 /// The sim and the input source a windowed session starts with.
 pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputSource>), String> {
     match &cli.scenario {
-        None => Ok((SimHandle::skirmish(rules, cli.seed), Box::new(LocalInput))),
+        // M5b: a plain launch plays the Standard bot (`MatchSetup::vs_bot`).
+        None => Ok((
+            SimHandle::vs_bot(rules, cli.seed, ai::BOT_STANDARD, "standard"),
+            Box::new(LocalInput),
+        )),
         Some(name) => {
             let Some((mut setup, stream, _ticks)) = scenarios::by_name(name, &rules) else {
                 return Err(format!(
@@ -584,7 +588,12 @@ mod tests {
         use crate::camera::{ZOOM_MAX, ZOOM_MIN};
         struct NoAi;
         impl sim::AiController for NoAi {
-            fn think(&mut self, _: sim::PlayerId, _: &sim::SimView<'_>) -> Vec<sim::Command> {
+            fn think(
+                &mut self,
+                _: sim::PlayerId,
+                _: &sim::SimView<'_>,
+                _: &mut sim::AiMemory,
+            ) -> Vec<sim::Command> {
                 Vec::new()
             }
         }
@@ -645,7 +654,12 @@ mod tests {
     fn capture_seat_is_framed_on_the_seats_ring() {
         struct NoAi;
         impl sim::AiController for NoAi {
-            fn think(&mut self, _: sim::PlayerId, _: &sim::SimView<'_>) -> Vec<sim::Command> {
+            fn think(
+                &mut self,
+                _: sim::PlayerId,
+                _: &sim::SimView<'_>,
+                _: &mut sim::AiMemory,
+            ) -> Vec<sim::Command> {
                 Vec::new()
             }
         }

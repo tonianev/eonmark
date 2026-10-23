@@ -64,6 +64,11 @@ fn repo_data_passes_with_three_ages_eight_kinds_and_twelve_techs() {
         stdout.contains(" techs=12 side_techs=2 factions=1 "),
         "{stdout}"
     );
+    // M5b: the bot data under data/ai.
+    assert!(
+        stdout.contains(" factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en"),
+        "{stdout}"
+    );
 }
 
 /// Run data-check on a copy of `data/` with the first `from` in `file`
@@ -173,4 +178,33 @@ fn a_mul_written_as_1_25_exits_1_naming_techs_ron() {
         "{stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M5b: a build order whose Advance comes before the techs it needs
+/// fails data-check (an Advance is never optional).
+#[test]
+fn an_advance_without_its_techs_exits_1_naming_the_build_order_step() {
+    rejects_edit(
+        "advance-techs",
+        "ai/build_orders/standard.ron",
+        "    Research(tech: \"trade_1\"),",
+        "    Wait(until_ds: 0),",
+        &[
+            "steps[17].age: ",
+            "\"masonry\" needs 2 techs that count toward an age",
+        ],
+    );
+}
+
+/// M5b: a planning cadence no longer than the command delay would issue
+/// commands twice; data-check rejects it naming the personality's field.
+#[test]
+fn a_cadence_inside_the_command_delay_exits_1_naming_personalities_ron() {
+    rejects_edit(
+        "cadence",
+        "ai/personalities.ron",
+        "think_every_ds: 5,",
+        "think_every_ds: 1,",
+        &["personalities[0].think_every_ds: ", "cmd_delay_ticks"],
+    );
 }

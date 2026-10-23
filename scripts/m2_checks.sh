@@ -261,8 +261,8 @@ if wants 3; then
     say "replay $replay"
     verify "$replay" "$scratch/03-verify.txt"
     verify_ok "$scratch/03-verify.txt" || { say "verify not OK"; ok=0; }
-    # Only the truncation warning counts: verify also warns that the default
-    # skirmish has AI slots driven by ai::Passive until M5b.
+    # Only the truncation warning counts. Since M5b verify rebuilds the
+    # plain launch's Standard bot from the header and prints no other warning.
     if grep -q 'warning:.*no clean-exit trailer' "$scratch/03-verify.txt.err"; then say "verify reports no clean-exit trailer"; ok=0; fi
   fi
   if [ "$ok" -eq 1 ]; then pass 3 "clean exit: $(grep '^OK' "$scratch/03-verify.txt")"; else fail 3 "clean exit; see $scratch/03-*"; fi

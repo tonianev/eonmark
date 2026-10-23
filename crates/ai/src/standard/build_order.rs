@@ -355,11 +355,17 @@ fn execute(ctx: &mut Ctx<'_>, mem: &mut BotMemory, i: usize) -> StepOutcome {
                 SiteSearch::Found { builder, tile } => {
                     if ctx.ledger.try_spend(&cost) {
                         ctx.claim(builder);
-                        ctx.push(Command::Build {
+                        if ctx.push(Command::Build {
                             unit: builder,
                             kind: k,
                             tile,
-                        });
+                        }) && let Some(d) = rules.building_kind(k.0)
+                        {
+                            let (x, y) = (i32::from(tile.x), i32::from(tile.y));
+                            let w = i32::try_from(d.width_tiles).expect("validated <= 8");
+                            let h = i32::try_from(d.height_tiles).expect("validated <= 8");
+                            ctx.planned.push((x, y, x + w - 1, y + h - 1));
+                        }
                         StepOutcome::Issued
                     } else {
                         StepOutcome::Saving(cost)
@@ -455,7 +461,7 @@ mod tests {
     use super::*;
     use crate::testkit::{Arena, P0, P1, grant_all, place, standard_vs_passive, unit_kind};
     use rules::Placement;
-    use sim::{Command, TargetId};
+    use sim::{Command, SimEvent, TargetId};
 
     fn order(steps: Vec<Step>) -> BuildOrder {
         BuildOrder {
@@ -766,6 +772,61 @@ mod tests {
         step(&mut ctx, &mut mem);
         assert_eq!(mem.site, None);
         assert_eq!(mem, BotMemory::default(), "nothing left to remember");
+    }
+
+    /// Two `NearTown` steps worked in the same plan never pick footprints
+    /// closer than `building_gap_tiles`: the second site keeps clear of
+    /// the first, which is not placed yet, so neither `Build` is rejected
+    /// when they apply.
+    #[test]
+    fn two_near_town_sites_in_one_plan_keep_their_gap() {
+        let r = crate::testkit::rules();
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            [
+                vec![place(&r, P0, "croft", 20, 60)],
+                grant_all(&r, P0, 1000),
+            ]
+            .concat(),
+        );
+        let o = order(vec![
+            build("muster_hall", 1, Placement::NearTown),
+            build("scriptorium", 1, Placement::NearTown),
+        ]);
+        let mut ctx = a.ctx(P0);
+        ctx.order = &o;
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        let gap = i32::try_from(ctx.knobs.building_gap_tiles).unwrap();
+        let cmds = ctx.into_commands();
+        let rects: Vec<(i32, i32, i32, i32)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Command::Build { kind, tile, .. } => {
+                    let d = r.building_kind(kind.0).unwrap();
+                    let (x, y) = (i32::from(tile.x), i32::from(tile.y));
+                    let w = i32::try_from(d.width_tiles).unwrap();
+                    let h = i32::try_from(d.height_tiles).unwrap();
+                    Some((x, y, x + w - 1, y + h - 1))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects.len(), 2, "both steps build: {cmds:?}");
+        let (p, q) = (rects[0], rects[1]);
+        let apart = p.2 + gap < q.0 || q.2 + gap < p.0 || p.3 + gap < q.1 || q.3 + gap < p.1;
+        assert!(apart, "footprints {p:?} and {q:?} within {gap} tiles");
+        a.sim.drain_events();
+        a.issue(P0, cmds);
+        let rejected: Vec<SimEvent> = a
+            .sim
+            .drain_events()
+            .into_iter()
+            .filter(|e| matches!(e, SimEvent::CommandRejected { .. }))
+            .collect();
+        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(a.buildings_of(P0, "muster_hall").len(), 1);
+        assert_eq!(a.buildings_of(P0, "scriptorium").len(), 1);
     }
 
     /// At the first plan the builders the build order takes are never also

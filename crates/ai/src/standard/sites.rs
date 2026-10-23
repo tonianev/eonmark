@@ -322,7 +322,9 @@ pub fn near_town_anchor(ctx: &Ctx<'_>, kind: BuildingKindId) -> Option<BuildingI
 /// map, own land, passable and with no unit on it, inside a ring of
 /// `building_gap_tiles` that is on the map and passable (for `Terrain`,
 /// only the ring's grass tiles need be passable, so a yard may touch its
-/// forest, and the ring may leave the map).
+/// forest, and the ring may leave the map), and with that ring clear of
+/// every footprint an earlier `Build` of the same plan places
+/// ([`Ctx::planned`]), which the view does not show yet.
 pub fn fits(ctx: &mut Ctx<'_>, kind: BuildingKindId, nw: Tile, at: Placement) -> bool {
     let view = ctx.view;
     let rules = view.rules();
@@ -367,6 +369,12 @@ pub fn fits(ctx: &mut Ctx<'_>, kind: BuildingKindId, nw: Tile, at: Placement) ->
                 }
             }
         }
+    }
+    let near_planned = ctx.planned.iter().any(|&(px0, py0, px1, py1)| {
+        x0 - gap <= px1 && px0 <= x0 + w - 1 + gap && y0 - gap <= py1 && py0 <= y0 + h - 1 + gap
+    });
+    if near_planned {
+        return false;
     }
     let occupied = ctx.occupied();
     !(y0..y0 + h)

@@ -103,6 +103,11 @@ pub struct Ctx<'a> {
     pub probes_left: u32,
     /// Commands left in this plan.
     pub commands_left: u32,
+    /// The footprints this plan's `Build`s place, as inclusive tile
+    /// bounds `(x0, y0, x1, y1)`: the view does not show them yet, so a
+    /// later site of the same plan keeps its gap from them
+    /// ([`super::sites::fits`]).
+    pub planned: Vec<(i32, i32, i32, i32)>,
     out: Vec<Command>,
     occupied: Option<BTreeSet<Tile>>,
     rally: Option<FxVec2>,
@@ -140,6 +145,7 @@ impl<'a> Ctx<'a> {
             claimed: BTreeSet::new(),
             probes_left: knobs.site_checks_per_think,
             commands_left: knobs.max_commands_per_think,
+            planned: Vec::new(),
             out: Vec::new(),
             occupied: None,
             rally: None,

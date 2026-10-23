@@ -959,7 +959,7 @@ mod tests {
         assert_eq!(p.recall_wave, RecallWave::WhileStaging);
         assert_eq!(p.wave_requires_age.as_deref(), Some("masonry"));
         let order = rules.ai.build_order("standard").unwrap();
-        assert_eq!(order.steps.len(), 31);
+        assert_eq!(order.steps.len(), 37);
         assert_eq!(
             order.steps[0],
             Step::Workers {
@@ -1205,7 +1205,7 @@ mod tests {
                     "Research(tech: \"letters_1\")",
                     "Research(tech: \"letters_2\")",
                 )],
-                &["steps[26].tech", "needs \"letters_1\" first"],
+                &["steps[27].tech", "needs \"letters_1\" first"],
             ),
             (
                 "per-town",
@@ -1214,12 +1214,12 @@ mod tests {
                     "Build(kind: \"croft\", count: 8, at: NearTown, optional: true)",
                     "Build(kind: \"croft\", count: 8, at: NearTown)",
                 )],
-                &["steps[24].count", "max_per_town"],
+                &["steps[25].count", "max_per_town"],
             ),
             (
                 "ages-go-up",
                 &[(BO, "Advance(age: \"charter\")", "Advance(age: \"masonry\")")],
-                &["steps[29].age", "must go up"],
+                &["steps[30].age", "must go up"],
             ),
             // Personalities.
             (

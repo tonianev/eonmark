@@ -51,8 +51,12 @@ pub struct Wave {
     pub stage: Tile,
     /// Where the wave is.
     pub phase: WavePhase,
-    /// The tick it launched.
+    /// The tick it launched, or retargeted after a capture: its
+    /// `wave_max_ds` runs from here.
     pub launched_at: u32,
+    /// The tick the current phase began (`stage_max_ds` runs from the
+    /// start of a `Stage`).
+    pub phase_at: u32,
 }
 
 /// The phases of a wave.
@@ -141,6 +145,7 @@ mod tests {
                 stage: Tile::new(80, 64),
                 phase: WavePhase::Assault,
                 launched_at: 13_000,
+                phase_at: 13_600,
             }),
             next_wave_at: 16_600,
             waves_launched: 1,
@@ -178,6 +183,7 @@ mod tests {
                 stage: Tile::new(127, 127),
                 phase: WavePhase::Hold,
                 launched_at: 54_000,
+                phase_at: 54_000,
             }),
             ..BotMemory::default()
         };

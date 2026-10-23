@@ -15,9 +15,11 @@
 //! go beside): a blocked step is cooled down for
 //! `blocked_retry_ds` in `BotMemory::blocked` and then retried; it never
 //! becomes a permanent skip. An `Advance` is never cooled down: while the
-//! techs it needs finish or the stock fills, it saves up its cost, except
-//! while the bot defends (`BotMemory::defend`): then it reserves nothing,
-//! so the stock goes to the army first.
+//! techs it needs are still missing it waits and reserves nothing (the
+//! army and the steps behind it spend the stock meanwhile), and once they
+//! are done it saves up its cost until the stock fills, except while the
+//! bot defends (`BotMemory::defend`): then it reserves nothing, so the
+//! stock goes to the army first.
 //!
 //! **The `Military` latch** is set once every non-optional step before
 //! the `Military` step is done, and never cleared.
@@ -332,9 +334,7 @@ fn execute(ctx: &mut Ctx<'_>, mem: &mut BotMemory, i: usize) -> StepOutcome {
                     StepOutcome::Issued
                 }
                 Ok(cost) => StepOutcome::Saving(cost),
-                Err(RejectReason::CannotAfford { .. } | RejectReason::NotEnoughTechs) => {
-                    StepOutcome::Saving(cost)
-                }
+                Err(RejectReason::CannotAfford { .. }) => StepOutcome::Saving(cost),
                 Err(_) => StepOutcome::Waiting,
             }
         }
@@ -602,12 +602,13 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c, Command::Train { .. })));
     }
 
-    /// An `Advance` that cannot be made yet saves up its cost and is never
-    /// cooled down.
+    /// An `Advance` that cannot be made yet is never cooled down. While the
+    /// techs it needs are missing it reserves nothing, so the steps behind
+    /// it and production may spend the stock; once they are researched it
+    /// saves up its cost, and the Yeoman behind it saves up too.
     #[test]
     fn advance_is_never_cooled_down() {
         let r = crate::testkit::rules();
-        let a = Arena::frozen(standard_vs_passive(&r), Vec::new());
         let o = order(vec![
             Step::Advance {
                 age: "masonry".into(),
@@ -617,8 +618,38 @@ mod tests {
                 split: [("grain".to_string(), 1)].into_iter().collect(),
             },
         ]);
+        let yeoman_kind = unit_kind(&r, "yeoman");
+        let a = Arena::frozen(standard_vs_passive(&r), Vec::new());
+        let yeoman = a.sim.view().unit_cost(P0, yeoman_kind)[0];
         let mut mem = BotMemory::default();
-        let yeoman = a.sim.view().unit_cost(P0, unit_kind(&r, "yeoman"))[0];
+        for _ in 0..3 {
+            let mut ctx = a.ctx(P0);
+            ctx.order = &o;
+            step(&mut ctx, &mut mem);
+            assert!(mem.blocked.is_empty(), "never cooled down");
+            assert_eq!(
+                ctx.ledger.reserved,
+                [0, 0, 0, 0],
+                "Masonry's techs are missing: nothing is reserved"
+            );
+            let cmds = ctx.into_commands();
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::Train { kind, .. } if *kind == yeoman_kind)),
+                "the Yeoman spends the Grain: {cmds:?}"
+            );
+        }
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                crate::testkit::research(&r, P0, "arms_1"),
+                crate::testkit::research(&r, P0, "trade_1"),
+            ],
+        );
+        assert!(matches!(
+            a.sim.view().check_advance_age(P0),
+            Err(RejectReason::CannotAfford { .. })
+        ));
         for _ in 0..3 {
             let mut ctx = a.ctx(P0);
             ctx.order = &o;
@@ -627,7 +658,7 @@ mod tests {
             assert_eq!(
                 ctx.ledger.reserved,
                 [250 + yeoman, 0, 0, 100],
-                "Masonry's cost is saved while its techs are missing, and the Yeoman saves up behind it"
+                "the techs are done: Masonry's cost is saved, and the Yeoman saves up behind it"
             );
             let cmds = ctx.into_commands();
             assert!(

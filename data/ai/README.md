@@ -87,13 +87,14 @@ down, in order. For each, within the plan's caps:
   of its kind, the age, or a building at a site with a builder (one new
   site per step and plan);
 - it **saves up** when the stock is short: the step's cost is reserved,
-  so later steps and army production cannot spend it. An `Advance` also
-  saves up while the techs it needs are still researching, except while
-  the bot defends: then it keeps its place but reserves nothing, so the
-  stock goes to the army first;
+  so later steps and army production cannot spend it. An `Advance` saves
+  up only once the techs it needs are researched, and not while the bot
+  defends: then it keeps its place but reserves nothing, so the stock
+  goes to the army first;
 - it **waits** while every trainer or host of the step is busy or stands
   in a contested Town, a predecessor tech is still queued, every worker is
-  busy or the plan's `check_build` probes ran out;
+  busy, the plan's `check_build` probes ran out, or (an `Advance`) the
+  techs it needs are still missing;
 - it is **blocked** for any other reason (no trainer or host built yet,
   the age not reached, no site (a `NearTown` building with no uncontested
   own Town to go beside has none), the pop cap): it reserves nothing and
@@ -156,8 +157,25 @@ Engine Yard fill the army with Mangonels.
 | `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
 | `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave, or an assaulting one when any threatened Town, the engaged one or another, is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
 
-M5b's economy slice reads every knob but the wave knobs
-(`assemble_radius_tiles`, `wave_requires_age` to `wave_interval_ds`,
-`min_siege`, and `stage_margin_tiles` to `wave_max_ds`), which the wave
-slice of M5b reads (docs/design/ai.md); `all_in_after_ds` already stops a
-defence from recalling a wave.
+Since M5b's waves slice the bot reads every knob. A **wave** launches when
+no wave is out, the defence does not block launches, the bot has reached
+`wave_requires_age`, the tick has reached the last launch plus
+`wave_interval_ds` and `first_wave_not_before_ds`, and at least the
+`wave_sizes` row of the tick (at most the home army plus the free pop)
+armed units stand within `assemble_radius_tiles` of the rally, `min_siege`
+of them siege, with a Supply Wain at home; at a full pop one armed unit
+stays home. Every assembled armed unit goes (siege first, at most
+`max_wave_units`) with one Wain: they stage at a point off enemy land and
+beyond the enemy shooters' reach (`stage_margin_tiles` plus the group's
+spread), assault the enemy Town nearest the rally once `stage_ready_permille`
+of them and all their siege stand within `stage_radius_tiles` of it (or
+after `stage_max_ds`), the Wain keeping `wain_standoff_tiles` outside every
+enemy shooter's range on the way back to the stage point, siege within
+`siege_focus_tiles` attacking the Town itself; at 0 HP `ring_units`
+annexing units hold its ring while `clear_defenders_units` attack each
+defender near it; a captured Town sends a wave of at least
+`continue_min_units` on to the next, and a wave with no annexing unit,
+fewer than `recall_below_units`, or older than `wave_max_ds` and not
+annexing comes home. From `all_in_after_ds` every home armed unit joins the
+wave out and nothing is recalled. The rules and their order are in
+docs/design/ai.md and `crates/ai/src/standard/waves.rs`.

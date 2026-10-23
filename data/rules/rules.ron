@@ -3,11 +3,12 @@
 // at load by rules::Rules::ticks_from_ds. Schema: crates/rules/src/lib.rs
 // (deny_unknown_fields). Authoring guide: data/rules/README.md
 (
-  // 22: M5b economy slice: data/ai only (the Standard bot's second Lumber
-  // Yard, second Scriptorium and six Scribes, Letters I before Trade II,
-  // and resource_radius_tiles 20, the second Town's border); every fixture
-  // is re-recorded for the new rules_hash in its header and no .hash moves.
-  rules_version: 22,
+  // 23: M5b waves slice: data/ai only (the Standard bot's build order
+  // trains its first Mangonel right after the Engine Yard, and after Arms
+  // III builds a third Lumber Yard, a second Muster Hall and Ore Pit and
+  // grows to 23 Yeomen); every fixture is re-recorded for the new
+  // rules_hash in its header and no .hash moves.
+  rules_version: 23,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

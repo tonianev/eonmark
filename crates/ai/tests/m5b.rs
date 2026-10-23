@@ -292,7 +292,11 @@ fn par<T: Send>(games: Vec<Box<dyn FnOnce() -> T + Send>>) -> Vec<T> {
 /// `ticks` or the outcome; returns the observed facts of the Standard
 /// side.
 fn vs_passive(seed: u64, seat: PlayerId, ticks: u32) -> Side {
-    let r = common::rules();
+    vs_passive_under(common::rules(), seed, seat, ticks)
+}
+
+/// [`vs_passive`] under rules `r`.
+fn vs_passive_under(r: Rules, seed: u64, seat: PlayerId, ticks: u32) -> Side {
     let (a, b) = if seat == P0 {
         (("standard", "standard"), ("passive", ""))
     } else {
@@ -305,13 +309,26 @@ fn vs_passive(seed: u64, seat: PlayerId, ticks: u32) -> Side {
 }
 
 /// The build order never stalls: every non-optional step is done before
-/// tick 30000 in five seeds, from either seat.
+/// tick 30000 in five seeds, from either seat. The first wave takes
+/// Passive's Seat around tick 15600, before the build order's last steps
+/// (the match is then decided and the bots stop), so these games run with
+/// the waves held back past the match cap (`first_wave_not_before_ds` at
+/// its maximum): the army is still trained and paid for as in a real
+/// game, so the build order competes for the same stock.
 #[test]
 #[ignore = "long: five 30000-tick games a side; CI runs --ignored m5b_"]
 fn m5b_build_order_completes_vs_passive_by_30000() {
+    let mut r = common::rules();
+    for p in &mut r.ai.personalities {
+        p.first_wave_not_before_ds = rules::ai::MAX_AI_DS;
+    }
+    assert!(r.ticks_from_ds(rules::ai::MAX_AI_DS) > r.match_cap_ticks());
     for seat in [P0, P1] {
         let games: Vec<Box<dyn FnOnce() -> Side + Send>> = (1..=5)
-            .map(|seed| Box::new(move || vs_passive(seed, seat, 30_000)) as Box<_>)
+            .map(|seed| {
+                let r = r.clone();
+                Box::new(move || vs_passive_under(r, seed, seat, 30_000)) as Box<_>
+            })
             .collect();
         for (i, side) in par(games).into_iter().enumerate() {
             let done = side.bo_done_tick;
@@ -581,17 +598,18 @@ fn m5b_defend_answers_a_raid_at_minute_5() {
 
 /// A defence outranks saving for an age: Standard (P0) against Passive
 /// (P1), which debug-spawns three Skirmishers 13 tiles north of P0's Seat
-/// at tick 6200. P0's Muster Hall is up and idle and its `Military` step
+/// at tick 6700. P0's Muster Hall is up and idle and its `Military` step
 /// latched, but the Masonry `Advance` in its window is saving up its 250
-/// Grain while its techs finish. While the bot defends, that saving no
-/// longer holds the stock back from production, so P0 queues an armed
-/// unit within 200 ticks of the raid.
+/// Grain and 100 Lore: its techs are researched and the stock is short
+/// (from tick 6412 to 7971 in this game, the Muster Hall idle all along).
+/// While the bot defends, that saving no longer holds the stock back from
+/// production, so P0 queues an armed unit within 200 ticks of the raid.
 #[test]
-#[ignore = "long: a 6400-tick game; CI runs --ignored m5b_"]
+#[ignore = "long: a 6900-tick game; CI runs --ignored m5b_"]
 fn m5b_defend_outranks_saving_for_an_age() {
     let r = common::rules();
     let setup = common::standard_vs_passive(&r);
-    let raid_at = 6200;
+    let raid_at = 6700;
     let raid = common::spawn(&r, P1, "skirmisher", 24, 51, 3);
     let (mut m, log) = logged(&setup, &r, Some((raid_at, P1, raid)));
     while m.sim.tick() < raid_at {
@@ -603,6 +621,19 @@ fn m5b_defend_outranks_saving_for_an_age() {
     assert!(
         mem.military && line.contains("advance masonry"),
         "the setup's premise: production latched, Masonry saved for: {line}"
+    );
+    assert!(
+        matches!(
+            view.check_advance_age(P0),
+            Err(sim::RejectReason::CannotAfford { .. })
+        ),
+        "the setup's premise: Masonry's techs are done and its cost is short"
+    );
+    let muster = common::building_kind(&r, "muster_hall");
+    assert!(
+        view.buildings()
+            .any(|b| b.owner == P0 && b.kind == muster && b.queue.is_empty()),
+        "the setup's premise: an idle Muster Hall"
     );
     while m.sim.tick() <= raid_at + 200 {
         m.step();
@@ -669,4 +700,451 @@ fn m5b_restore_at_3003_and_3007_matches_uninterrupted() {
         })
         .collect();
     assert_eq!(par(games), [6003, 6007]);
+}
+
+// ---------------------------------------------------------------------------
+// M5b slice 3: waves, the capture, the acceptance-2 facts.
+// ---------------------------------------------------------------------------
+
+/// Player `p`'s non-civilian units committed to `enemy`'s land at this
+/// tick (order goal, post goal, attack target or position on it, as the
+/// play-bots observer counts them): `(armed, wains, mangonels)`.
+fn committed_now(r: &Rules, view: &SimView<'_>, p: PlayerId, enemy: PlayerId) -> (u32, u32, u32) {
+    let on = |at: FxVec2| view.territory().owner_at(view.map().tile_of(at)) == Some(enemy);
+    let (mut armed, mut wains, mut mangonels) = (0, 0, 0);
+    for u in view.units().filter(|u| u.owner == p) {
+        let k = r.unit_kind(u.kind.0).unwrap();
+        if k.class == UnitClass::Civilian {
+            continue;
+        }
+        let target_at = u.target.and_then(|t| match t {
+            TargetId::Unit(id) => view.unit(id).map(|t| t.pos),
+            TargetId::Building(id) => view.building(id).map(|b| view.map().center_of(b.tile)),
+        });
+        let committed = [
+            u.order.as_ref().map(|o| o.goal),
+            u.post.as_ref().map(|p| p.goal),
+            target_at,
+            Some(u.pos),
+        ]
+        .into_iter()
+        .flatten()
+        .any(on);
+        if !committed {
+            continue;
+        }
+        if k.supplies {
+            wains += 1;
+        } else if k.attack.is_some() {
+            armed += 1;
+            if k.class == UnitClass::Siege {
+                mangonels += 1;
+            }
+        }
+    }
+    (armed, wains, mangonels)
+}
+
+/// Acceptance 2 (ROADMAP M5b): against Passive, the Standard bot (P0)
+/// reaches Masonry and then, before tick 18000, attack-moves into the
+/// enemy's land with at least 8 armed units, exactly one Supply Wain and
+/// at least one Mangonel, all committed in the same tick (re-checked here
+/// from the view at the observer's `first_attack_tick`), in five seeds.
+/// The five seeds play close to one trajectory: the RNG is drawn only for
+/// exact combat ties.
+#[test]
+#[ignore = "long: five games to about 15600 ticks; CI runs --ignored m5b_"]
+fn m5b_standard_vs_passive_reaches_masonry_then_a_wave_of_8_with_a_wain_before_18000() {
+    let games: Vec<Box<dyn FnOnce() -> (Side, (u32, u32, u32)) + Send>> = (1..=5u64)
+        .map(|seed| {
+            Box::new(move || {
+                let r = common::rules();
+                let setup = MatchSetup::bots(&r, seed, ("standard", "standard"), ("passive", ""));
+                let mut m = BotMatch::with_bots(setup, r.clone()).unwrap();
+                while m.sim.result().is_none() && m.sim.tick() < 18_000 {
+                    m.step();
+                    if m.observer.sides()[0].first_attack_tick == Some(m.sim.tick()) {
+                        let seen = committed_now(&r, &m.sim.view(), P0, P1);
+                        return (m.observer.sides()[0], seen);
+                    }
+                }
+                (m.observer.sides()[0], (0, 0, 0))
+            }) as Box<_>
+        })
+        .collect();
+    for (i, (side, (armed, wains, mangonels))) in par(games).into_iter().enumerate() {
+        let seed = i + 1;
+        let age = side.age_reached_tick.expect("Masonry");
+        let attack = side.first_attack_tick.expect("an attack before 18000");
+        assert!(
+            age <= attack && attack < 18_000,
+            "seed {seed}: {age} {attack}"
+        );
+        assert!(armed >= 8, "seed {seed}: {armed} armed units");
+        assert_eq!(wains, 1, "seed {seed}: one Supply Wain");
+        assert!(mangonels >= 1, "seed {seed}: no Mangonel");
+        assert_eq!(side.first_attack_units, Some(armed + wains), "seed {seed}");
+        assert_eq!(side.first_attack_wains, Some(1), "seed {seed}");
+    }
+}
+
+/// The capture: against Passive the first wave drops the Seat and holds
+/// its ring, so the annexation started by P0 runs to the flip with no
+/// reset, and the match is a decisive `SeatCaptured` victory for P0.
+#[test]
+#[ignore = "long: a game to about 15600 ticks; CI runs --ignored m5b_"]
+fn m5b_standard_vs_passive_captures_the_seat_by_ring_hold() {
+    let r = common::rules();
+    let setup = MatchSetup::bots(&r, 1, ("standard", "standard"), ("passive", ""));
+    let mut m = BotMatch::with_bots(setup, r).unwrap();
+    let mut started = Vec::new();
+    let mut resets = 0;
+    while m.sim.result().is_none() && m.sim.tick() < 36_000 {
+        m.step_sim();
+        for e in m.sim.drain_events() {
+            match e {
+                SimEvent::AnnexationStarted { town, attacker } => started.push((town, attacker)),
+                SimEvent::AnnexationReset { .. } => resets += 1,
+                _ => {}
+            }
+        }
+    }
+    let seat = m
+        .sim
+        .view()
+        .buildings()
+        .find(|b| b.town_state.is_some_and(|t| t.seat) && b.owner == P0 && b.id != BuildingId(1))
+        .map(|b| b.id);
+    let result = m.sim.result().expect("decided");
+    assert_eq!(
+        result.outcome,
+        sim::Outcome::Victory {
+            player: P0,
+            decisive: true
+        }
+    );
+    assert_eq!(result.reason, sim::OutcomeReason::SeatCaptured);
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(Some(started[0].0), seat, "the annexed Town is P1's Seat");
+    assert_eq!(started[0].1, P0);
+    assert_eq!(resets, 0, "no reset");
+}
+
+/// The Standard bot takes Passive's Seat from either side, three seeds
+/// each: a decisive `SeatCaptured` victory every time.
+#[test]
+#[ignore = "long: six games to about 15600 ticks; CI runs --ignored m5b_"]
+fn m5b_standard_wins_from_either_side_vs_passive() {
+    let mut games: Vec<Box<dyn FnOnce() -> (PlayerId, Option<sim::MatchResult>) + Send>> =
+        Vec::new();
+    for seat in [P0, P1] {
+        for seed in 1..=3u64 {
+            games.push(Box::new(move || {
+                let r = common::rules();
+                let (a, b) = if seat == P0 {
+                    (("standard", "standard"), ("passive", ""))
+                } else {
+                    (("passive", ""), ("standard", "standard"))
+                };
+                let mut m = BotMatch::with_bots(MatchSetup::bots(&r, seed, a, b), r).unwrap();
+                m.run(36_000);
+                (seat, m.sim.result())
+            }));
+        }
+    }
+    for (seat, result) in par(games) {
+        let result = result.expect("decided before 36000");
+        assert_eq!(
+            (result.outcome, result.reason),
+            (
+                sim::Outcome::Victory {
+                    player: seat,
+                    decisive: true
+                },
+                sim::OutcomeReason::SeatCaptured
+            ),
+            "{seat:?}"
+        );
+    }
+}
+
+/// A controller that plans with the Standard bot of each seat and keeps
+/// every plan's command count and `check_build` probes.
+struct Stats {
+    bots: BTreeMap<PlayerId, ai::standard::StandardBot>,
+    plans: Arc<Mutex<Vec<(PlayerId, u32, usize, u32)>>>,
+}
+
+impl AiController for Stats {
+    fn think(&mut self, p: PlayerId, view: &SimView<'_>, memory: &mut AiMemory) -> Vec<Command> {
+        let Some(bot) = self.bots.get(&p) else {
+            return Vec::new();
+        };
+        let (cmds, stats) = bot.think_with_stats(p, view, memory);
+        if let Some(s) = stats {
+            self.plans
+                .lock()
+                .unwrap()
+                .push((p, view.tick, cmds.len(), s.probes));
+        }
+        cmds
+    }
+}
+
+/// The work caps hold on every plan of a Standard-vs-Standard game's first
+/// 6000 ticks (the building-heavy opening): at most
+/// `max_commands_per_think` commands and `site_checks_per_think`
+/// `check_build` probes.
+#[test]
+#[ignore = "long: a 6000-tick game; CI runs --ignored m5b_"]
+fn m5b_standard_respects_work_caps() {
+    let r = common::rules();
+    let setup = MatchSetup::bots(&r, 1, ("standard", "standard"), ("standard", "standard"));
+    let k = r.ai.personality("standard").unwrap().clone();
+    let plans = Arc::new(Mutex::new(Vec::new()));
+    let bots = [P0, P1]
+        .into_iter()
+        .map(|p| (p, ai::standard::StandardBot::new(&r, &setup, p, &k)))
+        .collect();
+    let mut m = BotMatch::new(
+        setup,
+        r,
+        Box::new(Stats {
+            bots,
+            plans: plans.clone(),
+        }),
+    );
+    m.run(6000);
+    let plans = plans.lock().unwrap();
+    assert_eq!(plans.len(), 1200, "every 10 ticks, two seats");
+    let cmds = usize::try_from(k.max_commands_per_think).unwrap();
+    for (p, t, n, probes) in plans.iter() {
+        assert!(*n <= cmds, "{p:?} tick {t}: {n} commands");
+        assert!(
+            *probes <= k.site_checks_per_think,
+            "{p:?} tick {t}: {probes} probes"
+        );
+    }
+    assert!(
+        plans.iter().any(|(_, _, _, probes)| *probes > 0),
+        "sites were probed"
+    );
+    let busiest = plans.iter().map(|(_, _, n, _)| *n).max().unwrap();
+    println!("busiest plan: {busiest} commands");
+}
+
+/// The bot's memory stays small: under 1 KiB at every tick of a game
+/// against Passive (to the capture), from either side.
+#[test]
+#[ignore = "long: two games to about 15600 ticks; CI runs --ignored m5b_"]
+fn m5b_memory_stays_under_1_kib_vs_passive() {
+    let games: Vec<Box<dyn FnOnce() -> usize + Send>> = [P0, P1]
+        .into_iter()
+        .map(|seat| {
+            Box::new(move || {
+                let r = common::rules();
+                let (a, b) = if seat == P0 {
+                    (("standard", "standard"), ("passive", ""))
+                } else {
+                    (("passive", ""), ("standard", "standard"))
+                };
+                let mut m = BotMatch::with_bots(MatchSetup::bots(&r, 1, a, b), r).unwrap();
+                let mut most = 0;
+                while m.sim.result().is_none() && m.sim.tick() < 36_000 {
+                    m.step();
+                    let n = m.sim.view().ai_memory(seat).len();
+                    assert!(n < 1024, "{seat:?} tick {}: {n} bytes", m.sim.tick());
+                    most = most.max(n);
+                }
+                most
+            }) as Box<_>
+        })
+        .collect();
+    for most in par(games) {
+        assert!(most > 0, "the memory was written");
+    }
+}
+
+/// Every wave reaches the enemy's land: while a wave is out (in the
+/// memory), one of its units stands on the enemy's land within 2400 ticks
+/// of its launch, so no wave jams on the way. A wave that ends sooner
+/// (recalled after a clash, or destroyed) is no jam. Standard against
+/// Passive from either side (each wave must arrive there), and both seats
+/// of a Standard-vs-Standard game, to tick 30000.
+#[test]
+#[ignore = "long: three games to 30000 ticks; CI runs --ignored m5b_"]
+fn m5b_waves_reach_enemy_land_within_2400_ticks_of_launch() {
+    let configs: [(&str, &str); 3] = [
+        ("standard", "passive"),
+        ("passive", "standard"),
+        ("standard", "standard"),
+    ];
+    let games: Vec<Box<dyn FnOnce() -> (u32, u32) + Send>> = configs
+        .into_iter()
+        .map(|(a, b)| {
+            Box::new(move || {
+                let r = common::rules();
+                let pers = |bot: &str| if bot == "standard" { "standard" } else { "" };
+                let setup = MatchSetup::bots(&r, 1, (a, pers(a)), (b, pers(b)));
+                let mut m = BotMatch::with_bots(setup, r).unwrap();
+                // (player, launch tick) of every wave out and not yet seen
+                // on enemy land.
+                let mut open: Vec<(PlayerId, u32)> = Vec::new();
+                let mut launched = [0u16; 2];
+                let (mut reached, mut ended) = (0u32, 0u32);
+                while m.sim.result().is_none() && m.sim.tick() < 30_000 {
+                    m.step();
+                    let view = m.sim.view();
+                    let mems = [P0, P1].map(|p| BotMemory::decode(view.ai_memory(p)));
+                    for (i, p) in [P0, P1].into_iter().enumerate() {
+                        if mems[i].waves_launched > launched[i] {
+                            launched[i] = mems[i].waves_launched;
+                            let w = mems[i].wave.as_ref().expect("a wave launched this plan");
+                            open.push((p, w.launched_at));
+                        }
+                    }
+                    open.retain(|(p, at)| {
+                        let i = usize::from(p.0);
+                        let enemy = if *p == P0 { P1 } else { P0 };
+                        let Some(w) = mems[i].wave.as_ref().filter(|w| w.launched_at == *at) else {
+                            ended += 1;
+                            return false;
+                        };
+                        let there = w.units.iter().chain(w.wain.iter()).any(|u| {
+                            view.unit(*u).is_some_and(|x| {
+                                view.territory().owner_at(view.map().tile_of(x.pos)) == Some(enemy)
+                            })
+                        });
+                        if there {
+                            reached += 1;
+                            return false;
+                        }
+                        assert!(
+                            view.tick < at + 2400,
+                            "{p:?}: the wave launched at {at} is not on enemy land at {}",
+                            view.tick
+                        );
+                        true
+                    });
+                }
+                (reached, ended)
+            }) as Box<_>
+        })
+        .collect();
+    let seen = par(games);
+    for (i, (reached, ended)) in seen.iter().enumerate().take(2) {
+        assert!(*reached >= 1 && *ended == 0, "game {i}: {seen:?}");
+    }
+    println!("(reached, ended early) per game: {seen:?}");
+}
+
+/// Hidden state during a wave: a Standard-vs-Passive match restored into a
+/// fresh `Sim` with fresh bots 300 ticks after the first launch (the
+/// roster, stage point and phase in the memory) matches the uninterrupted
+/// run, every sub-hash, every tick, through the assault and the ring hold
+/// to the outcome.
+#[test]
+#[ignore = "long: two games to about 15600 ticks; CI runs --ignored m5b_"]
+fn m5b_restore_during_a_wave_matches_uninterrupted() {
+    let r = common::rules();
+    let setup = MatchSetup::bots(&r, 2, ("standard", "standard"), ("passive", ""));
+    let fresh = || {
+        Sim::new(
+            setup.clone(),
+            r.clone(),
+            ai::controller_for(&setup, &r).unwrap(),
+        )
+    };
+    let mut a = fresh();
+    while BotMemory::decode(a.view().ai_memory(P0)).wave.is_none() {
+        a.step(&[]);
+        assert!(a.tick() < 18_000, "no wave");
+    }
+    let at = a.tick() + 300;
+    while a.tick() < at {
+        a.step(&[]);
+    }
+    assert!(BotMemory::decode(a.view().ai_memory(P0)).wave.is_some());
+    let mut b = fresh();
+    b.restore(&a.snapshot()).unwrap();
+    while a.result().is_none() {
+        a.step(&[]);
+        b.step(&[]);
+        assert_eq!(
+            a.sub_hashes().first_difference(&b.sub_hashes()),
+            None,
+            "restored at {at}, tick {}",
+            a.tick()
+        );
+        assert!(a.tick() < 36_000, "no outcome");
+    }
+    assert_eq!(a.result(), b.result());
+}
+
+/// The siege path end to end (not ignored): a human P0 whose Yeomen are
+/// killed at once, so only the Seat's fire defends, and the Standard bot as
+/// P1, moved to Masonry and given 8 Skirmishers, 2 Mangonels and a Supply
+/// Wain at its rally. P1 launches at its first plan, stages outside P0's
+/// border, drops the Seat with its siege, holds the ring and takes the
+/// Seat: a decisive `SeatCaptured` victory well inside 4000 ticks, with no
+/// annexation reset and no rejected command.
+#[test]
+fn bot_takes_seat() {
+    let r = common::rules();
+    let mut setup = MatchSetup::vs_bot(&r, 1, "standard", "standard");
+    setup.debug_commands = true;
+    let mut a = Arena::new(setup, Vec::new());
+    let mut cmds: Vec<Command> = a
+        .units_of(P0, "yeoman")
+        .into_iter()
+        .map(|u| Command::DebugDamage {
+            target: TargetId::Unit(u),
+            amount: 1000,
+        })
+        .collect();
+    cmds.push(Command::DebugAdvanceAge { owner: P1 });
+    let rally = a.map(P1).rally_seed;
+    let (x, y) = (i32::from(rally.x), i32::from(rally.y));
+    cmds.push(common::spawn(&r, P1, "skirmisher", x, y, 8));
+    cmds.push(common::spawn(&r, P1, "mangonel", x, y, 2));
+    cmds.push(common::spawn(&r, P1, "supply_wain", x, y, 1));
+    a.issue(P0, cmds);
+    assert!(a.units_of(P0, "yeoman").is_empty());
+    let mut launched_at = None;
+    let mut started = Vec::new();
+    let mut resets = 0;
+    let mut rejected = 0;
+    while a.sim.result().is_none() && a.sim.tick() < 4000 {
+        a.run(1);
+        for e in a.sim.drain_events() {
+            match e {
+                SimEvent::AnnexationStarted { attacker, .. } => started.push(attacker),
+                SimEvent::AnnexationReset { .. } => resets += 1,
+                SimEvent::CommandRejected { player, .. } if player == P1 => rejected += 1,
+                _ => {}
+            }
+        }
+        if launched_at.is_none() && a.mem(P1).wave.is_some() {
+            launched_at = Some(a.sim.tick());
+        }
+    }
+    let launched_at = launched_at.expect("a launch");
+    assert!(launched_at <= 20, "launched at {launched_at}");
+    let result = a.sim.result().expect("decided before 4000");
+    assert_eq!(
+        (result.outcome, result.reason),
+        (
+            sim::Outcome::Victory {
+                player: P1,
+                decisive: true
+            },
+            sim::OutcomeReason::SeatCaptured
+        )
+    );
+    assert_eq!(started, [P1]);
+    assert_eq!((resets, rejected), (0, 0));
+    println!(
+        "bot_takes_seat: launched {launched_at}, decided {}",
+        result.tick
+    );
 }

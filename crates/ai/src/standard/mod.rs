@@ -16,7 +16,8 @@
 //! 2. [`build_order`]: the `Military` latch, the window, the site keeper;
 //! 3. [`economy`]: idle workers and the gather split;
 //! 4. [`army::produce`]: Supply Wains, then the army mix;
-//! 5. waves (M5b slice 3);
+//! 5. [`waves`]: launch, stage, assault, ring hold, continue, recall,
+//!    all-in;
 //! 6. [`army::rally_upkeep`]: trainers rallied to the army's rally point.
 
 pub mod army;
@@ -27,6 +28,7 @@ pub mod economy;
 pub mod facts;
 pub mod memory;
 pub mod sites;
+pub mod waves;
 
 pub use ctx::{Ctx, Ledger, goal_or_post, on_station};
 pub use facts::Facts;
@@ -97,6 +99,16 @@ impl StandardBot {
     /// [`AiController::think`] calls it on the bot's cadence; tests call it
     /// directly.
     pub fn plan(&self, me: PlayerId, view: &SimView<'_>, memory: &mut AiMemory) -> Vec<Command> {
+        self.plan_with_stats(me, view, memory).0
+    }
+
+    /// [`StandardBot::plan`], and what the plan used of its caps.
+    pub fn plan_with_stats(
+        &self,
+        me: PlayerId,
+        view: &SimView<'_>,
+        memory: &mut AiMemory,
+    ) -> (Vec<Command>, PlanStats) {
         let knobs = self.knobs(view.rules());
         let mut mem = BotMemory::decode(memory.bytes());
         let mut ctx = Ctx::new(*view, me, knobs, &self.map);
@@ -105,8 +117,43 @@ impl StandardBot {
         if bytes != memory.bytes() {
             memory.set(bytes);
         }
-        ctx.into_commands()
+        let stats = PlanStats {
+            probes: knobs.site_checks_per_think.saturating_sub(ctx.probes_left),
+        };
+        let cmds = ctx.into_commands();
+        (cmds, stats)
     }
+
+    /// [`AiController::think`], and the plan's [`PlanStats`] on a plan
+    /// tick (`None` off the cadence or once the match is decided).
+    pub fn think_with_stats(
+        &self,
+        me: PlayerId,
+        view: &SimView<'_>,
+        memory: &mut AiMemory,
+    ) -> (Vec<Command>, Option<PlanStats>) {
+        if view.outcome().is_some() {
+            return (Vec::new(), None);
+        }
+        let every = self
+            .knobs(view.rules())
+            .think_every_ticks(view.rules())
+            .max(1);
+        if view.tick % every != phase(me, every, view.setup()) {
+            return (Vec::new(), None);
+        }
+        let (cmds, stats) = self.plan_with_stats(me, view, memory);
+        (cmds, Some(stats))
+    }
+}
+
+/// What one plan used of its caps (the work-cap test,
+/// `m5b_standard_respects_work_caps`, reads it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlanStats {
+    /// `check_build` probes made (each a full-map search), at most
+    /// `site_checks_per_think`.
+    pub probes: u32,
 }
 
 /// The plan pipeline over `ctx` and `mem`, in its fixed order.
@@ -115,21 +162,12 @@ pub fn run_rules(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     build_order::step(ctx, mem);
     economy::step(ctx, mem);
     army::produce(ctx, mem);
+    waves::step(ctx, mem);
     army::rally_upkeep(ctx);
 }
 
 impl AiController for StandardBot {
     fn think(&mut self, me: PlayerId, view: &SimView<'_>, memory: &mut AiMemory) -> Vec<Command> {
-        if view.outcome().is_some() {
-            return Vec::new();
-        }
-        let every = self
-            .knobs(view.rules())
-            .think_every_ticks(view.rules())
-            .max(1);
-        if view.tick % every != phase(me, every, view.setup()) {
-            return Vec::new();
-        }
-        self.plan(me, view, memory)
+        self.think_with_stats(me, view, memory).0
     }
 }

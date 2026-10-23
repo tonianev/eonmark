@@ -377,6 +377,7 @@ mod tests {
             stage: Tile::new(80, 64),
             phase,
             launched_at: 0,
+            phase_at: 0,
         }
     }
 

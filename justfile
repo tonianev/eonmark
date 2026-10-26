@@ -104,6 +104,12 @@ m5a-checks OUT="":
     cargo build -p sim-cli --locked --release
     scripts/m5a_checks.sh target/ci/eonmark target/release/sim-cli "{{OUT}}"
 
+# M5b acceptance 4 proxy, local only (owner decision 8): verify the m5_first_match golden; run `--spectate --seed 1 --fast-forward-to <T-400>` in background mode with a screenshot of the overlay at the deciding tick T, check its `outcome:` line against the golden's hash and `sim-cli verify` of its own replay; screenshot the main menu and check it records nothing; click New Game through the `--new-game-after-seconds` proxy and verify that replay; run `scripts/m2_checks.sh` checks 3 and 4 (`--skip-menu`); and check that no game process is left; see scripts/m5b_checks.sh. On Linux without a display it runs under xvfb-run on lavapipe.
+m5b-checks OUT="":
+    cargo build -p game --locked --profile ci
+    cargo build -p sim-cli --locked --release
+    scripts/m5b_checks.sh target/ci/eonmark target/release/sim-cli "{{OUT}}"
+
 # Determinism self-test: scripted ticks twice on two threads, hashes must match.
 selftest:
     cargo run -p sim-cli --locked -- selftest

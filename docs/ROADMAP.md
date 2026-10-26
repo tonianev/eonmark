@@ -337,7 +337,7 @@ A minimal but complete scripted bot (fixed build order to Masonry Age, worker ba
 
 ### Good first issues
 
-- Write a second AI build order RON (boom variant) and compare with play-bots (any OS).
+- Write a second AI build order RON (boom variant) and compare with play-bots (any OS). Filed as #48.
 
 ### Estimate
 

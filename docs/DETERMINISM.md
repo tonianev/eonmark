@@ -149,7 +149,7 @@ Why two version fields: a git sha changes every commit, so it cannot gate fixtur
 
 ### The game's recorder thread (M2)
 
-`crates/game/src/sim_driver.rs` owns the recorder. Every windowed session records; headless replay runs (`--headless-run <file>`) do not.
+`crates/game/src/sim_driver.rs` owns the recorder. Every windowed session records; headless replay runs (`--headless-run <file>`) do not. Since M5b the recorder is lazy: `step_sim` spawns it, and prints `replay: <path>`, right before the first tick it steps (`PendingRecording`), so a plain launch quit from the main menu writes no file. A `--spectate --fast-forward-to N` run is stepped to tick N before the window opens, so its replay's first record is past N; it still verifies from tick 0, because the header names both bots and a spectated match has no human commands for the replay to miss (M5b owner decision 8; `sim_driver::tests::a_replay_recorded_after_a_fast_forward_verifies_from_tick_0`).
 
 | Piece | What it is |
 | --- | --- |

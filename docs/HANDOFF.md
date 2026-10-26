@@ -85,8 +85,24 @@ numbered in the ROADMAP's M5b Notes. M5b has started:
   the `defend_guard_pop_ratio` knob) cap a defence's hold on launches,
   pace an age's saving and keep the border tower away from enemy armies.
 
-New Game, the overlay proxy and the milestone close follow in slices 4
-and 5.
+- slice 4 (no bump): the game half. A plain launch opens on a minimal
+  main menu (`crates/game/src/menu/`, `AppState::{Menu, Skirmish}`) over a
+  match against the Standard bot on a fresh wall-clock seed; New Game
+  starts the sim and the lazy replay recorder, so a quit from the menu
+  records nothing. `--skip-menu`, `--spectate` (the bot against itself,
+  local input off) and `--spectate --fast-forward-to <tick>`;
+  `just m5b-checks` (`scripts/m5b_checks.sh`) is acceptance line 4's
+  proxy: the overlay of `m5_first_match`'s setup verifying to its golden
+  hash, the menu, a New Game click through `--new-game-after-seconds`, and
+  `scripts/m2_checks.sh` checks 3 and 4, which now pass `--skip-menu`.
+
+The milestone close follows in slice 5.
+
+The M5b good first issues are filed: #48 (a `boom` build order compared
+with `play-bots`, the ROADMAP's), #49 (a `data-check` negative test for a
+build order whose `Research` host is never built) and #50
+(`sim-cli data-check --verbose` printing each build order's step count
+and the step of its first `Advance`).
 
 Open owner checks on the dev Mac, batched into one session under the owner's
 decision 3 in the ROADMAP's M4b Notes (an exception to rule 1 in
@@ -165,7 +181,7 @@ ticked with pasted command output in a merged PR.
 ## Local setup
 
 ```bash
-cargo run -p game --features dev                      # window with ground plane and camera
+cargo run -p game --features dev                      # the main menu; New Game plays the Standard bot
 cargo run -p sim-cli -- selftest                      # two identical hashes
 cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
 just ci                                               # everything CI runs

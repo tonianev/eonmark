@@ -26,7 +26,7 @@ cd eonmark
 cargo run -p game --features dev
 ```
 
-The first build compiles Bevy and takes several minutes. [docs/BUILD_TIMES.md](docs/BUILD_TIMES.md) has measured numbers. The `dev` feature turns on dynamic linking and the inspector panels (the egui World Inspector is hidden until F12). Never ship a build with it. Most iteration happens in `crates/sim` with `cargo test -p sim`, which does not compile Bevy at all.
+The game opens on its main menu (since M5b); New Game starts a skirmish against the Standard bot, and `-- --skip-menu` skips the menu. The first build compiles Bevy and takes several minutes. [docs/BUILD_TIMES.md](docs/BUILD_TIMES.md) has measured numbers. The `dev` feature turns on dynamic linking and the inspector panels (the egui World Inspector is hidden until F12). Never ship a build with it. Most iteration happens in `crates/sim` with `cargo test -p sim`, which does not compile Bevy at all.
 
 ## Before you push: `just ci`
 

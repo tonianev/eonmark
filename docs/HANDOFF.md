@@ -39,10 +39,10 @@ GitHub Actions run (check, headless, hash-parity) at the pushed head and
 pasted on the line. M5b is done once that is pasted and the PR merges.
 Its [owner] line 4 waits for the owner's own match; its automated proxy,
 `just m5b-checks`, passes and is pasted in `docs/PLAYTEST.md`, and goes
-into the PR description with the CI results. The owner answered the nine questions of
-its implementation plan on 2026-10-23 by taking every default; the
-decisions are numbered in the ROADMAP's M5b Notes. What M5b built, in five
-slices:
+into the PR description with the CI results. The owner answered the nine
+questions of its implementation plan on 2026-10-23 by taking every
+default; the decisions are numbered in the ROADMAP's M5b Notes. What M5b
+built, in five slices:
 
 - Bot plumbing (`SIM_VERSION` 17, `rules_version` 21): `MatchSetup.ai_seats`
   in the replay header, the hashed `Player::ai_memory` that step 2 hands

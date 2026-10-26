@@ -14,6 +14,10 @@ M5b, the bot data in `../ai/`, see [`../ai/README.md`](../ai/README.md))
 and validated before the simulation starts; their content is part of
 `rules_hash`, so editing them without bumping `rules_version` makes
 `sim-cli verify` report `RULES CHANGED since recording` on older replays.
+`../visuals.ron` is the exception: it is validated with the rest but, since
+`rules_version` 25, not hashed
+([ADR 0003](../../docs/adr/0003-visuals-outside-rules-hash.md)), because
+the simulation never reads it.
 Changing a number here needs no Rust; see the worked example at the end for
 the full data-only path.
 
@@ -182,7 +186,10 @@ order), with the same header-only re-record, and added the
 `m5_first_match` golden; its review fixes (`rules_version` 24) added the
 `defend_guard_pop_ratio` knob to `../ai/personalities.ron`, again with a
 header-only re-record (only `m5_first_match`, new in that pull request,
-moved with the bot's code).
+moved with the bot's code). The art pass's ADR 0003 (`rules_version` 25)
+changed no value either: `../visuals.ron` left `rules_hash`, so every
+fixture was re-recorded for its header alone and no `.hash` moved; a look
+edit needs no bump from then on.
 
 ## resources.ron
 
@@ -559,7 +566,7 @@ fails. The data-only path is the same for every RON file and touches no
 Rust:
 
 1. Edit the value, as above.
-2. Bump `rules_version` in `rules.ron` (24 to 25), update the one-line
+2. Bump `rules_version` in `rules.ron` (25 to 26), update the one-line
    reason in the comment above it and put the same reason in the commit
    message.
 3. Check the data, re-record the golden fixtures and run the sim tests:
@@ -571,8 +578,8 @@ cargo test -p sim
 ```
 
 `data-check` prints
-`OK rules_version=25 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
-(the repository is at 24, so before the edit it prints `rules_version=24`;
+`OK rules_version=26 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en`
+(the repository is at 25, so before the edit it prints `rules_version=25`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
 fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`

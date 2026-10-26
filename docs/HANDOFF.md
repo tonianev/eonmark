@@ -81,13 +81,19 @@ Next is the pre-stream art pass, before the first gameplay stream and
 before M6 (the owner's decision of 2026-10-21 under "Order of work" in the
 ROADMAP): CC0 models through `data/visuals.ron`, dressed terrain, a
 minimap and a dev-panel draw-call counter. The owner took every default of
-its implementation plan on 2026-10-26. It starts with ADR 0003 as its own
-small PR right after PR #47 merges: `docs/adr/0003-visuals-outside-rules-hash.md`
-takes `data/visuals.ron` out of `rules_hash` (the sim never reads it; UI
-strings are the precedent, and `data-check` still validates every entry),
-with one `rules_version` bump (24 to 25) and a header-only re-record of
-the eleven fixtures, no `.hash` change. The art slices follow in one PR
-rebased on it, with no further bump: the packs (KayKit Medieval Hexagon
+its implementation plan on 2026-10-26. It starts with ADR 0003, its own
+small PR on top of the M5b merge (`e84af88`):
+`docs/adr/0003-visuals-outside-rules-hash.md` (Accepted) takes
+`data/visuals.ron` out of `rules_hash` (`Rules::visuals` is
+`#[serde(skip)]`; the sim never reads it; UI strings are the precedent, and
+`data-check` still validates every entry), with one `rules_version` bump
+(24 to 25) and a header-only re-record of the eleven fixtures, no `.hash`
+change. From 25 a look edit needs no bump. The timing trap: a replay
+recorded on a build before the bump (the owner's M5b match, if it is played
+on `e84af88`) prints `RULES CHANGED` on later builds and is verified with
+the build that recorded it; its header's `rules_version` says which
+(`docs/PLAYTEST.md`, "Owner's Mac checklist (M5b)"). The art slices follow
+in one PR rebased on it, with no further bump: the packs (KayKit Medieval Hexagon
 and KayKit Adventurers, and the Inter font) vendored with their licence
 proof, buildings, sites and terrain, the eight unit kinds, the minimap,
 the draw-call counter and the close. Its first slice records the pass, its

@@ -29,13 +29,17 @@ freezes a decided match and draws the outcome overlay). Its good first
 issues are #44, #45 and #46.
 
 M5b, the first complete skirmish opponent and the first playable match, is
-closed on PR #47 at `SIM_VERSION` 17 and `rules_version` 24, with eleven
-golden fixtures: its three non-owner acceptance lines are ticked there
-with pasted output, observed on the 4-vCPU Linux VM (line 1's "under 120 s
-on the dev Mac" is re-run by the owner on the Mac, owner decision 8), and
-it is done once that PR merges. Its [owner] line 4 waits for the owner's
-own match; its automated proxy, `just m5b-checks`, passes and is pasted in
-the PR and in `docs/PLAYTEST.md`. The owner answered the nine questions of
+on PR #47 at `SIM_VERSION` 17 and `rules_version` 24, with eleven golden
+fixtures. Its lines 2 and 3 are ticked there with pasted output, observed
+on the 4-vCPU Linux VM. Line 1's local runs pass and are pasted too (its
+"under 120 s on the dev Mac" is re-run by the owner on the Mac, owner
+decision 8), but its box stays open until its last clause,
+`m5_first_match` "verified in both CI OS jobs", is read from PR #47's
+GitHub Actions run (check, headless, hash-parity) at the pushed head and
+pasted on the line. M5b is done once that is pasted and the PR merges.
+Its [owner] line 4 waits for the owner's own match; its automated proxy,
+`just m5b-checks`, passes and is pasted in `docs/PLAYTEST.md`, and goes
+into the PR description with the CI results. The owner answered the nine questions of
 its implementation plan on 2026-10-23 by taking every default; the
 decisions are numbered in the ROADMAP's M5b Notes. What M5b built, in five
 slices:
@@ -136,7 +140,7 @@ ticked with pasted command output in a merged PR.
 | Architecture and invariants | `docs/ARCHITECTURE.md`, `docs/DETERMINISM.md`, `docs/DATA_FORMAT.md` | Complete |
 | Per-system design | `docs/design/*.md` | Complete, with target numbers |
 | Dependency pins and policy | `docs/DEPENDENCIES.md`, `docs/adr/` | Complete |
-| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b merged (PR #38: the `enemy_outpost` scenarios, their golden and `SimView::building_hp`); M5a merged (PR #43: attrition, supply, annexation, the outcome, `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens); M5b closed on PR #47, done when it merges (`SIM_VERSION` 17, `rules_version` 24: the bot seats and hashed bot memory, `data/ai/`, the Standard bot in `crates/ai`, `play-bots`, `bench --bots`, the `m5_first_match` golden) |
+| Simulation crates | `crates/sim`, `crates/rules`, `crates/ai`, `crates/sim-cli` | M3a merged (PR #26: economy, Towns, territory, construction, gathering, training); M4a merged (PR #35: tech, ages, combat, the counter triangle, `bench --combat`, the `combat_skirmish` golden); M4b merged (PR #38: the `enemy_outpost` scenarios, their golden and `SimView::building_hp`); M5a merged (PR #43: attrition, supply, annexation, the outcome, `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens); M5b on PR #47, done when line 1's CI clause is pasted and it merges (`SIM_VERSION` 17, `rules_version` 24: the bot seats and hashed bot memory, `data/ai/`, the Standard bot in `crates/ai`, `play-bots`, `bench --bots`, the `m5_first_match` golden) |
 | Presentation crate | `crates/game` | M2 merged: camera, selection and orders, replay recorder, headless run, macOS menu; M3b merged (PR #31): buildings, terrain, the FieldExt territory shader, resource bar and messages, command card, placement ghost, context orders; M4b merged (PR #38; line 2 waits for the Mac): unit looks, health bars, attack orders, research panel, age strip, notices, the walkthrough director and the fight window; M5a merged (PR #43): the freeze at the outcome, the outcome overlay with the final hash, the attrition indicator, the supply ring, the annexation timer and readout; M5b's game half on PR #47 (line 4 waits for the owner's match): the main menu and New Game against the Standard bot, `--skip-menu`, `--spectate` and `--fast-forward-to`, the lazy recorder |
 | CI and release automation | `.github/workflows/`, `scripts/`, `justfile` | In use since M0: every PR runs check, headless, game-linux, deny and hash-parity |
 

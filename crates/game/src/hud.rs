@@ -366,14 +366,17 @@ pub fn update_pointer_over_ui(
 
 /// A primary `Pointer<Click>` on the Stop button issues `orders::issue_stop`
 /// for the local player's selected units (observer attached by
-/// [`spawn_hud`]).
+/// [`spawn_hud`]). Nothing while the local slot is a bot (M5b,
+/// `--spectate`), like the card and Advance buttons: a spectator may still
+/// select a unit to read it, but never orders one.
 fn on_stop_click(
     click: On<Pointer<Click>>,
     sim: NonSend<SimHandle>,
     selection: Res<Selection>,
     mut pending: ResMut<PendingCommands>,
+    seat: Option<Res<crate::sim_driver::LocalSeat>>,
 ) {
-    if click.event().event.button != PointerButton::Primary {
+    if click.event().event.button != PointerButton::Primary || !local_player_is_human(seat) {
         return;
     }
     let own = own_selected_units(&sim.view(), &selection);
@@ -800,8 +803,9 @@ mod tests {
     }
 
     /// M5b: under `--spectate` the local slot is a bot, so world input, the
-    /// card's clicks and the Advance button do nothing; against the bot
-    /// (the same app with a `vs_bot` match) all three act.
+    /// card's clicks, the Advance button and the Stop button (with one of
+    /// P0's Yeomen selected, which a click may still do) do nothing; against
+    /// the bot (the same app with a `vs_bot` match) all four act.
     #[test]
     fn a_spectator_has_no_world_input_card_or_advance() {
         use crate::age_hud::{AdvanceButton, on_advance_click};
@@ -823,6 +827,7 @@ mod tests {
                 ))
                 .init_resource::<OrderMode>()
                 .init_resource::<MessageState>()
+                .init_resource::<Selection>()
                 .init_resource::<WorldInputRuns>()
                 .add_systems(
                     Update,
@@ -843,8 +848,15 @@ mod tests {
                 .spawn((AdvanceButton, enabled))
                 .observe(on_advance_click)
                 .id();
+            let stop = app
+                .world_mut()
+                .spawn(StopButton)
+                .observe(on_stop_click)
+                .id();
+            // P0's first Yeoman (the standard start's unit 1).
+            app.world_mut().resource_mut::<Selection>().set([UnitId(1)]);
             app.update();
-            for button in [card, advance] {
+            for button in [card, advance, stop] {
                 app.world_mut().trigger(Pointer::new(
                     PointerId::Mouse,
                     Location {
@@ -894,9 +906,14 @@ mod tests {
             (
                 1,
                 OrderMode::AttackMove,
-                vec![Command::AdvanceAge {
-                    player: LOCAL_PLAYER
-                }]
+                vec![
+                    Command::AdvanceAge {
+                        player: LOCAL_PLAYER
+                    },
+                    Command::Stop {
+                        units: vec![UnitId(1)]
+                    }
+                ]
             )
         );
     }

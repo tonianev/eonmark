@@ -78,11 +78,13 @@ pub fn seed_from_unix_nanos(nanos: u128) -> u64 {
 /// The seed of a plain launch or `--spectate`: `--seed` when given,
 /// otherwise [`fresh_seed`].
 pub fn match_seed(cli: &Cli) -> u64 {
-    if cli.seed_explicit {
-        cli.seed
-    } else {
-        fresh_seed()
-    }
+    match_seed_with(cli, fresh_seed)
+}
+
+/// [`match_seed`] with the clock reading passed in: `--seed` when given,
+/// otherwise `fresh()` (tests pass a fixed reading).
+pub fn match_seed_with(cli: &Cli, fresh: impl FnOnce() -> u64) -> u64 {
+    if cli.seed_explicit { cli.seed } else { fresh() }
 }
 
 /// The setup `--spectate` watches: the Standard bot in both slots
@@ -836,7 +838,7 @@ mod tests {
         assert_eq!(seeded.seed(), 7);
         let skip = launch(&["--skip-menu", "--seed", "7"]);
         assert_eq!(initial_state(&skip), crate::menu::AppState::Skirmish);
-        let (skipped, _) = build_match(&skip, rules).unwrap();
+        let (skipped, _) = build_match(&skip, rules.clone()).unwrap();
         assert_eq!(skipped.setup(), seeded.setup());
         // The fresh seed is the low 32 bits of the wall clock's nanoseconds.
         assert_eq!(seed_from_unix_nanos(0), 0);
@@ -846,6 +848,28 @@ mod tests {
             1_792_000_000_123_456_789 & 0xffff_ffff
         );
         assert!(fresh_seed() <= u64::from(u32::MAX));
+        // Owner decision 6: without `--seed` a plain launch and `--spectate`
+        // take the clock's seed, and `--seed` (even `--seed 1`, the
+        // default's value) overrides it.
+        let clock = || 0xabcd_u64;
+        assert_eq!(match_seed_with(&cli, clock), 0xabcd);
+        assert_eq!(match_seed_with(&launch(&["--spectate"]), clock), 0xabcd);
+        assert_eq!(match_seed_with(&launch(&["--skip-menu"]), clock), 0xabcd);
+        assert_eq!(match_seed_with(&launch(&["--seed", "1"]), clock), 1);
+        assert_eq!(match_seed_with(&launch(&["--seed", "7"]), clock), 7);
+        // Through `build_match` and the real clock: two launches a whole
+        // `SimHandle` build apart read different nanoseconds, so a launch
+        // that fell back to `--seed`'s default would repeat it.
+        for args in [&[][..], &["--spectate"]] {
+            let (first, _) = build_match(&launch(args), rules.clone()).unwrap();
+            let (second, _) = build_match(&launch(args), rules.clone()).unwrap();
+            assert_ne!(
+                first.seed(),
+                second.seed(),
+                "{args:?} draws a fresh seed per launch, not --seed's default {}",
+                Cli::default().seed
+            );
+        }
     }
 
     /// `--scenario`, `--skip-menu` and `--spectate` start in `Skirmish`.

@@ -4,7 +4,7 @@
 //! M2 flags and who wires their behaviour (see the M2 contract):
 //! `--headless-run <ticks | path.eonreplay>` (replay mode: agent A),
 //! `--scenario <name>` (A), `--max-fps <n>` (A), `--replay-dir <dir>` (A),
-//! `--hash-every-tick` (A), `--screenshot <path>` (B, dev builds only),
+//! `--hash-every-tick` (A), `--screenshot <path>` (B),
 //! `--background` (`crate::background`; also `EONMARK_BACKGROUND=1`).
 //! M5b adds the main menu's flags: `--skip-menu`, `--spectate`,
 //! `--fast-forward-to <tick>` (with `--spectate` only) and the New Game
@@ -31,8 +31,8 @@ Options:
   --replay-dir <DIR>           Write this session's replay under DIR instead of the
                                platform data directory.
   --hash-every-tick            Record a hash checkpoint every tick instead of every 20.
-  --screenshot <PATH>          Dev builds: save a PNG of the window about one second
-                               before --exit-after-seconds fires.
+  --screenshot <PATH>          Save a PNG of the window about one second before
+                               --exit-after-seconds fires.
   --screenshot-at <TICK>:<PATH>
                                Save a PNG of the window once the sim has reached TICK
                                (repeatable; scripted scenarios' beats, M3b proxies).
@@ -41,9 +41,9 @@ Options:
                                menu id through the same path a real Cmd-Q takes
                                (AppExit::Success, replay trailer). Ignored elsewhere.
   --close-window-after-seconds <S>
-                               Dev builds: after S seconds request the primary window to
-                               close, the path the red close button takes (bevy_window
-                               despawns it, exit_on_all_closed writes AppExit::Success).
+                               After S seconds request the primary window to close, the
+                               path the red close button takes (bevy_window despawns
+                               it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
   --camera <X>,<Y>,<ZOOM>      Start the camera over sim tile (X, Y) at ZOOM metres
                                (15 to 60) instead of jumping to the first units
@@ -58,8 +58,10 @@ Options:
                                own, and --headless-run uses 1.
   --skip-menu                  Start the match against the Standard bot at once instead
                                of opening the main menu.
-  --spectate                   Watch the Standard bot play itself (both slots AI, the
-                               m5_first_match setup); your input is off. No menu.
+  --spectate                   Watch the Standard bot play itself (both slots AI; with
+                               --seed 1 it is the m5_first_match setup, otherwise a
+                               fresh seed). You can select units and move the camera
+                               but give no orders. No menu.
   --fast-forward-to <TICK>     With --spectate: simulate up to TICK before the window
                                opens (refused if the match is decided by then); the
                                replay is recorded from there and still verifies.

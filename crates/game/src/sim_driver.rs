@@ -903,7 +903,7 @@ impl LocalSeat {
 }
 
 /// Run condition (M5b): the local player's slot is human. World input
-/// (`hud::WorldInputSet`), the command card and the card and Advance
+/// (`hud::WorldInputSet`), the command card and the card, Advance and Stop
 /// clicks are off while it is not (`--spectate`). `true` with no
 /// [`LocalSeat`] (tests that build the HUD without a `SimPlugin`).
 pub fn local_player_is_human(seat: Option<Res<LocalSeat>>) -> bool {
@@ -2635,5 +2635,72 @@ mod tests {
         assert_eq!(LocalInput.commands_for(0, &mut pending).unwrap().len(), 1);
         assert_eq!(pending.dropped_for_ai(), 0);
         assert!(LocalSeat::of(&MatchSetup::scenario(&rules, 1)).human);
+    }
+
+    /// The drop above, wired by the real `SimPlugin` (M5b): the plugin's
+    /// `PendingCommands` knows the match's AI slots, so under `--spectate`
+    /// a local command queued by any UI path (the Stop button and the
+    /// world input are gated, but a click can still select P0's units)
+    /// is dropped before the sim and the recorder see it, and the match
+    /// plays as if nobody touched it. Against the bot the same queue
+    /// reaches the sim and the replay.
+    #[test]
+    fn sim_plugin_drops_local_commands_for_an_ai_slot() {
+        let rules = rules();
+        let run = |setup: MatchSetup, name: &str| {
+            let path = temp(name);
+            let _ = std::fs::remove_file(&path);
+            let handle = SimHandle::from_setup(setup, rules.clone());
+            let delay = handle.setup().cmd_delay;
+            let mut app = recording_app(handle, Box::new(LocalInput), &path);
+            {
+                let pending = app.world().resource::<PendingCommands>();
+                assert!(pending.is_ai(PlayerId(1)), "P1 is a bot in both matches");
+            }
+            let mut pending = app.world_mut().resource_mut::<PendingCommands>();
+            pending.push_local(Command::Stop {
+                units: vec![UnitId(1)],
+            });
+            pending.push_local(Command::Surrender);
+            // Queued at tick 0, a command applies in the step of tick
+            // `delay`; a surrender decides the match there.
+            let tick = |app: &App| app.world().non_send::<SimHandle>().tick();
+            for _ in 0..40 {
+                if tick(&app) > delay {
+                    break;
+                }
+                app.update();
+            }
+            assert_eq!(tick(&app), delay + 1);
+            let pending = app.world().resource::<PendingCommands>();
+            let seen = (
+                pending.is_ai(LOCAL_PLAYER),
+                pending.dropped_for_ai(),
+                pending.is_empty(),
+                app.world().resource::<DriverStats>().commands_recorded,
+                app.world().non_send::<SimHandle>().outcome().is_some(),
+            );
+            app.world_mut().write_message(AppExit::Success);
+            app.update();
+            let _ = std::fs::remove_file(&path);
+            seen
+        };
+        let spectate = MatchSetup::bots(
+            &rules,
+            1,
+            (ai::BOT_STANDARD, "standard"),
+            (ai::BOT_STANDARD, "standard"),
+        );
+        assert_eq!(
+            run(spectate, "plugin_drop_spectate.eonreplay"),
+            (true, 2, true, 0, false),
+            "spectating: both commands dropped, none recorded, no surrender"
+        );
+        let vs = MatchSetup::vs_bot(&rules, 1, ai::BOT_STANDARD, "standard");
+        assert_eq!(
+            run(vs, "plugin_drop_vs_bot.eonreplay"),
+            (false, 0, true, 2, true),
+            "against the bot: both recorded, the surrender decides the match"
+        );
     }
 }

@@ -218,9 +218,18 @@ Copied from the M5b and M6 milestones in [../ROADMAP.md](../ROADMAP.md).
 
 M5b:
 
-- [ ] `cargo run -p sim-cli --release -- play-bots --seeds 1..5 --a standard --b standard --max-ticks 54000 --jobs 5` ends all 5 games with a declared winner, no panics, under 120 s wall time on the dev Mac (budget derived as ticks x measured M4a mean ms / 1000 x 1.5, recorded in BUILD_TIMES.md), and prints per-seed final hashes identical across two runs; seed 1 is committed as fixtures/m5_first_match.eonreplay and verified in both CI OS jobs.
-- [ ] `play-bots --seeds 1..5 --a standard --b passive --max-ticks 36000` shows the Standard bot reaching Masonry Age and launching an attack with >= 8 units including 1 Supply Wain before tick 18000 in 5/5 seeds (CSV columns age_reached_tick, first_attack_tick).
-- [ ] `bench --units 400 --ticks 1200 --bots` shows the AI adds < 0.5 ms mean per tick.
+- [x] `cargo run -p sim-cli --release -- play-bots --seeds 1..5 --a standard --b standard --max-ticks 54000 --jobs 5` ends all 5 games with a declared winner, no panics, under 120 s wall time on the dev Mac (budget derived as ticks x measured M4a mean ms / 1000 x 1.5, recorded in BUILD_TIMES.md), and prints per-seed final hashes identical across two runs; seed 1 is committed as fixtures/m5_first_match.eonreplay and verified in both CI OS jobs.
+
+  Observed on PR #47, 2026-10-26, on the 4-vCPU Intel Xeon 2.1 GHz Linux VM, not the dev Mac (M5b owner decision 8: the owner re-runs it on the Mac): exit 0 both times, shell wall 2.46 s and 2.61 s, `play-bots: games=5 jobs=5 wall_s=2.07 a=5 b=0 draw=0 none=0 panic=0 decisive=5 tiebreak=0` (second run `wall_s=2.28`); every game `a,decisive,26012,...,seat_captured`, one (winner, tick) pair; `diff` of the two CSVs empty; seed 1's `final_hash` `0x3d2552033d51b4a2` equals `m5_first_match.hash`, and `sim-cli verify` of the fixture prints `OK final_hash=0x3d2552033d51b4a2 ticks=26012`. CI's check (macOS) and headless (Linux) jobs run `sim-cli verify --release` on it and hash-parity diffs their two lines (`.github/workflows/ci.yml`); docs/ROADMAP.md, M5b line 1, has the full output.
+
+- [x] `play-bots --seeds 1..5 --a standard --b passive --max-ticks 36000` shows the Standard bot reaching Masonry Age and launching an attack with >= 8 units including 1 Supply Wain before tick 18000 in 5/5 seeds (CSV columns age_reached_tick, first_attack_tick).
+
+  Observed on PR #47, 2026-10-26: exit 0, every seed `age_reached_tick=7933 first_attack_tick=13393 first_attack_units=12 first_attack_wains=1` and a Seat capture at tick 15629; `scripts/check_first_wave.sh` prints `5/5 rows pass (side a)` (with `--decisive` too). Side swap (`--a passive --b standard`): 7948 / 13368 / 12 / 1, capture at 15613, `5/5 rows pass (side b)`.
+
+- [x] `bench --units 400 --ticks 1200 --bots` shows the AI adds < 0.5 ms mean per tick.
+
+  Observed on PR #47, 2026-10-26, three runs at seed 1 on the VM: `ai_ms mean` 0.0332 / 0.0351 / 0.0346 ms (p95 0.206 / 0.280 / 0.217, `plans=240`, `plan_ms_max` 1.60 / 1.28 / 1.37), `waves_launched=2 defends=2`, exit 0 each.
+
 - [ ] [owner] From the window: New Game starts a match vs the Standard bot on plains_1v1; the owner plays to a victory or defeat overlay in one sitting; the auto-recorded replay verifies to the hash shown on the overlay.
 
   Its automated proxy (M5b owner decision 8) is `just m5b-checks`: the overlay of a `--spectate --seed 1` run fast-forwarded to 400 ticks before `m5_first_match`'s outcome, its replay verifying to the golden's hash, the main menu and a New Game click whose replay verifies with the Standard bot rebuilt from its header ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m5b), [ui.md](ui.md#main-menu-m5b)).

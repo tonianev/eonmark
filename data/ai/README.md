@@ -8,7 +8,9 @@ it as `Rules::ai`, so it is part of `rules_hash`. An edit here without a
 `rules_version` bump makes `sim-cli verify` report `RULES CHANGED since
 recording`; the data-only path is the one in
 [`../rules/README.md`](../rules/README.md) ("Worked example"): edit, bump
-`rules_version`, `just rerecord`, run the tests. `sim-cli data-check` prints
+`rules_version`, `just rerecord`, run the tests; for a build order or a
+personality, [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) ("A build order
+or personality") adds the `play-bots` comparison. `sim-cli data-check` prints
 the counts as `personalities=1 build_orders=1`.
 
 | Path | Contents | Arrives |

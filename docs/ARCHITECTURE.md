@@ -131,6 +131,26 @@ Scripted skirmish opponents implementing `sim::AiController`. Every bot is a det
 
 At M0: `Passive`, a bot that never acts, and `Scripted`, which replays a fixed command list so `sim-cli selftest` exercises the delay queue and the RNG. M5b's first slice adds `controller_for(&MatchSetup, &Rules)` (the controller for a header's `ai_seats`, or a `BotError`), `seats.rs` (`Seats`, one bot per AI slot), `harness.rs` (the engine-free `BotMatch`, the `Observer` of the play-bots CSV facts, `GameRow`, `CSV_HEADER`, `exit_code`), and the Standard bot in `standard/` (the cadence gate, the `BotMemory` codec, `Facts`, the plan context `Ctx` with its `Ledger`, the static `MapAnalysis`). Its economy slice adds the rules, run in a fixed order over one `Ctx`: `defend.rs` (threats to any own Town, the home guard, emergency production, wave recall), `build_order.rs` (the window, saving up, cooldowns, the `Military` latch, the site keeper), `sites.rs` (`site_for`: `NearTown`, `Terrain`, `Expansion` and `BorderEdge` candidates against the live view), `economy.rs` (the gather split by largest remainder, clamped to slots and the Yield Cap) and `army.rs` (Supply Wains first, the army mix by deficit, the rally); `ai::describe` is the dev panel's one-line summary. Its waves slice adds `waves.rs` (launch, stage, assault with siege focus and the Wain point, ring hold, continue, recall and the all-in), run between production and the rally upkeep, and `StandardBot::think_with_stats` (the `check_build` probes a plan made, each counted by `Ctx::check_build`, for the work-cap test). Its review fixes size the home guard to the threat once a defence is past `defend_max_block_ds` (so the wave launches through a lasting raid), pace an `Advance`'s saving by its scarcest resource (`build_order::paced`), and keep a border building's `Build` step and site keeper away from enemy military. `tests/common/mod.rs` is the testkit (`Arena`). M6 adds difficulties, personalities and influence-map counter composition.
 
+At the M5b close (`SIM_VERSION` 17, `rules_version` 24) the crate is:
+
+| Module | Holds | Arrives |
+|---|---|---|
+| `lib.rs` | `Passive`, `Scripted` and `selftest_human_commands`; `controller_for(&MatchSetup, &Rules)`, the controller for a header's `ai_seats` (`BOT_PASSIVE`, `BOT_STANDARD`), or a `BotError` (`UnknownBot`, `UnknownPersonality`, `SlotMismatch`); `describe(view, player)`, the dev panel's line per bot | M0, M5b |
+| `seats.rs` | `Seats`: one controller per AI slot, called with that slot's player | M5b |
+| `harness.rs` | Engine-free, no clock and no I/O, shared by `sim-cli play-bots` and the tests: `BotMatch` (a `Sim` with its bots, stepped and observed), the `Observer` of the CSV facts (from hashed state and drained events), `GameRow`, `CSV_HEADER` and `exit_code` | M5b |
+| `standard/mod.rs` | `StandardBot` (its seat, personality and `MapAnalysis`): the cadence gate, then `run_rules` over one `Ctx`; `plan` without the gate for tests, `think_with_stats` and `PlanStats` for the work-cap test | M5b |
+| `standard/memory.rs` | `BotMemory` (the hashed memory: the military latch, cooled-down steps, the remembered site, the wave roster and timers, the defend latch, counters), its postcard codec (the default encodes to no bytes) and `stats` for the bench | M5b |
+| `standard/facts.rs`, `standard/ctx.rs` | `Facts::gather`, one pass over the view per plan; `Ctx`, the plan context (knobs, facts, the `Ledger` of stock less reservations, claimed units, the commands and their cap, the `check_build` probe counter, this plan's footprints, the rally), `goal_or_post` and `on_station` | M5b |
+| `standard/sites.rs` | `MapAnalysis`, the static site tables built once from the map, the rules and the personality (`NearTown` rings, `Terrain`, `Expansion` and `BorderEdge` candidates, the rally seed), and `site_for`, the per-plan choice against the live view | M5b |
+| `standard/build_order.rs` | `satisfied` and `first_unsatisfied`; the window, saving up (`paced` for an `Advance`), cooldowns, the `Military` latch, the site keeper and the border backoff | M5b |
+| `standard/economy.rs` | Worker balancing: the active split by largest remainder, clamped to slots and the Yield Cap; idle workers to the largest deficit; `rebalance_per_think` moves | M5b |
+| `standard/army.rs` | Production (Supply Wains first, then the army mix by deficit over the kinds the bot can field), `home_armed`, the rally upkeep | M5b |
+| `standard/waves.rs` | Launch, stage point, assault with siege focus, the Wain point and leash, ring hold, defender clearing, continue, the end of a wave and the all-in; `choose_target` (the function M6's influence maps replace) | M5b |
+| `standard/defend.rs` | Threats to every own complete Town, the home guard and siege interception, the latch and its release, the 60 s launch cap with the guard sized to the threat, wave recall | M5b |
+| `tests/common/mod.rs`, `tests/m5b.rs` | The `Arena` testkit; the bot's integration tests (`bot_takes_seat` and the cadence, determinism and rebuild tests run; the long `m5b_` games and `golden_m5_first_match` are ignored and run in CI) | M5b |
+
+See [design/ai.md](design/ai.md), "M5b implementation notes".
+
 ### `crates/game/`
 
 The only Bevy crate and the `eonmark` binary. Bevy ECS is used here for presentation only.
@@ -343,7 +363,7 @@ All names are original. The trademark gate `scripts/check_trademark.sh` runs in 
 | M2 | none | Sim driver, presenter, selection, orders, camera finished, macOS menu, replay writer thread, headless run | Controls checklist in [PLAYTEST.md](PLAYTEST.md) |
 | M3a / M3b | Economy, Towns, territory, construction | Border overlay then `FieldExt` shader, build ghost, command card, resource bar | Economy, territory and towns design docs |
 | M4a / M4b | Tech, ages, combat | Research panel, age indicator, health bars, unit silhouettes, attack orders, the `enemy_outpost` scenarios with the walkthrough director and the fight window | Tech and combat design docs; `bench --combat`, the criterion `combat_step` and the `combat_skirmish` golden (M4a); the `enemy_outpost_walkthrough` golden and the `scripts/m4b_outpost_drive.sh` real-input drive (M4b) |
-| M5a / M5b | Attrition, supply, annexation, victory; first complete bot | Victory overlay, New Game | Attrition and towns design docs; `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens and `just m5a-checks` (M5a); `play-bots`, first-match fixture (M5b) |
+| M5a / M5b | Attrition, supply, annexation, victory; first complete bot | Victory overlay, New Game (the main menu, `--spectate`) | Attrition and towns design docs; `bench --combat --harrying`, the `capture_seat` and `stalemate_45min` goldens and `just m5a-checks` (M5a); the AI design doc, `play-bots`, `bench --bots`, the `m5_first_match` golden, `scripts/check_first_wave.sh` and `just m5b-checks` (M5b) |
 | M6 | Difficulties, personalities, influence maps | Game speed, pause, game-over stats | Fun gate, match log |
 | M7 | Visibility grid | Fog, minimap, menus, glTF, audio | Finalized [ART_STYLE.md](ART_STYLE.md) |
 | M8 | none | none | `bundle.sh`, release workflow, v0.1.0 |

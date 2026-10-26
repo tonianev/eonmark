@@ -112,6 +112,10 @@ The same loader runs at game start, so a broken file is caught before a window o
 
 Every subdirectory carries a README with its schema in plain English and one worked example. `data/` is licensed like code; see [adr/0001-license.md](adr/0001-license.md).
 
+## Changing the bot's data (M5b)
+
+`data/ai/` is in `rules_hash` like every other loaded file, so an edit to a build order or a personality takes the data-only path of [../CONTRIBUTING.md](../CONTRIBUTING.md) ("The data-first path"): edit, bump `rules_version`, `data-check`, `just rerecord`, run the tests, and compare the bot with `sim-cli play-bots` (plus `scripts/check_first_wave.sh` for the first wave). `just rerecord` rewrites every fixture's header. A fixture's `.hash` changes only when the edit changes a decision of a bot that the fixture seats: today that is `m5_first_match` alone (the Standard bot in both seats), so an edit to `standard.ron` or the `standard` row usually moves its hash, while a new build order or personality that no fixture seats moves none. `data-check` rejects a build order the bot could never finish (the static reachability checks above) before any game runs. A new kind of step, placement or knob is a Rust change in `crates/rules/src/ai.rs` (schema and validator) and in `crates/ai`; when it can alter a decision of the shipped bot it also bumps `SIM_VERSION` (M5b owner decision 2).
+
 ## Adding a field
 
 1. Add the field to the struct in `crates/rules/src/lib.rs` with `#[serde(default)]` if existing files must keep loading.

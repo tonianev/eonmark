@@ -51,7 +51,7 @@ when you can; the validator does not require it.
 
 | Field | Meaning | Value | Used from |
 |-------|---------|-------|-----------|
-| `rules_version` | Bump whenever golden replays are regenerated, and for any edit to a RON file under `data/rules/` or `data/ai/` except the UI strings in `data/rules/strings/` (those files are in `rules_hash`; the strings are not, see `docs/DATA_FORMAT.md`); the comment above it gives the reason for the current number | 22 | M0 |
+| `rules_version` | Bump whenever golden replays are regenerated, and for any edit to a RON file under `data/rules/` or `data/ai/` except the UI strings in `data/rules/strings/` (those files are in `rules_hash`; the strings are not, see `docs/DATA_FORMAT.md`); the comment above it gives the reason for the current number | 25 | M0 |
 | `tick_rate_hz` | Simulation ticks per second | 20 | M0 |
 | `cmd_delay_ticks` | A command issued at tick N applies at N + this | 2 | M0 |
 | `default_map` | Map for `MatchSetup::skirmish`; must exist under `data/maps/` | `"plains_1v1"` | M0 |
@@ -560,10 +560,11 @@ To make attrition tick every 4 seconds instead of 3.2, edit `rules.ron`:
 attrition_interval_ds: 40,
 ```
 
-Any RON edit changes `rules_hash`, so without the next steps every golden
+Any edit to a hashed RON file (every one but `../visuals.ron` and
+`strings/`) changes `rules_hash`, so without the next steps every golden
 fixture reports `RULES CHANGED since recording` and `cargo test -p sim`
-fails. The data-only path is the same for every RON file and touches no
-Rust:
+fails. The data-only path is the same for every hashed RON file and
+touches no Rust:
 
 1. Edit the value, as above.
 2. Bump `rules_version` in `rules.ron` (25 to 26), update the one-line

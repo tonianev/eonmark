@@ -89,10 +89,13 @@ exits 1 and prints the file path, the span and the field, for example:
 error: data/rules/rules.ron: 8:3-8:18: Unexpected field named `tick_rate_hertz` in `Rules`, expected one of `rules_version`, `tick_rate_hz`, ... instead
 ```
 
-Every edit here changes `rules_hash`, so a change you keep also bumps
+Every edit here except `visuals.ron` and `rules/strings/` changes
+`rules_hash`, so a change you keep to any other file also bumps
 `rules_version` in `rules/rules.ron` and re-records the golden fixtures
 with `just rerecord` before `cargo test -p sim`; the full data-only path is
-the worked example in [rules/README.md](rules/README.md).
+the worked example in [rules/README.md](rules/README.md). A look or UI
+string edit needs only `data-check`: neither file is hashed, so it takes no
+bump and no re-record.
 
 ## License
 

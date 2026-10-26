@@ -30,13 +30,12 @@ issues are #44, #45 and #46.
 
 M5b, the first complete skirmish opponent and the first playable match, is
 on PR #47 at `SIM_VERSION` 17 and `rules_version` 24, with eleven golden
-fixtures. Its lines 2 and 3 are ticked there with pasted output, observed
-on the 4-vCPU Linux VM. Line 1's local runs pass and are pasted too (its
-"under 120 s on the dev Mac" is re-run by the owner on the Mac, owner
-decision 8), but its box stays open until its last clause,
-`m5_first_match` "verified in both CI OS jobs", is read from PR #47's
-GitHub Actions run (check, headless, hash-parity) at the pushed head and
-pasted on the line. M5b is done once that is pasted and the PR merges.
+fixtures. Its lines 1, 2 and 3 are ticked there with pasted output,
+observed on the 4-vCPU Linux VM and, for line 1's last clause, in PR #47's
+Actions run 40258854764 (`m5_first_match` verified on macOS and Linux to
+`OK final_hash=0x3d2552033d51b4a2 ticks=26012`, empty parity diff). Line
+1's "under 120 s on the dev Mac" is re-run by the owner on the Mac (owner
+decision 8). M5b is done once the PR merges.
 Its [owner] line 4 waits for the owner's own match; its automated proxy,
 `just m5b-checks`, passes and is pasted in `docs/PLAYTEST.md`, and goes
 into the PR description with the CI results. The owner answered the nine

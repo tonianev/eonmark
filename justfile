@@ -93,10 +93,10 @@ headless RUN="200":
 m2-checks SCRATCH="":
     EONMARK_BACKGROUND=1 scripts/m2_checks.sh {{SCRATCH}}
 
-# Linux, as CI's game-linux job: render the walkthrough under Xvfb on lavapipe and fail on any render error, such as a WGSL shader that does not compile or a pipeline that never becomes ready (needs xvfb, mesa-vulkan-drivers, libxkbcommon-x11-0); see scripts/render_smoke.sh. Optional scenario, camera and tick, with the script's defaults (`just render-smoke out unit_looks 20,32,40 100`); an empty camera passes no --camera, so the game frames the scenario itself (`just render-smoke out unit_looks '' 100`). Each value is passed quoted, so an empty one keeps its place.
-render-smoke OUT="" SCENARIO="economy_walkthrough" CAMERA="38,64,60" TICK="100":
+# Linux, as CI's game-linux job: render the walkthrough under Xvfb on lavapipe and fail on any render error, such as a WGSL shader that does not compile or a pipeline that never becomes ready (needs xvfb, mesa-vulkan-drivers, libxkbcommon-x11-0); see scripts/render_smoke.sh. Optional scenario, camera, tick and seconds (the --exit-after-seconds deadline), with the script's defaults (`just render-smoke out unit_looks 20,32,40 100`, `just render-smoke out art_bench '' 300 120`); an empty camera passes no --camera, so the game frames the scenario itself (`just render-smoke out unit_looks '' 100`). Each value is passed quoted, so an empty one keeps its place. The game always runs with --draw-stats, and the run prints its `frame_stats: draws`, `triangles` and `fight` lines.
+render-smoke OUT="" SCENARIO="economy_walkthrough" CAMERA="38,64,60" TICK="100" SECONDS="60":
     cargo build -p game --locked --profile ci
-    scripts/render_smoke.sh target/ci/eonmark "{{OUT}}" "{{SCENARIO}}" "{{CAMERA}}" "{{TICK}}"
+    scripts/render_smoke.sh target/ci/eonmark "{{OUT}}" "{{SCENARIO}}" "{{CAMERA}}" "{{TICK}}" "{{SECONDS}}"
 
 # M5a acceptance 3 proxy, local only (owner decision 14): verify the capture_seat golden, run `--scenario capture_seat` in background mode with a screenshot of the victory overlay at its deciding tick, check the `outcome:` line's hash against the golden's and `sim-cli verify` of the game's own replay, and that no game process is left; see scripts/m5a_checks.sh. On Linux without a display it runs under xvfb-run on lavapipe; the default 150 s is enough there too (the outcome comes about 82 s in), and M5A_SECONDS=240 is only a margin for a slower or loaded host.
 m5a-checks OUT="":

@@ -8,14 +8,14 @@ Area: `area:ui` and `area:game`. Milestones: M2 (selection, orders, camera, HUD 
 
 | Quantity | Value | Where it is set |
 | --- | --- | --- |
-| Default window | 1280 x 800 logical, Retina scale 2.0 kept separate from logical size | `app.rs` |
+| Default window | 1280 x 800 logical, Retina scale 2.0 kept separate from logical size; `--window-size <w>x<h>` sets another logical size (art pass: the stream's 1280 x 720), and the `frame_stats: window logical=... physical=... scale=...` exit line records what the run got | `app.rs`, `cli.rs`, `frame_stats.rs` |
 | Camera pitch | about 55 degrees, yaw locked | `camera.rs` |
 | Camera zoom | 15 m to 60 m with smoothing | `camera.rs` |
 | Camera speeds | all multiplied by `Time::delta_secs`; identical travel at 30 and 120 fps | `camera.rs`, M2 acceptance (`--max-fps 30/120`) |
 | Sim ticks per frame | at most 8, independent of game speed | `sim_driver.rs` |
 | Game speed | x1, x2, x4, plus pause | M6 |
 | Frame target | >= 60 fps at 1440p with 400 units + two full Towns + fog, release, base M-series | M7 acceptance |
-| Draw calls | < 500 (dev-panel counter) | shared meshes and materials |
+| Draw calls | < 500 (the counter of `draw_stats.rs`: the dev panel's `draw calls` row and, with `--draw-stats`, the `frame_stats: draws` exit line; [Draw calls](#draw-calls-art-pass)) | shared meshes and materials |
 | UI scale | persisted `UiScale` multiplier; applies to `Val::Px` only | settings |
 | Font | Inter variable (OFL-1.1) through a variable `TextFont` | `assets/fonts/` |
 | Panels | Kenney UI Pack 9-slice via `NodeImageMode::Sliced` | `assets/ui/` |
@@ -183,6 +183,7 @@ Keys the design fixes are given as such. Keys marked "proposed" are not fixed by
 | Pause menu | Esc (the same key once the menu exists; it then also clears the selection) | M6 |
 | Camera pan | W A S D, arrow keys, edge scroll, two-finger trackpad scroll (`MouseScrollUnit::Pixel`) (`camera.rs`; S and A are shared with Stop and attack-move, see Open questions) | M2 |
 | Camera zoom | mouse wheel (`MouseScrollUnit::Line`), trackpad pinch (`PinchGesture`, Bevy `gestures` feature) | M2 |
+| Show or hide the debug grid (the 8-tile gizmo grid) | G (`ground::toggle_grid`, a view setting that works while spectating and after the outcome); the grid is off by default, `--grid` starts with it on (art-pass owner decision 11: no debug furniture on the stream) | art pass |
 | Camera jump | left click on the minimap | M7 |
 | Order via minimap | right click on the minimap | M7 |
 
@@ -224,7 +225,7 @@ M4b (`health_bars.rs`, done): a bar is shown only while its target is damaged or
 - **Batches.** Every bar is the one left-anchored `Rectangle` quad (origin on its left edge, so the fill shortens from the right) with one of three unlit, two-sided, fog-free `StandardMaterial`s (track, blue fill, red fill): at most three batches for any number of bars, and no shadow passes (`bars_use_one_quad_and_three_materials`).
 - **Hierarchy check (dev only).** With `--features dev`, `BarHierarchyCheckPlugin` looks every frame (in `Last`, before the replay recorder finishes) for a `HealthBar` or `SelectionRing` entity with a `ChildOf`. The first one logs an `error!` with the entity ids and writes `AppExit::from_code(1)`, so the replay still gets its trailer; on any exit it prints `hierarchy_check: ok frames=<n> bar_targets_max=<m> rings_max=<r>` (or `FAIL violations=<k> ...`). The check runs after `bevy::window::ExitSystems`, like the recorder and `frame_stats`' exit lines, so the red close button prints it too (`hierarchy_check_reports_when_the_window_closes`), and before the `frame_stats:` lines, so a failing frame still prints those. `bar_targets_max` counts targets, not entities. Unit entities may have children (glTF scenes at the art pass); bars and rings may not have a parent. The test `hierarchy_check_flags_a_parented_bar` is its positive control. The dev Sim panel shows the bar targets and entities.
 
-Expected draw batches at 200 vs 200 (M4b, the baseline for the art pass's dev-panel counter). Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so there is no counter yet (the same gap as the ROADMAP M3b line); these are the counts the layout allows, to be checked with an Xcode Metal frame capture on the Mac:
+Expected draw batches at 200 vs 200 (M4b, the baseline for the art pass's counter). Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters; these are the counts the layout allows, and since the art pass the counter ([Draw calls](#draw-calls-art-pass)) measures them:
 
 | What | Batches | Why |
 | --- | --- | --- |
@@ -236,9 +237,25 @@ Expected draw batches at 200 vs 200 (M4b, the baseline for the art pass's dev-pa
 | Total | about 75 to 100 | under the 500 budget |
 | Selection rings | 1 each | retained gizmos are drawn one by one: all 200 own units selected add about 200, still under 500 |
 
+### Draw calls (art pass)
+
+`draw_stats.rs` counts the draw calls the render passes issue each frame, rebuilt from Bevy 0.19.1's public render-phase data in the render world (`count_draws`, in `RenderSystems::PrepareBindGroups` after `bevy::ui_render::prepare_uinodes`):
+
+| Source | Counted as | Covers |
+| --- | --- | --- |
+| `indirect` | one draw per allocated entry of `IndirectParametersBuffers` (indexed and non-indexed, every phase) | every mesh bin, unbatchable mesh and indirect sorted mesh of every view that draws indirectly (the `Culling` mode: the camera and the shadow cascades) |
+| `direct` | per view with `NoIndirectDrawing`: one per batchable bin (and multidrawable batch set), one per unbatchable entity, one per non-mesh item of its `Opaque3d`, `AlphaMask3d` and `Shadow` phases | every view in the `PreprocessingOnly` mode, which allocates no indirect entries |
+| `sorted` | the `Transparent3d`, `Transmissive3d` and `TransparentUi` items walked as `SortedRenderPhase::render_range` walks them: one per non-empty batch range, skipping the rest of the batch, except items with an indirect-parameters index (counted above) | retained gizmos (one item each), the immediate gizmos, the UI batches |
+
+Not counted: the full-screen passes (tonemapping, upscaling, about 2 a frame) and egui (dev builds). `mode=` on the exit line is the GPU preprocessing mode: `culling` (lavapipe and Metal), `preprocessing_only` (`EONMARK_WGPU_DISABLE=indirect_first_instance` forces it, for the cross-check) or `none` (GL only, never a target; the gates treat it as a failure). The first 30 frames are left out (pipeline compiles); the render world stores each frame's numbers itself, so pipelined rendering cannot split or merge frames.
+
+- **Read-out.** The dev Sim panel's `draw calls` row, `<last> (max <max>) / 500  ind <a> dir <b> sorted <c>`, in amber from 500 on (steady). On exit, with `--draw-stats` (always on in dev builds and in `scripts/render_smoke.sh`): `frame_stats: draws frames=<n> mean=<f> p95=<n> max=<n> indirect_max=<n> direct_max=<n> sorted_max=<n> mode=<m>` (plus `fight_max=<n>`, the largest frame of the fight window, for the `enemy_outpost` pair and `art_bench`) and `frame_stats: triangles main_mean=<n> main_max=<n> scene=<n>` (the triangles of the meshes the RTS camera sees, from its `VisibleEntities`, and of every mesh entity; a cached count per mesh).
+- **Cross-check.** `scripts/draw_trace_xcheck.sh` builds the game with `bevy/detailed_trace`, whose `TrackedRenderPass` logs every draw, and requires the trace's per-frame sums to match the counter's (`draw_stats: frame <n> total=...` at DEBUG level) within one frame's draws, in both modes. It stays for the Bevy 0.20 migration.
+- **The stress scene.** `--scenario art_bench`: two full Towns (twelve complete buildings a side), three sites and 400 units fighting east of P0's Town, framed at 60 m (`app::ART_BENCH_FRAMING`); its director selects all 200 of P0's units at tick 40 (`director::art_bench_beats`), so the selection term is part of the count.
+
 ## Developer-only panels
 
-Behind the `dev` cargo feature only: `bevy/bevy_dev_tools`, `bevy_egui` 0.40.1 and `bevy-inspector-egui` 0.37.0. They provide the FPS overlay, the frame-time graph, the `Sim::hash()` and sub-hash readout, the draw-call counter with its 500 budget, a world inspector (hidden until F12: listing every entity each frame costs several milliseconds with 200 units and 200 rings on screen, and it covers the map), and tuning panels. At M2 the Sim panel also shows `sim_driver::DriverStats` (ticks this and last frame, stalled and dropped ticks, commands recorded), the selection size, pending commands and the mesh and material counts. `--scenario units200` is the 200-unit stress case (`--stress N` was never built). Since M5b the Sim panel has one line per bot seat, `bot P1 standard` followed by `ai::describe` (the build-order window, the `Military` latch, the wave's phase and size, the next wave tick, the waves launched and the defend latch); the recording row reads "from the first tick" until the lazy recorder starts. `cargo clippy -p game --features dev` runs in CI so the feature does not rot, and `bundle.sh` fails if `bevy_dylib` is linked, so no dev build ships. No gameplay UI may depend on egui.
+Behind the `dev` cargo feature only: `bevy/bevy_dev_tools`, `bevy_egui` 0.40.1 and `bevy-inspector-egui` 0.37.0. They provide the FPS overlay, the frame-time graph, the `Sim::hash()` and sub-hash readout, the draw-call counter with its 500 budget (since the art pass: the `draw calls` row, [Draw calls](#draw-calls-art-pass)), a world inspector (hidden until F12: listing every entity each frame costs several milliseconds with 200 units and 200 rings on screen, and it covers the map), and tuning panels. At M2 the Sim panel also shows `sim_driver::DriverStats` (ticks this and last frame, stalled and dropped ticks, commands recorded), the selection size, pending commands and the mesh and material counts. `--scenario units200` is the 200-unit stress case (`--stress N` was never built). Since M5b the Sim panel has one line per bot seat, `bot P1 standard` followed by `ai::describe` (the build-order window, the `Military` latch, the wave's phase and size, the next wave tick, the waves launched and the defend latch); the recording row reads "from the first tick" until the lazy recorder starts. `cargo clippy -p game --features dev` runs in CI so the feature does not rot, and `bundle.sh` fails if `bevy_dylib` is linked, so no dev build ships. No gameplay UI may depend on egui.
 
 ## Interactions with other systems
 

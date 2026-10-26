@@ -1,7 +1,9 @@
 //! The flat ground: a 128 x 128 m grid of 1 m quads with flat normals and
-//! per-tile vertex colours, plus a gizmo grid every 8 tiles. No heightmap
-//! in v0.1. Tiles take their colour from the match's map: grass in three
-//! close greens, forest floor, rock and water (`docs/ART_STYLE.md`).
+//! per-tile vertex colours, plus a debug gizmo grid every 8 tiles, off by
+//! default since the art pass ([`ShowGrid`]: `--grid` starts with it on, G
+//! toggles it). No heightmap in v0.1. Tiles take their colour from the
+//! match's map: grass in three close greens, forest floor, rock and water
+//! (`docs/ART_STYLE.md`).
 //!
 //! Territory (M3b) is not in the mesh: the ground's material is
 //! [`GroundMaterial`], whose shader lays the tint and the soft border line
@@ -27,13 +29,42 @@ pub const GRID_SPACING_TILES: u32 = 8;
 /// Half the ground edge in metres; the camera focus is clamped to this.
 pub const HALF_EXTENT: f32 = GROUND_SIZE_TILES as f32 * TILE_SIZE * 0.5;
 
-/// Spawns the ground mesh and draws the grid.
+/// The key that shows and hides the debug grid.
+pub const GRID_KEY: KeyCode = KeyCode::KeyG;
+
+/// Whether the 8-tile debug grid is drawn. Off by default (art pass, owner
+/// decision 11: no debug furniture on the stream); `--grid` starts with it
+/// on and [`GRID_KEY`] toggles it.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ShowGrid(pub bool);
+
+/// Spawns the ground mesh and draws the grid while [`ShowGrid`] is on.
 pub struct GroundPlugin;
 
 impl Plugin for GroundPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_ground, configure_gizmos))
-            .add_systems(Update, draw_grid);
+        app.init_resource::<ShowGrid>()
+            .add_systems(Startup, (spawn_ground, configure_gizmos));
+        add_grid_systems(app);
+    }
+}
+
+/// The grid toggle and the grid itself: [`toggle_grid`] then
+/// `draw_grid` while [`grid_shown`], in `Update`.
+pub fn add_grid_systems(app: &mut App) {
+    app.add_systems(Update, (toggle_grid, draw_grid.run_if(grid_shown)).chain());
+}
+
+/// Run condition: the grid is on.
+pub fn grid_shown(show: Option<Res<ShowGrid>>) -> bool {
+    show.is_some_and(|s| s.0)
+}
+
+/// [`GRID_KEY`] flips [`ShowGrid`]. A view setting like the camera keys, so
+/// it works while spectating and after the outcome too.
+pub fn toggle_grid(keys: Option<Res<ButtonInput<KeyCode>>>, mut show: ResMut<ShowGrid>) {
+    if keys.is_some_and(|k| k.just_pressed(GRID_KEY)) {
+        show.0 = !show.0;
     }
 }
 
@@ -185,6 +216,70 @@ fn draw_grid(mut gizmos: Gizmos) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grid is off unless asked for, and G flips it each press.
+    #[test]
+    fn grid_is_off_by_default_and_g_toggles_it() {
+        #[derive(Resource, Default)]
+        struct Drawn(u32);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ShowGrid>()
+            .init_resource::<Drawn>()
+            .add_systems(
+                Update,
+                (
+                    toggle_grid,
+                    (|mut d: ResMut<Drawn>| d.0 += 1).run_if(grid_shown),
+                )
+                    .chain(),
+            )
+            .add_systems(Last, |mut keys: ResMut<ButtonInput<KeyCode>>| keys.clear());
+        assert_eq!(ShowGrid::default(), ShowGrid(false));
+        app.update();
+        assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(false));
+        assert_eq!(app.world().resource::<Drawn>().0, 0, "off by default");
+        let press = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(GRID_KEY);
+            app.update();
+            app.world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(GRID_KEY);
+        };
+        press(&mut app);
+        assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(true));
+        assert_eq!(
+            app.world().resource::<Drawn>().0,
+            1,
+            "drawn in the same frame"
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<Drawn>().0,
+            2,
+            "and every frame after"
+        );
+        press(&mut app);
+        assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(false));
+        app.update();
+        assert_eq!(app.world().resource::<Drawn>().0, 2, "off again");
+        // Holding the key is one toggle, not one per frame.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(GRID_KEY);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(true));
+        // GroundPlugin's own schedule: the condition reads the resource.
+        let mut world = World::new();
+        assert!(!world.run_system_cached(grid_shown).unwrap(), "no resource");
+        world.insert_resource(ShowGrid(true));
+        assert!(world.run_system_cached(grid_shown).unwrap());
+    }
 
     #[test]
     fn mesh_has_four_vertices_and_six_indices_per_tile() {

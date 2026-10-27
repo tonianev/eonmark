@@ -229,9 +229,9 @@ jobs:
         # release verify above covers. `ai` is opt-level 3 in dev.
         run: cargo test -p ai --locked -- --ignored m5b_
 
-      - name: engine boundary (no bevy/glam/wgpu/winit in engine-free crates)
+      - name: engine boundary (no bevy/glam/wgpu/winit in engine-free crates and tools)
         run: |
-          for crate in sim rules ai sim-cli; do
+          for crate in sim rules ai sim-cli inspect_gltf; do
             if cargo tree -p "$crate" -e normal --locked | grep -E 'bevy|glam|wgpu|winit'; then
               echo "::error::crate $crate depends on an engine crate"
               exit 1

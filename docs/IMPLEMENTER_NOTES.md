@@ -128,7 +128,7 @@ cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtu
 Plus, when the PR touches the sim boundary:
 
 ```bash
-for c in sim rules ai sim-cli; do
+for c in sim rules ai sim-cli inspect_gltf; do
   if cargo tree -p "$c" -e normal | grep -E 'bevy|glam|wgpu|winit'; then
     echo "engine crate leaked into $c"; exit 1
   fi

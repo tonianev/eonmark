@@ -78,8 +78,10 @@ Primitive silhouettes (M2 to M7):
 | Buildings | `Cuboid` | Footprint from `buildings.ron` |
 | Town | `Cylinder` | Larger when it reaches the second radius tier |
 | Resource node | `Sphere` | Grain gold, timber, ore colours |
-| Selection ring, rally marker, move marker | Retained gizmo lines | Separate entities keyed by id, never children of moving units |
-| Attrition indicator, supply ring (M5a) | Retained gizmo lines | Same rule; a steady Yield Cap amber (#D29B3B) diamond under a unit bleeding on enemy land, a Timber ring around a selected Supply Wain; nothing pulses |
+| Selection ring | Flat annulus mesh, unlit (retained gizmo lines until the art pass) | Separate entities keyed by id, never children of moving units; one shared mesh and material for every ring, so any number of rings is one draw call |
+| Rally marker, move marker | Retained gizmo lines | Same rule |
+| Attrition indicator (M5a) | Flat 4-segment annulus mesh, unlit (retained gizmo lines until the art pass) | Same rule; a steady Yield Cap amber (#D29B3B) diamond under a unit bleeding on enemy land, one shared mesh and material for every diamond; nothing pulses |
+| Supply ring (M5a) | Retained gizmo lines | Same rule; a Timber ring around a selected Supply Wain; nothing pulses |
 | Annexation timer (M5a) | Immediate gizmo lines, 3 px | A #3A3A3F track circle just outside a contested Town and the attacker's team-colour arc filling clockwise from north |
 | Health bar | Flat quad entity | Same rule; unlit, a team-colour fill on a #3A3A3F track, no green-to-red, shown only while the target is damaged or selected (M4b, `health_bars.rs`) |
 

@@ -24,11 +24,14 @@
 # Usage: scripts/draw_trace_xcheck.sh <out-dir> [scenarios...]
 #   scenarios default to `unit_looks art_bench`.
 # Environment:
-#   XCHECK_TARGET_DIR  cargo target dir for the trace build (default
-#                      target/trace, which keeps the feature out of
-#                      target/ci; the build is a second copy of Bevy, about
-#                      2-4 GB). With target/ci, run `cargo build -p game
-#                      --profile ci` afterwards to put the normal binary back.
+#   XCHECK_TARGET_DIR  cargo --target-dir for the trace build; the binary
+#                      lands in <dir>/ci/eonmark (default target/trace, a
+#                      second copy of Bevy, about 4 GB). `target`, the
+#                      repository's own dir, builds into target/ci beside
+#                      the normal artifacts and replaces target/ci/eonmark,
+#                      so run `cargo build -p game --profile ci` afterwards
+#                      to put the normal binary back. Not `target/ci`: that
+#                      nests a new target/ci/ci.
 #   XCHECK_SECONDS     --exit-after-seconds per run (default 40 for
 #                      unit_looks, 90 for art_bench, 60 otherwise).
 # Needs what scripts/render_smoke.sh needs (xvfb-run, lavapipe). Local only;

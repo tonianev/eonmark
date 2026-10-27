@@ -5,14 +5,52 @@
 # Rules:
 #   1. Every file under assets/ (except the allowlist below) has a row in
 #      assets/ATTRIBUTION.md whose first column is the path relative to
-#      assets/, for example `fonts/Inter.ttf`.
+#      assets/, for example `fonts/InterVariable.ttf`.
 #   2. That row's License column is one of CC0-1.0, CC-BY-4.0, OFL-1.1.
 #   3. Every .ttf/.otf has a sibling OFL*.txt (OFL 1.1 requires the text).
 #   4. No single file is larger than 2 MB; assets/ totals under 300 MB.
 # An empty or missing assets/ directory passes.
 #
-# Usage: scripts/check_assets.sh [repo-root]
+# --self-test proves the injection clause of ROADMAP M7's asset line: it
+# copies only assets/ into a temporary root, adds models/unattributed.glb,
+# and requires this script to exit 1 naming that path on stderr, then to
+# exit 0 once the file is removed again.
+#
+# Usage: scripts/check_assets.sh [repo-root | --self-test]
 set -euo pipefail
+
+if [ "${1:-}" = "--self-test" ]; then
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  repo="$(cd "$(dirname "$0")/.." && pwd)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  mkdir -p "$tmp/root"
+  cp -R "$repo/assets" "$tmp/root/assets"
+  injected="models/unattributed.glb"
+  mkdir -p "$tmp/root/assets/models"
+  printf 'glTF' >"$tmp/root/assets/$injected"
+  set +e
+  "$self" "$tmp/root" >"$tmp/out" 2>"$tmp/err"
+  code=$?
+  set -e
+  if [ "$code" -ne 1 ]; then
+    echo "check_assets: self-test FAILED: an unattributed $injected gave exit $code, not 1" >&2
+    cat "$tmp/out" "$tmp/err" >&2
+    exit 1
+  fi
+  if ! grep -F "$injected" "$tmp/err"; then
+    echo "check_assets: self-test FAILED: stderr does not name $injected" >&2
+    cat "$tmp/err" >&2
+    exit 1
+  fi
+  rm "$tmp/root/assets/$injected"
+  if ! "$self" "$tmp/root"; then
+    echo "check_assets: self-test FAILED: the copy fails without the injected file" >&2
+    exit 1
+  fi
+  echo "check_assets: self-test ok (an unattributed file fails with its path; removing it passes)"
+  exit 0
+fi
 
 root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$root"

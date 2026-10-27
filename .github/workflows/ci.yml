@@ -79,6 +79,14 @@ jobs:
       - name: asset policy
         run: scripts/check_assets.sh
 
+      - name: asset policy self-test (an unattributed file fails with its path)
+        run: scripts/check_assets.sh --self-test
+
+      - name: model check (inspect_gltf over data/visuals.ron and assets/)
+        # Budgets, import rules, team swatches and silhouettes of every Scene
+        # (docs/ART_STYLE.md); no engine crate, so the release build is small.
+        run: cargo run -p inspect_gltf --locked --release -- check data assets
+
       - name: naming policy
         run: scripts/check_trademark.sh
 

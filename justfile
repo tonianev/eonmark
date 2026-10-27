@@ -53,6 +53,9 @@ ci:
 
     step asset policy
     scripts/check_assets.sh
+    scripts/check_assets.sh --self-test
+    step model check
+    cargo run -p inspect_gltf --locked --release -- check data assets
     step naming policy
     scripts/check_trademark.sh
     step fixture policy

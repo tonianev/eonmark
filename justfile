@@ -118,6 +118,14 @@ selftest:
 data-check:
     cargo run -p sim-cli --locked -- data-check data
 
+# Art pass, maintainer-only (CI never downloads): fetch the third-party files of tools/assets/sources.tsv into the download cache (EONMARK_ASSET_CACHE, default target/asset-cache), licence texts first, check every sha256 pin, and copy the vendored ones into assets/; a second run leaves assets/ unchanged. See scripts/fetch_assets.sh.
+fetch-assets:
+    scripts/fetch_assets.sh
+
+# Art pass: bake the characters of tools/assets/bake.ron from the download cache into assets/models/kaykit_adventurers/ (`just art-bake --only shieldbearer`); run `just fetch-assets` first.
+art-bake *ARGS:
+    cargo run -p inspect_gltf --locked --release -- bake tools/assets/bake.ron --cache "${EONMARK_ASSET_CACHE:-target/asset-cache}/files" {{ARGS}}
+
 # Seeded bot-vs-bot matches (M5b): `just bots --seeds 1..5 --a standard --b standard --jobs 5` prints one CSV row per game; see docs/design/ai.md.
 bots *ARGS:
     cargo run -p sim-cli --locked --release -- play-bots {{ARGS}}

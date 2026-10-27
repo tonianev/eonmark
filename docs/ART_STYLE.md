@@ -147,11 +147,11 @@ Every unit kind is drawn through one `Visual` value from `data/visuals.ron`, key
 | Forward | -Z |
 | Scale | 1 unit = 1 m; apply transforms before export |
 | Origin | base centre of the model |
-| Texture | one palette or gradient texture at most 256 px on a side; downsample KayKit 1024 atlases |
+| Texture | one palette or gradient texture at most 256 px on a side, except a pack's shared palette atlas, which ships as is (KayKit Hexagon's 1024 px `hexagons_medieval.png`, art-pass owner decision 5); baked characters are downsampled only when every face keeps its colour |
 | Contents | meshes and materials only; no embedded lights or cameras |
 | Naming | `kind_variant.glb`, lower case |
 | Loading | `GltfAssetLabel::Scene(0)` |
-| Inspection | `tools/inspect_gltf` prints scenes, meshes and bounds (M7) |
+| Inspection | `cargo run -p inspect_gltf --release -- inspect <file>` prints scenes, the node tree with transforms, meshes and primitives, images, skins, clips, rest bounds and a T-pose hint; `swatches`, `palette`, `bake` and `check` are described below |
 
 The glTF specification says +Z forward and Blender's default export writes -Z forward; kits differ in scale and origin. Normalize at import, record `scale`, `y_offset` and `yaw` in `visuals.ron`, and check the result at the standard camera.
 
@@ -168,6 +168,33 @@ The glTF specification says +Z forward and Blender's default export writes -Z fo
 Excluded: Quaternius (proprietary licence since 2026-08-28), CC-BY-SA, CC-BY-NC, GPL art, Sampling+, and any material from the inspiration's fan wiki.
 
 Each vendored file gets an `ATTRIBUTION.md` row: asset, author, source URL, licence, modifications, download date. In-house files are marked `original: yes` and are CC0. `scripts/check_assets.sh` fails CI if a non-allowlisted file lacks a row, exceeds 2 MB, or the total exceeds 300 MB. No Git LFS.
+
+### Where the art pass's files come from
+
+The pre-stream art pass ([ROADMAP.md](ROADMAP.md), "Art pass (pre-stream)") vendors KayKit Medieval Hexagon 1.0 (buildings, construction stages, rubble, flag, cart props and nature) and Inter 4.1, and bakes its units from KayKit Adventurers 1.0. Everything is fetched from `raw.githubusercontent.com` (the `KayKit-Game-Assets` organisation, which the owner confirmed as the source to use, and `rsms/inter` at tag `v4.1`), the only host that serves these files to the agent's VM: github.com pages, its git and API hosts, kenney.nl, itch.io and opengameart.org refuse, and KayKit Medieval Builder and Forest Nature are itch-only (404 on raw). So:
+
+- **Pins are sha256, not commits.** `tools/assets/sources.tsv` lists every remote file with its URL, sha256, licence, author and per-file GitHub page; `just fetch-assets` (`scripts/fetch_assets.sh`, maintainer-only, never in CI) fetches and checks the licence texts first (KayKit's `LICENSE.txt` must name `publicdomain/zero/1.0`, Inter's must be the SIL Open Font License 1.1, or it stops), then every other file into a download cache, verifies each pin and copies the vendored ones into `assets/` byte for byte. The vendored copies are the source of truth; a second run changes nothing.
+- **Tool-only inputs stay in the cache.** The red KayKit variants exist only for `inspect_gltf swatches`, and the 3.6 MB rigged character files only for `inspect_gltf bake` (`just art-bake`, `tools/assets/bake.ron`); neither is committed.
+- **Licence texts are vendored with their own rows** (`models/kaykit_hexagon/LICENSE.txt`, `models/kaykit_adventurers/LICENSE.txt`, `fonts/OFL-Inter.txt`), and `inspect_gltf`'s `attribution_rows_match_the_sources` test holds `ATTRIBUTION.md` to `sources.tsv` and `bake.ron`.
+- **Kenney is deferred to M7** (UI Pack panels, Game Icons): its site is unreachable from the agent's VM, so the owner fetches it on the Mac then. The KenneyNL starter kits on raw GitHub are not used: no per-asset CC0 statement has been read there.
+
+### Budgets (measured in art slice 2)
+
+`inspect_gltf check data assets` (CI's check job) holds every Scene in `data/visuals.ron` to these limits; they were set from `inspect_gltf inspect` on every chosen source, each a little above the heaviest file it covers.
+
+| Limit | Value | Heaviest measured |
+|---|---|---|
+| File | 2 MB | castle `.bin` 317,732 B |
+| Texture side | 256 px, except the shipped Hexagon atlas | `hexagons_medieval.png` 1024 x 1024 (owner decision 5); characters embed 1024 x 1024 |
+| Unit triangles | 5,500 (a note above 5,000) | Adventurers body plus kept items 4,005 (hooded Rogue) to 5,325 (Barbarian with two axes); Mangonel catapult nodes 1,326; Wain parts 668 |
+| Building triangles | 6,000 | castle 5,659 (under the plan's 12,000, so it stays) |
+| Site and rubble triangles | 1,500 | `building_stage_C` 1,218 |
+| Seat flag triangles | 100 | `flag_blue` 48 |
+| Interior prop triangles | 1,600 | `trees_B_large` 1,540 (the large trees stay) |
+| Edge prop triangles | 300 | `tree_single_B` 220 |
+| Team area | units 200‰, the Wain 80‰, buildings 100‰, the Seat flag 300‰ | Hexagon buildings 5‰ (mine) to 280‰ (church); flag 457‰ |
+
+The team area is the share of a model's surface whose faces sample its `team_swatches` rects. KayKit Hexagon's team texels are one rect of the shared atlas, `(17, 787, 91, 207)`, found by `inspect_gltf swatches` over the blue and red variants of every vendored building, the catapult tower and the flag; no non-team face samples it, and no neutral model (stages, rubble, nature, cart props) does either.
 
 ## Screenshot sign-off checklist
 

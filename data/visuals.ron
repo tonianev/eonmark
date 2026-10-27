@@ -26,10 +26,10 @@
 // buildings: Primitive(Cuboid) is the M3b team-coloured box over the
 //     footprint (crates/game/src/buildings.rs), or a Scene whose fallback is
 //     that box. The art pass (docs/ROADMAP.md, "Art pass (pre-stream)") swaps
-//     them for KayKit models one line at a time. Optional tables, all empty
-//     or default here: team_swatches, sites (default [Primitive(Cuboid)], the
-//     rising box), rubble, seat_flag and terrain (props on forest, mountain
-//     and water).
+//     them for KayKit models one line at a time. Optional tables, empty or
+//     default here: sites (default [Primitive(Cuboid)], the rising box),
+//     rubble, seat_flag and terrain (props on forest, mountain and water);
+//     team_swatches holds the KayKit Hexagon rects measured in art slice 2.
 (
   units: {
     // Upright pill, 1.19 m (radius 0.35 m).
@@ -60,6 +60,14 @@
     "watchtower": Primitive(Cuboid),
     "engine_yard": Primitive(Cuboid),
   },
-  team_swatches: {},
+  // Texel rects of a model's base texture that the game repaints in the
+  // owner's team colour (art pass). "kaykit_hexagon" is the union of the
+  // rects `inspect_gltf swatches` found by diffing KayKit's blue and red
+  // variants of every vendored building, the catapult tower and the flag
+  // over the shared 1024x1024 hexagons_medieval.png (art slice 2): no
+  // non-team face of any of them samples it. No Scene names it until slice 3.
+  team_swatches: {
+    "kaykit_hexagon": (rects: [(17, 787, 91, 207)], desaturate_permille: 200),
+  },
   terrain: {},
 )

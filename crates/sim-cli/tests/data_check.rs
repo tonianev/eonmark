@@ -382,15 +382,47 @@ fn visuals_line(id: &str) -> String {
         .to_string()
 }
 
-/// `text` (a `visuals.ron`) cut after its `buildings` table, every building
-/// the box but the Town, which is `town`: the units as they are, and no
-/// sites, rubble, flags, terrain or swatches, so the only Scene is the
-/// Town's whatever the repository's looks are (art slice 3 made them
-/// models).
+/// The look inside a Scene line's `fallback: Some(...)`, if it has one.
+fn fallback_of(line: &str) -> Option<&str> {
+    let at = line.find("fallback: Some(")? + "fallback: Some(".len();
+    let mut depth = 1u32;
+    for (i, c) in line[at..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&line[at..at + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `text` (a `visuals.ron`) cut after its `buildings` table, every unit its
+/// fallback look (a unit Scene's `fallback`, a model since art slice 4),
+/// every building the box but the Town, which is `town`, and no sites,
+/// rubble, flags, terrain or swatches, so the only Scene is the Town's
+/// whatever the repository's looks are (art slice 3 made them models).
 fn only_town_scene(text: &str, town: &str) -> String {
+    let units = text.find("  units: {\n").expect("a units table");
     let start = text.find("  buildings: {\n").expect("a buildings table");
     let end = start + text[start..].find("\n  },\n").expect("its end") + "\n  },\n".len();
-    let mut out = text[..start].to_string();
+    let mut out = text[..units].to_string();
+    for line in text[units..start].lines() {
+        match (line.strip_prefix("    \""), fallback_of(line)) {
+            (Some(rest), Some(look)) => {
+                let id = &rest[..rest.find('"').expect("a quoted key")];
+                out.push_str(&format!("    \"{id}\": {look},\n"));
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
     out.push_str("  buildings: {\n");
     for line in text[start..end].lines() {
         let Some(rest) = line.strip_prefix("    \"") else {

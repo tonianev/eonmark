@@ -1788,26 +1788,20 @@ mod tests {
         assert_eq!(rules.yield_cap_base, 70);
         assert_eq!(rules.pop_cap_base, 25);
         assert!(rules.map("plains_1v1").is_some());
-        assert_eq!(
-            rules.visual(0),
-            Some(&Visual::Primitive(visuals::Primitive::Capsule))
-        );
-        assert_eq!(
-            rules.visual(3),
-            Some(&Visual::Body {
-                shape: visuals::Primitive::Cuboid,
-                height_tiles_x100: 130,
-                lying: false,
-            })
-        );
-        assert_eq!(
-            rules.visual(5),
-            Some(&Visual::Body {
-                shape: visuals::Primitive::Capsule,
-                height_tiles_x100: 180,
-                lying: true,
-            })
-        );
+        // `visual(i)` is the look visuals.ron gives kind `i`'s id, for every
+        // kind, and nothing past the last kind. Compared with the file's own
+        // table rather than with literal looks, so a look edit (the unit
+        // models of art slice 4) never fails this test (art-pass decision
+        // 17); visuals.rs tests what each look parses to.
+        for (i, kind) in (0u16..).zip(&rules.units) {
+            assert!(rules.visual(i).is_some(), "{}", kind.id);
+            assert_eq!(
+                rules.visual(i),
+                rules.visuals.units.get(&kind.id),
+                "{}",
+                kind.id
+            );
+        }
         assert!(rules.visual(8).is_none());
         assert_eq!(rules.ticks_from_ds(32), 64);
         assert_eq!(rules.attrition_interval_ticks(), 64);

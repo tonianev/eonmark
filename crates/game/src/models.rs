@@ -186,6 +186,9 @@ pub struct ModelLibrary {
     images: BTreeMap<u64, Handle<Image>>,
     /// The team swatches of `visuals.ron`.
     swatches: BTreeMap<String, TeamSwatch>,
+    /// `visuals.ron`'s `neutral_desaturate_permille`: how far a neutral
+    /// material's texture is desaturated.
+    neutral_desaturate_permille: u32,
     materials: BTreeMap<MaterialKey, Handle<StandardMaterial>>,
     /// Real time the requests went out, seconds.
     started: Option<f64>,
@@ -199,6 +202,7 @@ impl ModelLibrary {
     pub fn new(visuals: &Visuals) -> Self {
         Self {
             swatches: visuals.team_swatches.clone(),
+            neutral_desaturate_permille: visuals.neutral_desaturate_permille,
             ..Self::default()
         }
     }
@@ -269,9 +273,9 @@ impl ModelLibrary {
         }
     }
 
-    /// The material for `model`: neutral (the texture as shipped) when
-    /// `team` is `None`, else the texture repainted for `(swatch key,
-    /// team slot)`. Created once per texture content and team, so every
+    /// The material for `model`: neutral when `team` is `None` (the texture
+    /// as shipped, or desaturated by `neutral_desaturate_permille`), else
+    /// the texture repainted for `(swatch key, team slot)`. Created once per texture content and team, so every
     /// model on one texture shares it. A swatch the library does not know
     /// or a texture without CPU data gives the neutral material, with one
     /// `error!`.
@@ -303,6 +307,15 @@ impl ModelLibrary {
                         );
                         source.clone()
                     }
+                }
+            }
+            (None, Some(src)) if self.neutral_desaturate_permille > 0 => {
+                match images
+                    .get(src)
+                    .and_then(|img| neutral_texture(img, self.neutral_desaturate_permille))
+                {
+                    Some(img) => Some(images.add(img)),
+                    None => source.clone(),
                 }
             }
             _ => source.clone(),
@@ -1022,6 +1035,17 @@ pub fn team_texture(src: &Image, swatch: &TeamSwatch, team: Color) -> Option<Ima
     Some(image)
 }
 
+/// `src` desaturated toward grey by `permille` (keeping each texel's
+/// luminance), as a team texture desaturates the texels outside its rects;
+/// `None` for a texture that is not 8-bit RGBA with CPU data.
+pub fn neutral_texture(src: &Image, permille: u32) -> Option<Image> {
+    let swatch = TeamSwatch {
+        rects: Vec::new(),
+        desaturate_permille: permille,
+    };
+    team_texture(src, &swatch, Color::WHITE)
+}
+
 /// Every Scene file `visuals` names that the game loads, distinct (for
 /// logs and tests).
 pub fn drawn_files(visuals: &Visuals) -> BTreeSet<String> {
@@ -1396,6 +1420,84 @@ mod tests {
         let mut empty = src;
         empty.data = None;
         assert!(team_texture(&empty, &swatch, team).is_none());
+    }
+
+    /// `neutral_desaturate_permille` (visuals.ron): a neutral material
+    /// (terrain props, sites, rubble) draws its texture desaturated toward
+    /// grey, keeping each texel's luminance, so a prop's colour never
+    /// outshouts the team colours; at 0 it draws the texture as shipped.
+    /// A team material is untouched by it.
+    #[test]
+    fn neutral_models_take_the_neutral_desaturation() {
+        let saturation = |p: [u8; 4]| {
+            let (mx, mn) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+            f32::from(mx - mn) / f32::from(mx.max(1))
+        };
+        let green = [30, 170, 70, 255];
+        let run = |permille: u32| {
+            let mut images = Assets::<Image>::default();
+            let mut materials = Assets::<StandardMaterial>::default();
+            let mut meshes = Assets::<Mesh>::default();
+            let src = images.add(rgba(2, 2, |_, _| green));
+            let hash = content_hash(images.get(&src).unwrap());
+            let visuals = Visuals {
+                neutral_desaturate_permille: permille,
+                team_swatches: [(
+                    "hex".to_string(),
+                    TeamSwatch {
+                        rects: vec![(0, 0, 1, 1)],
+                        desaturate_permille: 0,
+                    },
+                )]
+                .into(),
+                ..Visuals::default()
+            };
+            let mut lib = ModelLibrary::new(&visuals);
+            let model = Model {
+                mesh: meshes.add(tri_mesh(vec![[0.0; 3]; 3], Some(vec![0, 1, 2]))),
+                texture: hash,
+                base_color: Color::WHITE,
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+                reach: 1.0,
+                triangles: 1,
+            };
+            let key = ModelKey {
+                path: "tree.gltf".into(),
+                nodes: vec![],
+                parts: vec![],
+                scale_x100: 100,
+                yaw_deg: 0,
+                offset_x100: (0, 0, 0),
+            };
+            lib.insert_ready(key, model.clone(), src.clone());
+            let neutral = lib.material(&model, None, &mut images, &mut materials);
+            let team = lib.material(&model, Some(("hex", 0)), &mut images, &mut materials);
+            let texel = |m: &Handle<StandardMaterial>, x: u32| {
+                let tex = materials
+                    .get(m)
+                    .unwrap()
+                    .base_color_texture
+                    .clone()
+                    .unwrap();
+                let d = images.get(&tex).unwrap().data.clone().unwrap();
+                let i = (x * 4) as usize;
+                ([d[i], d[i + 1], d[i + 2], d[i + 3]], tex == src)
+            };
+            (texel(&neutral, 1), texel(&team, 1))
+        };
+        let ((shipped, same), (team0, _)) = run(0);
+        assert_eq!(shipped, green, "at 0, as shipped");
+        assert!(same, "the source texture itself");
+        let ((half, same), (team500, _)) = run(500);
+        assert!(!same, "a desaturated copy");
+        assert!(
+            saturation(half) < saturation(green) * 0.75 && half[1] > half[0],
+            "{half:?}: duller, still green"
+        );
+        assert_eq!(team500, team0, "a team material ignores it");
+        let ((grey, _), _) = run(1000);
+        assert!(saturation(grey) < 0.02, "{grey:?}: grey at 1000");
     }
 
     /// Models on equal texture content share one neutral and one material

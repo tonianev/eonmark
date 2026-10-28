@@ -50,10 +50,12 @@
     (out: "models/kaykit_adventurers/shieldbearer.glb", src: "Knight.glb",
      keep: ["Knight_*", "Rectangle_Shield", "1H_Sword"], pose: (clip: "Blocking", at_ms: 0), max_texture: 256,
      sha256: "0bbf7ec5e758e0bbc8b89d45834ceabd72f78421cd307abce2d38be00c0180b6"),
-    // Crossbow levelled forward.
-    (out: "models/kaykit_adventurers/bowman.glb", src: "Rogue.glb",
+    // Hood up and a crossbow levelled forward: the hooded Rogue, so the
+    // team-coloured hood covers the hair (the bare Rogue's brown hair hid
+    // its team colour from the camera; 2026-10-28 review).
+    (out: "models/kaykit_adventurers/bowman.glb", src: "Rogue_Hooded.glb",
      keep: ["Rogue_*", "2H_Crossbow"], pose: (clip: "2H_Ranged_Aiming", at_ms: 0), max_texture: 256,
-     sha256: "c556315811a15cf73fe4a858cea4962856b21f73e6a472ef0f85e4964850f872"),
+     sha256: "b464d69a3117e4bd2f367332a4d2b78478f87b199ab939983096512023944c79"),
     // The Knight with a two-handed sword, drawn 1.41x the Shieldbearer's
     // height (no CC0 horse is reachable).
     (out: "models/kaykit_adventurers/outrider.glb", src: "Knight.glb",

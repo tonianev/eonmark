@@ -299,6 +299,14 @@ pub struct Visuals {
     /// `water` ([`DECOR_TERRAINS`]); a terrain without an entry is bare.
     #[serde(default)]
     pub terrain: BTreeMap<String, TerrainDecor>,
+    /// How far every neutral model (a Scene with no `team`: terrain props,
+    /// construction sites, rubble) is desaturated toward grey, permille,
+    /// 0..=1000 (default 0, the texture as shipped). The same lever as a
+    /// swatch's `desaturate_permille` for the texels outside its team
+    /// rects, so a prop's colour never outshouts the team colours
+    /// (`docs/ART_STYLE.md`, palette).
+    #[serde(default)]
+    pub neutral_desaturate_permille: u32,
 }
 
 fn default_sites() -> Vec<Visual> {
@@ -316,6 +324,7 @@ impl Default for Visuals {
             seat_flag: None,
             banner: None,
             terrain: BTreeMap::new(),
+            neutral_desaturate_permille: 0,
         }
     }
 }
@@ -552,6 +561,13 @@ impl Visuals {
         }
         for (key, decor) in &self.terrain {
             self.check_terrain(path, key, decor)?;
+        }
+        if self.neutral_desaturate_permille > 1000 {
+            return Err(Error::invalid(
+                path,
+                "neutral_desaturate_permille",
+                "must be at most 1000",
+            ));
         }
         for (key, swatch) in &self.team_swatches {
             check_swatch(path, key, swatch)?;
@@ -1780,6 +1796,13 @@ mod tests {
         ] {
             rejects(&file(YEOMAN, CUBOID, &swatch(rects, desaturate)), field);
         }
+        // The neutral models' desaturation is a permille too.
+        let neutral = |permille: u32| format!("{SWATCH}, neutral_desaturate_permille: {permille}");
+        check(&file(YEOMAN, CUBOID, &neutral(1000))).unwrap();
+        rejects(
+            &file(YEOMAN, CUBOID, &neutral(1001)),
+            "neutral_desaturate_permille",
+        );
         // Sites, rubble and props are neutral; a building or the flag may
         // take a team.
         let scene_team = r#"Scene(path: "m/s.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, team: Some("hex"))"#;

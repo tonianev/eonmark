@@ -312,7 +312,9 @@ Attach one 1280x720 screenshot at 40 m to every PR that adds or changes art, and
 | `visuals.ron` changed, Rust did not (for a model swap) | |
 | Draw-call counter in the dev panel is under 500 with the test scene | |
 
-The last row had no counter to read through M4b: Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so it was marked n/a in the PR with the expected counts instead (at 200 vs 200 about 75 to 100 batches, [design/ui.md](design/ui.md#health-bars-rings-and-markers)), and an Xcode Metal frame capture on the Mac stood in for it. The art pass's counter (`--draw-stats`, the dev panel) reads it: `art_bench` with every building, site, banner and terrain prop as a model peaks at 111 draws under lavapipe (art slice 3), and still 111 with every unit as a model too (art slice 4, framed at 40 m on P0's Town).
+The last row is read from the counter since the art pass, and is no longer marked n/a. Through M4b it had no counter to read: Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so it was marked n/a in the PR with the expected counts instead (at 200 vs 200 about 75 to 100 batches, [design/ui.md](design/ui.md#health-bars-rings-and-markers)), and an Xcode Metal frame capture on the Mac stood in for it. The art pass's counter (`--draw-stats`, the dev panel's `draw calls` row) reads it: `art_bench` with every building, site, banner and terrain prop as a model peaked at 111 draws under lavapipe (art slice 3), and with every unit a model too it peaks at 109 in its 60 m framing and 115 at 40 m over P0's Town (art slice 6, 1280 x 720); CI's render smoke gates it under 500 (`scripts/check_draws.sh`), and `docs/screenshots/art-dev-panel.png` shows the row.
+
+The art pass's sign-off (ROADMAP "Art pass (pre-stream)", AP8) uses four shots at 1280 x 720, made under lavapipe by `just art-checks` (`scripts/art_checks.sh`) with `--screenshot-at`: `docs/screenshots/art-units-40m.png` (`unit_looks`, every kind of both teams at 40 m), `art-town-40m.png` (`art_bench` at `--camera 24,64,40`: P0's Seat with its twelve buildings, three sites, the forests and the front of the fight), `art-battle-60m.png` (`art_bench` in its own 60 m framing at tick 300, mid-fight, every P0 unit selected) and `art-match-minimap.png` (the `m5_first_match` setup spectated at tick 13206, a match in progress with its minimap). The agent ticks each row against them in the PR; the owner signs them on the P3 display and as sRGB exports ([PLAYTEST.md](PLAYTEST.md#owners-mac-checklist-art-pass)).
 
 ## Milestones
 
@@ -323,4 +325,5 @@ The last row had no counter to read through M4b: Bevy 0.19.1 keeps its batch cou
 | M3b | Territory tint and border; build ghost in green or red |
 | M4b | Five distinct unit silhouettes; health bars |
 | M5a | Attrition indicator, supply ring, annexation timer |
-| M7 | Fog through the field shader, minimap, Inter, Kenney panels, CC0 glTF models, audio; palette finalized here |
+| Art pass (pre-stream) | CC0 KayKit models through `visuals.ron` for every unit and building, with team banners; construction stages, rubble and the Seat flag; dressed forests, mountains and water; the minimap without fog; Inter; arrows, stones and lunges; the debug grid off; the draw-call counter. Sign-off shots `docs/screenshots/art-*.png` |
+| M7 | Fog through the field shader (and on the minimap), Kenney panels, audio; palette finalized here |

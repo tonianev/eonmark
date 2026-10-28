@@ -254,6 +254,7 @@ Not counted: the full-screen passes (tonemapping, upscaling, about 2 a frame) an
 - **Cross-check.** `scripts/draw_trace_xcheck.sh` builds the game with `bevy/detailed_trace`, whose `TrackedRenderPass` logs every draw, and requires the trace's per-frame sums to match the counter's (`draw_stats: frame <n> total=...` at DEBUG level) within one frame's draws, in both modes. It stays for the Bevy 0.20 migration.
 - **Baseline, art-pass slice 1** (lavapipe, `render_smoke.sh`, 2026-10-26 and 2026-10-27; boxes and M4b looks; `docs/BUILD_TIMES.md` has the rows): `unit_looks` 29 draws a frame (27 indirect, 2 sorted); `enemy_outpost` 22 (`fight_max=22`); `art_bench` max 42, `fight_max=42` (32 indirect, 10 sorted) with all 200 of P0's units selected. Before the rings became meshes the same `art_bench` run read max 241 with `sorted_max=210`: the 200 gizmo rings were 200 of them, and the mesh rings cost one indirect draw. `mode=culling` on lavapipe.
 - **The stress scene.** `--scenario art_bench`: two full Towns (twelve complete buildings a side), three sites and 400 units fighting east of P0's Town, framed at 60 m (`app::ART_BENCH_FRAMING`); its director selects all 200 of P0's units at tick 40 (`director::art_bench_beats`), so the selection term is part of the count.
+- **The gate (art slice 6).** `scripts/check_draws.sh <log>` fails a run whose `frame_stats: draws` line has `max` (and, with `--fight`, `fight_max`) at 500 or more, no counted frame, or `mode=none`. CI's game-linux job runs it over every render smoke, `art_bench '' 200 120` included, and `scripts/art_checks.sh` over each of its windowed runs. With every building, prop and unit a model, `art_bench` peaks at 109 draws in its 60 m framing (`fight_max=109`, 97 indirect and 12 sorted at most) and at 115 at 40 m over P0's Town, `unit_looks` at 70 (lavapipe, 1280 x 720, 2026-10-28): a quarter of the budget. The owner re-reads the line, with its `mode=`, on the Mac ([../PLAYTEST.md](../PLAYTEST.md#owners-mac-checklist-art-pass)).
 
 ## Developer-only panels
 
@@ -305,6 +306,8 @@ M5b:
 
   The proxy, with M5b owner decision 8's substitutions (`--screenshot-at` instead of `ci_testing`, the replay recorded from the fast-forward tick), is `just m5b-checks`; the owner's run is the [Owner's Mac checklist (M5b)](../PLAYTEST.md#owners-mac-checklist-m5b).
 
+Art pass (pre-stream): the minimap (AP6), the draw-call counter (AP7) and clicking every unit kind (AP10) are acceptance lines of the ROADMAP's "Art pass (pre-stream)" section, not copied here. Their proxies are `just art-drive` (`click_check: ok 16/16` and `minimap_check: ok` with real X input) and `just art-checks` (the five `docs/screenshots/art-*.png`, the dev panel's among them, with every run's draws gated under 500); the owner's part is the [Owner's Mac checklist (art pass)](../PLAYTEST.md#owners-mac-checklist-art-pass).
+
 M6:
 
 - [ ] Game speed x4 and pause work and the replay verifies with the same final hash as the x1 replay of the same scripted input (`--scenario scripted_match --speed 4`).
@@ -331,6 +334,8 @@ cargo run --release -p game                                   # M5b: the main me
 cargo run --release -p game -- --spectate                     # the Standard bot against itself
 cargo run --release -p game -- --spectate --seed 1 --fast-forward-to 25612   # m5_first_match's last 400 ticks
 just m5b-checks   # the M5b proxy: overlay, menu, New Game click, m2_checks 3 and 4
+just art-checks   # the art pass's proxies and screenshots (Linux: under xvfb-run on lavapipe)
+just art-drive    # the art pass's click and minimap checks with real X input (Linux, Xvfb + xdotool)
 ```
 
 ## Open questions

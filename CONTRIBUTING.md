@@ -173,14 +173,22 @@ A look is presentation, outside `rules_hash` ([ADR 0003](docs/adr/0003-visuals-o
 #    tools/assets/sources.tsv (URL, sha256, licence, author, page), run
 #    `just fetch-assets` (licences first, every file checked against its pin),
 #    and add its assets/ATTRIBUTION.md row. Files stay under 2 MB.
-# 2. Look at it: nodes, triangles, texture, bounds.
+#    A rigged character is not vendored: its source row has dest `-`, and a
+#    tools/assets/bake.ron row (keep globs, a pose, max_texture) bakes it with
+#    `just art-bake`; paste the output's sha256 (check_assets.sh prints it)
+#    into the row, and the bake's Modifications text into its
+#    ATTRIBUTION.md row.
+# 2. Look at it: nodes, triangles, texture, bounds (on a character's source
+#    also the clips and the T-pose hint; `palette` picks its team rects).
 cargo run -p inspect_gltf --release -- inspect assets/models/<pack>/<file>.gltf
 # 3. Edit the kind's one line in data/visuals.ron: path, scale_x100, yaw_deg
-#    (buildings face +Z, units +X), the offsets, team and, for a building, its
-#    banner_at mount.
+#    (buildings face +Z, units +X), the offsets, team and, for a building (or
+#    a unit with too little team colour, like the Mangonel), its banner_at
+#    mount; a unit keeps its M4b look as its fallback.
 # 4. Measure it: one `ok` line per Scene with triangles, bytes, top, size, team
-#    share (a building's with its banner), facing and a suggested scale_x100.
-#    Fix what a FAIL line names (base height, centre, budgets, team floor).
+#    share (with its banner), facing and a suggested scale_x100. Fix what a
+#    FAIL line names (base height, centre, budgets, team floor, a unit less
+#    than 1.4x apart from a sibling on the same character).
 cargo run -p inspect_gltf --release -- check data assets
 # 5. Validate (the file must exist under assets/) and look at it at 40 m.
 cargo run -p sim-cli -- data-check data
@@ -188,7 +196,7 @@ scripts/check_assets.sh
 just render-smoke out art_bench 24,64,40 400 75
 ```
 
-Swapping a kind back to its box or primitive is step 3 alone (`"croft": Primitive(Cuboid),`); [docs/ART_STYLE.md](docs/ART_STYLE.md) ("Building looks") walks it through, with `just verify` showing every fixture unchanged. Commit the RON line, the asset files and their rows together, and attach the 40 m screenshot ([docs/ART_STYLE.md](docs/ART_STYLE.md), sign-off checklist).
+Swapping a kind back to its box or primitive is step 3 alone (`"croft": Primitive(Cuboid),`, `"yeoman": Primitive(Capsule),`); [docs/ART_STYLE.md](docs/ART_STYLE.md) ("Building looks", "Unit looks (art slice 4)") walks both through, with `just verify` showing every fixture unchanged. Commit the RON line, the asset files and their rows together, and attach the 40 m screenshot ([docs/ART_STYLE.md](docs/ART_STYLE.md), sign-off checklist).
 
 ## Golden replay fixtures
 

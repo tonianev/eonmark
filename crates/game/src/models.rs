@@ -1576,9 +1576,14 @@ mod tests {
     }
 
     /// The files the game loads: units' (since art slice 4), buildings',
-    /// sites', the rubble's, the flags' and the props'.
+    /// sites', the rubble's, the flags' and the props'. On the live file
+    /// every path `Visuals::scene_paths` lists (what data-check checks) is
+    /// loaded; and with a distinct model for each use, each one's key is
+    /// requested, so a use dropped from `drawn_scenes` would draw nothing
+    /// (a site as the box, no rubble, no banner, no Seat flag) without an
+    /// error.
     #[test]
-    fn drawn_scenes_cover_units_buildings_and_props() {
+    fn drawn_scenes_cover_every_scene() {
         let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let mut rules = rules::Rules::load(&data).expect("data loads");
         let unit = Visual::Scene {
@@ -1623,6 +1628,70 @@ mod tests {
                     assert!(files.contains(path), "{path}");
                 }
             }
+        }
+        let live = rules::Rules::load(&data).expect("data loads");
+        let files = drawn_files(&live.visuals);
+        for (field, path) in live.visuals.scene_paths() {
+            assert!(files.contains(path), "{field}: {path} is never loaded");
+        }
+
+        // One model per use, none shared: each use's own key is requested.
+        let scene = |path: &str| Visual::Scene {
+            path: path.into(),
+            scale_x100: 100,
+            y_offset_tiles_x100: 0,
+            yaw_deg: 0,
+            x_offset_tiles_x100: 0,
+            z_offset_tiles_x100: 0,
+            nodes: vec![],
+            parts: vec![],
+            team: None,
+            fallback: None,
+            banner_at: None,
+            seat_flag_at: None,
+        };
+        let mut v = live.visuals.clone();
+        v.units.insert("yeoman".into(), scene("m/unit.glb"));
+        v.buildings.insert("croft".into(), scene("m/house.gltf"));
+        v.sites = vec![scene("m/site_a.gltf"), scene("m/site_b.gltf")];
+        v.rubble = Some(rules::Rubble {
+            visual: scene("m/rubble.gltf"),
+            ds: 300,
+        });
+        v.seat_flag = Some(scene("m/seat_flag.gltf"));
+        v.banner = Some(scene("m/banner.gltf"));
+        let look = rules::DecorLook {
+            visual: scene("m/tree.gltf"),
+            at: rules::DecorAt::Any,
+            weight: 1,
+            shadow: true,
+        };
+        v.terrain.insert(
+            "forest".into(),
+            rules::TerrainDecor {
+                interior_permille: 1000,
+                edge_permille: 1000,
+                jitter_x100: 0,
+                scale_jitter_pct: 0,
+                looks: vec![look],
+            },
+        );
+        let keys: BTreeSet<ModelKey> = drawn_scenes(&v)
+            .into_iter()
+            .filter_map(ModelKey::of)
+            .collect();
+        for path in [
+            "m/unit.glb",
+            "m/house.gltf",
+            "m/site_a.gltf",
+            "m/site_b.gltf",
+            "m/rubble.gltf",
+            "m/seat_flag.gltf",
+            "m/banner.gltf",
+            "m/tree.gltf",
+        ] {
+            let key = ModelKey::of(&scene(path)).unwrap();
+            assert!(keys.contains(&key), "{path} is never requested");
         }
     }
 }

@@ -96,8 +96,16 @@ fn attribution_rows_match_the_sources() {
             .iter()
             .find(|s| url_file_name(&s.url) == m.src)
             .unwrap_or_else(|| panic!("{} is not in sources.tsv", m.src));
+        assert_eq!(row.author, src.author, "{}", m.out);
         assert_eq!(row.source_url, src.page, "{}", m.out);
         assert_eq!(row.license, src.licence, "{}", m.out);
+        assert_eq!(row.original, "no", "{}", m.out);
+        assert!(
+            date(&row.download_date),
+            "{}: date {:?}",
+            m.out,
+            row.download_date
+        );
         let model = inspect_gltf::model::Model::load(&root().join("assets").join(&m.out)).unwrap();
         let extras = inspect_gltf::bake::read_extras(&model)
             .expect("a baked file records its modifications");

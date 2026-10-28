@@ -532,4 +532,116 @@ mod tests {
         let none = decor_placements(map, &table(1000, 1000), &|_, _| None);
         assert!(none.is_empty());
     }
+
+    /// The spawn system: nothing while a look's model is still loading;
+    /// once the library settles, every placement once (a later frame adds
+    /// nothing), each a top-level [`Prop`] that is never pickable, casting
+    /// a shadow unless its look says `shadow: false` (the water plants).
+    #[test]
+    fn spawn_props_once_unpickable_with_per_look_shadows() {
+        use crate::models::{Geometry, ModelKey, content_hash, finish_geometry};
+        use bevy::asset::RenderAssetUsages;
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+        let mut rules = rules();
+        let tree = look("m/tree.gltf", DecorAt::Any, 1);
+        let mut lily = look("m/lily.gltf", DecorAt::Any, 1);
+        lily.shadow = false;
+        let decor = |l: DecorLook| TerrainDecor {
+            interior_permille: 1000,
+            edge_permille: 1000,
+            jitter_x100: 0,
+            scale_jitter_pct: 0,
+            looks: vec![l],
+        };
+        rules.visuals.terrain = BTreeMap::from([
+            ("forest".to_string(), decor(tree.clone())),
+            ("water".to_string(), decor(lily.clone())),
+        ]);
+        let (mut meshes, mut images) = (Assets::<Mesh>::default(), Assets::<Image>::default());
+        let model = |meshes: &mut Assets<Mesh>, images: &mut Assets<Image>| {
+            let image = Image::new(
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                vec![120; 4 * 4 * 4],
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            );
+            let hash = content_hash(&image);
+            let m = finish_geometry(
+                Geometry {
+                    positions: vec![[-0.2, 0.0, -0.2], [0.2, 0.3, 0.2], [0.0, 0.0, 0.2]],
+                    normals: vec![[0.0, 1.0, 0.0]; 3],
+                    uvs: vec![[0.1, 0.1]; 3],
+                    indices: vec![0, 1, 2],
+                    textures: vec![],
+                    base_color: None,
+                },
+                hash,
+                meshes,
+            );
+            (m, images.add(image))
+        };
+        let mut lib = ModelLibrary::new(&rules.visuals);
+        let (tree_model, tree_image) = model(&mut meshes, &mut images);
+        lib.insert_ready(ModelKey::of(&tree.visual).unwrap(), tree_model, tree_image);
+        let lily_key = ModelKey::of(&lily.visual).unwrap();
+        lib.insert_loading(lily_key.clone(), Vec::new());
+        let setup = sim::MatchSetup::scenario(&rules, 7);
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(lib)
+            .add_systems(Update, spawn_props);
+        app.world_mut()
+            .insert_non_send(SimHandle::from_setup(setup, rules));
+        let props = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<(
+                &Name,
+                Has<NotShadowCaster>,
+                Has<Pickable>,
+                Has<ChildOf>,
+            ), With<Prop>>();
+            q.iter(app.world())
+                .map(|(n, ns, p, c)| (n.as_str().to_string(), ns, p, c))
+                .collect::<Vec<_>>()
+        };
+        app.insert_resource(meshes).insert_resource(images);
+        app.update();
+        assert!(props(&mut app).is_empty(), "nothing while a model loads");
+        let (lily_model, lily_image) = {
+            let world = app.world_mut();
+            let mut meshes = world.remove_resource::<Assets<Mesh>>().unwrap();
+            let mut images = world.remove_resource::<Assets<Image>>().unwrap();
+            let out = model(&mut meshes, &mut images);
+            world.insert_resource(meshes);
+            world.insert_resource(images);
+            out
+        };
+        app.world_mut()
+            .resource_mut::<ModelLibrary>()
+            .insert_ready(lily_key, lily_model, lily_image);
+        app.update();
+        let first = props(&mut app);
+        let (forest, water): (Vec<_>, Vec<_>) =
+            first.iter().partition(|(n, ..)| n == "Prop forest");
+        assert!(!forest.is_empty(), "forest props");
+        assert!(
+            !water.is_empty() && water.iter().all(|(n, ..)| n == "Prop water"),
+            "water props"
+        );
+        assert!(forest.iter().all(|(_, ns, ..)| !ns), "trees cast shadows");
+        assert!(water.iter().all(|(_, ns, ..)| *ns), "water plants do not");
+        assert!(
+            first
+                .iter()
+                .all(|(_, _, pickable, child)| !pickable && !child),
+            "top level, never pickable"
+        );
+        app.update();
+        assert_eq!(props(&mut app).len(), first.len(), "spawned once");
+    }
 }

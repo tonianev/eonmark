@@ -331,35 +331,67 @@ fn a_valid_visuals_edit_keeps_the_rules_hash() {
 /// Art pass: `visuals.ron` needs a visual for every building kind too.
 #[test]
 fn a_building_without_a_visual_exits_1_naming_visuals_ron() {
+    // The Croft's line as the repository has it (a model since art slice
+    // 3), so the test does not depend on its look.
+    let croft = format!("{}\n", visuals_line("croft"));
     rejects_edit(
         "building-visual-missing",
         "visuals.ron",
-        "    \"croft\": Primitive(Cuboid),\n",
+        &croft,
         "",
         &[r#"buildings["croft"]: "#, "every building kind"],
     );
     rejects_edit(
         "building-visual-sphere",
         "visuals.ron",
-        r#""croft": Primitive(Cuboid)"#,
-        r#""croft": Primitive(Sphere)"#,
+        &croft,
+        "    \"croft\": Primitive(Sphere),\n",
         &[r#"buildings["croft"]: "#, "Primitive(Cuboid)"],
     );
+}
+
+/// The whole line of the repository's `visuals.ron` that maps `id`.
+fn visuals_line(id: &str) -> String {
+    let text = std::fs::read_to_string(repo_data().join("visuals.ron")).unwrap();
+    let key = format!("    \"{id}\": ");
+    text.lines()
+        .find(|l| l.starts_with(&key))
+        .unwrap_or_else(|| panic!("visuals.ron has no line for {id:?}"))
+        .to_string()
+}
+
+/// `text` (a `visuals.ron`) cut after its `buildings` table, every building
+/// the box but the Town, which is `town`: the units as they are, and no
+/// sites, rubble, flags, terrain or swatches, so the only Scene is the
+/// Town's whatever the repository's looks are (art slice 3 made them
+/// models).
+fn only_town_scene(text: &str, town: &str) -> String {
+    let start = text.find("  buildings: {\n").expect("a buildings table");
+    let end = start + text[start..].find("\n  },\n").expect("its end") + "\n  },\n".len();
+    let mut out = text[..start].to_string();
+    out.push_str("  buildings: {\n");
+    for line in text[start..end].lines() {
+        let Some(rest) = line.strip_prefix("    \"") else {
+            continue;
+        };
+        let id = &rest[..rest.find('"').expect("a quoted key")];
+        if id == "town" {
+            out.push_str(&format!("    \"town\": {town},\n"));
+        } else {
+            out.push_str(&format!("    \"{id}\": Primitive(Cuboid),\n"));
+        }
+    }
+    out.push_str("  },\n)\n");
+    out
 }
 
 /// A copy of `data/` whose Town is a Scene naming `models/test/castle.gltf`,
 /// and an empty assets directory beside it.
 fn scene_copy(name: &str) -> (PathBuf, PathBuf) {
     let dir = edited_copy(name, "visuals.ron", |text| {
-        let from = r#""town": Primitive(Cuboid)"#;
-        assert!(
-            text.contains(from),
-            "visuals.ron no longer contains {from:?}"
-        );
-        text.replacen(
-            from,
-            r#""town": Scene(path: "models/test/castle.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, fallback: Some(Primitive(Cuboid)))"#,
-            1,
+        only_town_scene(
+            &text,
+            r#"Scene(path: "models/test/castle.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, fallback: Some(Primitive(Cuboid)))"#,
         )
     });
     let assets = dir.with_file_name(format!(

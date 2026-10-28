@@ -7,7 +7,9 @@
 // its assets check, on a Scene whose file is missing), but not part of
 // rules_hash (ADR 0003, docs/adr/0003-visuals-outside-rules-hash.md): the sim
 // never reads it, so a look edit needs no rules_version bump and no
-// re-record. Nothing the sim reads may go in here.
+// re-record. Nothing the sim reads may go in here. `cargo run -p
+// inspect_gltf --release -- check data assets` measures every Scene below
+// (triangles, ground contact, centre, team share, facing, suggested scale).
 //
 // Primitive(Capsule | Cuboid | Cylinder | Sphere | Cone): one shared mesh
 //     sized from the kind's radius_tiles_x100 (a Capsule 3.4 radii tall,
@@ -17,19 +19,38 @@
 //     two radii). lying (Capsule or Cylinder only) lays the shape along the
 //     unit's facing, height_tiles_x100 long and two radii tall. Not Sphere
 //     (M4b: one silhouette per kind, docs/ART_STYLE.md).
-// The game draws every look low-poly and flat-shaded (crates/game/src/present.rs).
-// Scene(path: "models/x.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0
-//     [, nodes: ["glob*"], parts: [(path: ..., offset_x100: (x, y, z))],
-//     team: Some("swatch key"), fallback: Some(Body(...))]): a glTF model under
-//     assets/ (art pass); the game draws its fallback until models load.
+// The game draws every unit look low-poly and flat-shaded (crates/game/src/present.rs).
+// Scene(path: "models/x.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0
+//     [, x_offset_tiles_x100: 0, z_offset_tiles_x100: 0, nodes: ["glob*"],
+//     parts: [(path: ..., offset_x100: (x, y, z))], team: Some("swatch key"),
+//     fallback: Some(...), banner_at: Some(mount), seat_flag_at: Some(mount)]):
+//     a glTF model under assets/, merged into one mesh (crates/game/src/models.rs),
+//     turned by yaw_deg, scaled, then moved by the three offsets, which
+//     centre an off-centre file and lift a sunk one (the check prints both).
+//     KayKit buildings face +Z (toward the camera) at yaw 0. A unit's
+//     fallback is its look while models load or if one fails (slice 4).
+// mount = (offset_x100: (x, y, z)[, scale_x100: 100, yaw_deg: 0]): where a
+//     banner or the Seat flag stands, from the footprint centre on the
+//     ground; the offset places the flag's centre, its pole stands
+//     0.11 m x scale to its left.
 //
-// buildings: Primitive(Cuboid) is the M3b team-coloured box over the
-//     footprint (crates/game/src/buildings.rs), or a Scene whose fallback is
-//     that box. The art pass (docs/ROADMAP.md, "Art pass (pre-stream)") swaps
-//     them for KayKit models one line at a time. Optional tables, empty or
-//     default here: sites (default [Primitive(Cuboid)], the rising box),
-//     rubble, seat_flag and terrain (props on forest, mountain and water);
-//     team_swatches holds the KayKit Hexagon rects measured in art slice 2.
+// buildings: a Scene with the owner's team swatch, or Primitive(Cuboid), the
+//     M3b team-coloured box over the footprint (also every Scene's fallback).
+//     A one-line swap: `"croft": Primitive(Cuboid),` (docs/ART_STYLE.md).
+//     banner_at (owner decision 12 of the art pass) plants `banner`, the
+//     KayKit flag repainted in team colour, beside the building, sized so
+//     the team share of model plus banner reaches the 100‰ floor where a
+//     banner no taller than the building can (the Town and the Ore Pit are
+//     held for the owner, inspect_gltf::check::PENDING_TEAM_FLOOR); every
+//     banner is one shared mesh with one material per team. seat_flag_at
+//     (Town kinds) puts `seat_flag` on a Seat: on the castle's keep, at
+//     least 1.4x the size of a banner.
+// sites: one look per equal share of the build progress, neutral, scaled by
+//     the footprint side; rubble: the wreck of a destroyed building for
+//     ds deciseconds; terrain: props on forest, mountain and water (never
+//     grass), placed by a tile hash (crates/game/src/terrain_props.rs): a
+//     look only where its footprint stays on its own terrain, and nothing
+//     over 1.6 m south of passable land.
 (
   units: {
     // Upright pill, 1.19 m (radius 0.35 m).
@@ -49,25 +70,65 @@
     // Low box, 1.0 x 0.6 x 1.0 m.
     "supply_wain": Body(shape: Cuboid, height_tiles_x100: 60),
   },
-  // The M3b box for every kind until the art pass's models (slice 3).
+  // Scales fill 0.95 of the footprint side (the check's suggestion);
+  // y_offset 1 lifts each base 1 cm off the ground; the x/z offsets centre
+  // the lumbermill, barracks and blacksmith files.
   buildings: {
-    "town": Primitive(Cuboid),
-    "croft": Primitive(Cuboid),
-    "lumber_yard": Primitive(Cuboid),
-    "ore_pit": Primitive(Cuboid),
-    "scriptorium": Primitive(Cuboid),
-    "muster_hall": Primitive(Cuboid),
-    "watchtower": Primitive(Cuboid),
-    "engine_yard": Primitive(Cuboid),
+    "town": Scene(path: "models/kaykit_hexagon/buildings/blue/building_castle_blue.gltf", scale_x100: 126, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (185, 0, 90), scale_x100: 450)), seat_flag_at: Some((offset_x100: (72, 490, 0), scale_x100: 650))),
+    "croft": Scene(path: "models/kaykit_hexagon/buildings/blue/building_home_A_blue.gltf", scale_x100: 223, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (123, 0, 60), scale_x100: 250))),
+    "lumber_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_lumbermill_blue.gltf", scale_x100: 139, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -19, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (160, 0, 50), scale_x100: 550))),
+    "ore_pit": Scene(path: "models/kaykit_hexagon/buildings/blue/building_mine_blue.gltf", scale_x100: 99, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (129, 0, 60), scale_x100: 350))),
+    "scriptorium": Scene(path: "models/kaykit_hexagon/buildings/blue/building_church_blue.gltf", scale_x100: 247, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (168, 0, 90), scale_x100: 300))),
+    "muster_hall": Scene(path: "models/kaykit_hexagon/buildings/blue/building_barracks_blue.gltf", scale_x100: 182, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -12, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (228, 0, 90), scale_x100: 780))),
+    "watchtower": Scene(path: "models/kaykit_hexagon/buildings/blue/building_tower_A_blue.gltf", scale_x100: 82, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (33, 175, 0), scale_x100: 300))),
+    "engine_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_blacksmith_blue.gltf", scale_x100: 221, y_offset_tiles_x100: 1, yaw_deg: 0, x_offset_tiles_x100: -3, z_offset_tiles_x100: -14, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (187, 0, 80), scale_x100: 350))),
   },
+  // Construction stages A, B, C: a third of the build each.
+  sites: [
+    Scene(path: "models/kaykit_hexagon/buildings/neutral/building_stage_A.gltf", scale_x100: 91, y_offset_tiles_x100: 1, yaw_deg: 0),
+    Scene(path: "models/kaykit_hexagon/buildings/neutral/building_stage_B.gltf", scale_x100: 84, y_offset_tiles_x100: 1, yaw_deg: 0),
+    Scene(path: "models/kaykit_hexagon/buildings/neutral/building_stage_C.gltf", scale_x100: 82, y_offset_tiles_x100: 1, yaw_deg: 0),
+  ],
+  rubble: Some((visual: Scene(path: "models/kaykit_hexagon/buildings/neutral/building_destroyed.gltf", scale_x100: 62, y_offset_tiles_x100: 1, yaw_deg: 0), ds: 300)),
+  // The KayKit flag, centred (its cloth faces +Z after the -90 yaw); one
+  // model for the Seat flag and the banners, so they share one mesh.
+  seat_flag: Some(Scene(path: "models/kaykit_hexagon/decoration/props/flag_blue.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: -90, x_offset_tiles_x100: -11, team: Some("kaykit_hexagon"))),
+  banner: Some(Scene(path: "models/kaykit_hexagon/decoration/props/flag_blue.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: -90, x_offset_tiles_x100: -11, team: Some("kaykit_hexagon"))),
   // Texel rects of a model's base texture that the game repaints in the
   // owner's team colour (art pass). "kaykit_hexagon" is the union of the
   // rects `inspect_gltf swatches` found by diffing KayKit's blue and red
   // variants of every vendored building, the catapult tower and the flag
   // over the shared 1024x1024 hexagons_medieval.png (art slice 2): no
-  // non-team face of any of them samples it. No Scene names it until slice 3.
+  // non-team face of any of them samples it. Every team building, the
+  // banner and the Seat flag name it; the rest of the atlas is desaturated
+  // 20% in their team textures.
   team_swatches: {
     "kaykit_hexagon": (rects: [(17, 787, 91, 207)], desaturate_permille: 200),
   },
-  terrain: {},
+  // Interior looks are KayKit hex patches scaled to overlap their
+  // neighbours; edge looks fit inside one tile. The 190% mountains need
+  // two rings of mountain around them, so they rise in a range's middle.
+  terrain: {
+    "forest": (interior_permille: 1000, edge_permille: 600, jitter_x100: 30, scale_jitter_pct: 10, looks: [
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/trees_A_large.gltf", scale_x100: 130, y_offset_tiles_x100: 2, yaw_deg: 0), at: Interior, weight: 2),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/trees_B_large.gltf", scale_x100: 130, y_offset_tiles_x100: 3, yaw_deg: 0), at: Interior, weight: 2),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/trees_A_medium.gltf", scale_x100: 130, y_offset_tiles_x100: 3, yaw_deg: 0), at: Interior, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/trees_B_medium.gltf", scale_x100: 130, y_offset_tiles_x100: 3, yaw_deg: 0), at: Interior, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/tree_single_A.gltf", scale_x100: 110, y_offset_tiles_x100: 11, yaw_deg: 0), at: Edge, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/tree_single_B.gltf", scale_x100: 100, y_offset_tiles_x100: 10, yaw_deg: 0), at: Edge, weight: 1),
+    ]),
+    "mountain": (interior_permille: 1000, edge_permille: 700, jitter_x100: 30, scale_jitter_pct: 10, looks: [
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/mountain_A.gltf", scale_x100: 110, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/mountain_B.gltf", scale_x100: 110, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/mountain_C.gltf", scale_x100: 110, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/mountain_B.gltf", scale_x100: 190, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 6),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/mountain_C.gltf", scale_x100: 190, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 6),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/rock_single_A.gltf", scale_x100: 200, y_offset_tiles_x100: 0, yaw_deg: 0), at: Edge, weight: 1),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/rock_single_B.gltf", scale_x100: 200, y_offset_tiles_x100: 0, yaw_deg: 0), at: Edge, weight: 1),
+    ]),
+    "water": (interior_permille: 60, edge_permille: 60, jitter_x100: 30, scale_jitter_pct: 10, looks: [
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/waterlily_A.gltf", scale_x100: 300, y_offset_tiles_x100: 0, yaw_deg: 0), at: Any, weight: 1, shadow: false),
+      (visual: Scene(path: "models/kaykit_hexagon/decoration/nature/waterplant_A.gltf", scale_x100: 300, y_offset_tiles_x100: 6, yaw_deg: 0, x_offset_tiles_x100: 7, z_offset_tiles_x100: 4), at: Any, weight: 1, shadow: false),
+    ]),
+  },
 )

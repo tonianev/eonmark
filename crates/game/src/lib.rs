@@ -15,6 +15,13 @@
 //!   (local, replay, scenario), `PendingCommands`, the replay recorder thread.
 //! - [`present`]: `UnitId -> Entity` mirror, interpolation, visuals (M4b:
 //!   one low-poly, flat-shaded look per unit kind and its height).
+//! - [`models`]: the glTF models of `data/visuals.ron`, merged per Scene
+//!   into one placed mesh, their team textures, and the load gate the sim
+//!   waits on (art pass).
+//! - [`buildings`]: buildings as their models (or the M3b box), sites in
+//!   construction stages, rubble, team banners and the Seat flag.
+//! - [`terrain_props`]: trees, rocks and water plants on forest, mountain
+//!   and water tiles, placed once by a tile hash (art pass).
 //! - [`selection`]: picking, click/box/group selection, rings and markers.
 //! - [`orders`]: ground ray-plane hit to `Move` / `Stop` / `AttackMove`,
 //!   the contextual right click (M4b: `Attack` on an enemy) and the
@@ -72,6 +79,7 @@ pub mod hud;
 pub mod macos_menu;
 pub mod markers;
 pub mod menu;
+pub mod models;
 pub mod monitor_loss;
 pub mod orders;
 pub mod outcome;
@@ -81,3 +89,4 @@ pub mod present;
 pub mod render_watchdog;
 pub mod selection;
 pub mod sim_driver;
+pub mod terrain_props;

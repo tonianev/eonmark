@@ -38,9 +38,10 @@ use bevy::transform::TransformSystems;
 use rules::Rules;
 use sim::{BuildingId, PlayerId, SimView, TargetId, Unit, UnitId, UnitKindId};
 
-use crate::buildings::building_transform;
+use crate::buildings::{building_top_y, footprint_centre};
 use crate::camera::RtsCamera;
 use crate::hud::WorldInputSet;
+use crate::models::ModelLibrary;
 use crate::palette;
 use crate::present::{FALLBACK_VISUAL, Interp, UnitEntities, UnitVisuals, look_top_y};
 use crate::selection::Selection;
@@ -228,11 +229,14 @@ impl MaxHpTable {
 
 /// The targets that carry a bar now and what each shows: every unit that
 /// has taken damage or is selected, every building below its kind's hit
-/// points or selected. `top_y` gives the height of a unit kind's look.
+/// points or selected. `top_y` gives the height of a unit kind's look; a
+/// building's bar rides on `buildings::building_top_y` (its model's top
+/// when `models` has it ready, else the M3b box's).
 pub fn bar_specs(
     view: &SimView<'_>,
     rules: &Rules,
     selection: &Selection,
+    models: Option<&ModelLibrary>,
     top_y: impl Fn(UnitKindId) -> f32,
 ) -> BTreeMap<TargetId, BarSpec> {
     let mut table = MaxHpTable::default();
@@ -261,15 +265,17 @@ pub fn bar_specs(
         if hp >= max && selection.building != Some(b.id) {
             continue;
         }
-        // A site's box rises with its progress; the bar rides on top.
-        let t = building_transform(rules, b);
+        // A site's look rises with its progress; the bar rides on top.
+        let top = building_top_y(rules, b, models);
         specs.insert(
             TargetId::Building(b.id),
             BarSpec {
                 owner: b.owner,
                 hp,
                 max,
-                anchor: BarAnchor::Fixed(t.translation + Vec3::Y * (t.scale.y + BUILDING_BAR_GAP)),
+                anchor: BarAnchor::Fixed(
+                    footprint_centre(rules, b) + Vec3::Y * (top + BUILDING_BAR_GAP),
+                ),
             },
         );
     }
@@ -301,10 +307,12 @@ pub struct SyncedFor {
 /// `ChildOf`), update the values of the others (and the fill's material
 /// when an annexation changed the owner), and despawn the pairs of targets
 /// that died or are neither damaged nor selected.
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
 pub fn sync_bar_targets(
     sim: NonSend<SimHandle>,
     selection: Res<Selection>,
     visuals: Res<UnitVisuals>,
+    models: Option<Res<ModelLibrary>>,
     assets: Option<Res<BarAssets>>,
     mut bars: ResMut<HealthBars>,
     mut synced: Local<Option<SyncedFor>>,
@@ -326,7 +334,9 @@ pub fn sync_bar_targets(
     });
     let view = sim.view();
     let rules = sim.rules();
-    let specs = bar_specs(&view, rules, &selection, |k| unit_top_y(&visuals, rules, k));
+    let specs = bar_specs(&view, rules, &selection, models.as_deref(), |k| {
+        unit_top_y(&visuals, rules, k)
+    });
     bars.0.retain(|target, bar| {
         if specs.contains_key(target) {
             true
@@ -1246,7 +1256,7 @@ mod tests {
         let view = sim.view();
         let mut selection = Selection::default();
         selection.set([UnitId(1), UnitId(2)]);
-        let specs = bar_specs(&view, &rules, &selection, |_| 1.0);
+        let specs = bar_specs(&view, &rules, &selection, None, |_| 1.0);
         let own = specs[&TargetId::Unit(UnitId(1))];
         let theirs = specs[&TargetId::Unit(UnitId(2))];
         assert_eq!(

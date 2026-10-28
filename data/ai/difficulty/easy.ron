@@ -1,0 +1,20 @@
+// Easy (M6): a defensive bot for learning the loop. It receives a bonus
+// bundle every 30 s from 3:00 (the first one at 3:30), sends waves only after
+// the Masonry Age and only at its largest wave size (at most 14 armed units),
+// 1.5 times as far apart, and goes all-in from minute 40. No early raid.
+// Disclosed on New Game and on the game-over screen; never rubber-banded.
+// Schema: crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,
+// "Difficulty table".
+(
+  id: "easy", name: "Easy",
+  income_interval_ds: 300,
+  income_from_ds: 1800,
+  income: {"grain": 20, "lumber": 20, "ore": 10},   // the same in all three files
+  wave_age_gate: Age("masonry"),
+  largest_wave_only: true,
+  max_wave_units: Some(14),
+  wave_size_permille: 1000,
+  wave_interval_permille: 1500,
+  all_in_after_ds: Some(24000),                     // 40:00
+  first_raid: None,
+)

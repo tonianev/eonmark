@@ -221,16 +221,30 @@ fn no_unit_gets_the_same_order_twice_in_three_plans() {
 /// header, at tick 1500) issues exactly the commands the running one
 /// issues, and leaves the same memory, on every tick of both seats for
 /// the next 3000 ticks: the bot holds nothing but its hashed memory and
-/// tables computed from immutable inputs.
+/// tables computed from immutable inputs. M6: also for a Hard seat against
+/// an Easy one, whose knobs `rules::ai::resolve` derives from the header
+/// and whose disclosed bonus is paid from tick 4000 (Hard) and 4200
+/// (Easy), inside the compared span.
 #[test]
 fn controller_rebuilt_mid_match_issues_the_same_commands() {
     let r = common::rules();
-    let setup = MatchSetup::bots(&r, 2, ("standard", "standard"), ("standard", "standard"));
-    let (mut m, log) = logged(&setup, &r, None);
+    for seats in [
+        (("standard", "standard"), ("standard", "standard")),
+        (("hard", "standard"), ("easy", "standard")),
+    ] {
+        let setup = MatchSetup::bots(&r, 2, seats.0, seats.1);
+        rebuilt_bot_issues_the_same_commands(&setup, &r);
+    }
+}
+
+/// [`controller_rebuilt_mid_match_issues_the_same_commands`] for one
+/// header.
+fn rebuilt_bot_issues_the_same_commands(setup: &MatchSetup, r: &Rules) {
+    let (mut m, log) = logged(setup, r, None);
     while m.sim.tick() < 1500 {
         m.step();
     }
-    let mut fresh = ai::controller_for(&setup, &r).unwrap();
+    let mut fresh = ai::controller_for(setup, r).unwrap();
     let mut compared = 0;
     while m.sim.tick() < 4500 {
         let at = m.sim.tick();
@@ -255,7 +269,11 @@ fn controller_rebuilt_mid_match_issues_the_same_commands() {
             compared += usize::from(!cmds.is_empty());
         }
     }
-    assert!(compared >= 20, "{compared} non-empty plans compared");
+    assert!(
+        compared >= 20,
+        "{:?}: {compared} non-empty plans compared",
+        setup.ai_seats
+    );
 }
 
 /// `ai::describe` names the window, the latches and the wave.
@@ -725,47 +743,53 @@ fn m5b_defend_outranks_saving_for_an_age() {
 /// Hidden state: restoring a Standard-vs-Standard match at tick 3003 or
 /// 3007 (one in each seat's planning phase) into a fresh `Sim` with
 /// fresh bots from the header matches the uninterrupted run, every
-/// sub-hash, every tick, for the next 3000 ticks.
+/// sub-hash, every tick, for the next 3000 ticks. M6: also a Hard seat
+/// against an Easy one restored at 3003, so the disclosed bonus schedule
+/// (rebuilt from the header) pays on the same ticks after the restore.
 #[test]
 #[ignore = "long: 6000-tick games; CI runs --ignored m5b_"]
 fn m5b_restore_at_3003_and_3007_matches_uninterrupted() {
     let r = common::rules();
     let setup = MatchSetup::bots(&r, 5, ("standard", "standard"), ("standard", "standard"));
-    let games: Vec<Box<dyn FnOnce() -> u32 + Send>> = [3003u32, 3007]
-        .into_iter()
-        .map(|at| {
-            let (setup, r) = (setup.clone(), r.clone());
-            Box::new(move || {
-                let fresh = || {
-                    Sim::new(
-                        setup.clone(),
-                        r.clone(),
-                        ai::controller_for(&setup, &r).unwrap(),
-                    )
-                };
-                let mut a = fresh();
-                while a.tick() < at {
-                    a.step(&[]);
-                }
-                let mut b = fresh();
-                b.restore(&a.snapshot()).unwrap();
-                for _ in 0..3000 {
-                    a.step(&[]);
-                    b.step(&[]);
-                    let (ha, hb) = (a.sub_hashes(), b.sub_hashes());
-                    assert_eq!(
-                        ha.first_difference(&hb),
-                        None,
-                        "restored at {at}, tick {}",
-                        a.tick()
+    let levels = MatchSetup::bots(&r, 5, ("hard", "standard"), ("easy", "standard"));
+    let games: Vec<Box<dyn FnOnce() -> u32 + Send>> =
+        [(&setup, 3003u32), (&setup, 3007), (&levels, 3003)]
+            .into_iter()
+            .map(|(setup, at)| {
+                let (setup, r) = (setup.clone(), r.clone());
+                Box::new(move || {
+                    let fresh = || {
+                        Sim::new(
+                            setup.clone(),
+                            r.clone(),
+                            ai::controller_for(&setup, &r).unwrap(),
+                        )
+                    };
+                    let mut a = fresh();
+                    while a.tick() < at {
+                        a.step(&[]);
+                    }
+                    let mut b = fresh();
+                    b.restore(&a.snapshot()).unwrap();
+                    for _ in 0..3000 {
+                        a.step(&[]);
+                        b.step(&[]);
+                        let (ha, hb) = (a.sub_hashes(), b.sub_hashes());
+                        assert_eq!(
+                            ha.first_difference(&hb),
+                            None,
+                            "restored at {at}, tick {}",
+                            a.tick()
+                        );
+                    }
+                    assert!(
+                        !a.view().ai_memory(P0).is_empty() && !a.view().ai_memory(P1).is_empty()
                     );
-                }
-                assert!(!a.view().ai_memory(P0).is_empty() && !a.view().ai_memory(P1).is_empty());
-                a.tick()
-            }) as Box<_>
-        })
-        .collect();
-    assert_eq!(par(games), [6003, 6007]);
+                    a.tick()
+                }) as Box<_>
+            })
+            .collect();
+    assert_eq!(par(games), [6003, 6007, 6003]);
 }
 
 // ---------------------------------------------------------------------------
@@ -969,10 +993,11 @@ fn m5b_standard_respects_work_caps() {
     let r = common::rules();
     let setup = MatchSetup::bots(&r, 1, ("standard", "standard"), ("standard", "standard"));
     let k = r.ai.personality("standard").unwrap().clone();
+    let level = r.ai.difficulty("standard").unwrap().clone();
     let plans = Arc::new(Mutex::new(Vec::new()));
     let bots = [P0, P1]
         .into_iter()
-        .map(|p| (p, ai::standard::StandardBot::new(&r, &setup, p, &k)))
+        .map(|p| (p, ai::standard::StandardBot::new(&r, &setup, p, &k, &level)))
         .collect();
     let mut m = BotMatch::new(
         setup,

@@ -14,6 +14,12 @@
 //! order that could stall for ever fail here instead of at run time: a
 //! step that cannot be reached from the steps before it must be
 //! `optional`, and an `Advance` never may be.
+//!
+//! M6 adds the difficulty levels, one file per level under
+//! `ai/difficulty/<id>.ron` ([`Difficulty`]): the disclosed bonus bundle
+//! the sim pays a bot seat (the income cheat) and the wave knobs the level
+//! scales, applied to a personality by [`resolve`]. A header's
+//! `AiSeat.bot` names a difficulty id (or `passive`).
 
 use crate::{Error, Rules, UnitClass, load_ron};
 use serde::{Deserialize, Serialize};
@@ -38,6 +44,21 @@ pub const MAX_AI_DS: u32 = 72_000;
 pub const MAX_THINK_EVERY_DS: u32 = 600;
 /// Largest `army_mix` weight and `toward_enemy_penalty`.
 pub const MAX_AI_WEIGHT: u32 = 1000;
+/// Largest amount of one resource in a difficulty's bonus bundle.
+pub const MAX_BONUS_AMOUNT: u32 = 500;
+/// Shortest non-zero bonus interval (`income_interval_ds`, 5 s).
+pub const MIN_INCOME_INTERVAL_DS: u32 = 50;
+/// Smallest difficulty multiplier (`wave_size_permille`,
+/// `wave_interval_permille`).
+pub const MIN_DIFFICULTY_PERMILLE: u32 = 250;
+/// Largest difficulty multiplier.
+pub const MAX_DIFFICULTY_PERMILLE: u32 = 4000;
+/// The bot id of the bot that never acts: reserved, so no difficulty file
+/// may take it.
+pub const PASSIVE_ID: &str = "passive";
+/// The difficulty every tool defaults to (`play-bots`, New Game); its file
+/// must exist.
+pub const STANDARD_DIFFICULTY: &str = "standard";
 
 /// Everything under `data/ai/`, attached to [`crate::Rules::ai`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -47,6 +68,9 @@ pub struct AiRules {
     /// The build orders of `ai/build_orders/*.ron`, keyed by file stem
     /// (which equals each one's `id`).
     pub build_orders: BTreeMap<String, BuildOrder>,
+    /// The difficulty levels of `ai/difficulty/*.ron` (M6), keyed by file
+    /// stem (which equals each one's `id`).
+    pub difficulties: BTreeMap<String, Difficulty>,
 }
 
 impl AiRules {
@@ -59,6 +83,151 @@ impl AiRules {
     pub fn build_order(&self, id: &str) -> Option<&BuildOrder> {
         self.build_orders.get(id)
     }
+
+    /// The difficulty level with the given id, if any (M6).
+    pub fn difficulty(&self, id: &str) -> Option<&Difficulty> {
+        self.difficulties.get(id)
+    }
+}
+
+/// Which age gate a difficulty puts on a personality's waves (M6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaveAgeGate {
+    /// The personality's own `wave_requires_age`.
+    Personality,
+    /// No wave launches before the bot reaches this age (an age id).
+    Age(String),
+    /// No age gate at all.
+    Off,
+}
+
+/// A difficulty's guaranteed early raid (M6, slice 2's behaviour): by
+/// `by_ds` the bot attacks with at least `min_armed` armed units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstRaid {
+    /// The raid launches by this match time (`by_ds` below the match cap).
+    pub by_ds: u32,
+    /// Emergency production toward `min_armed` starts this long before
+    /// `by_ds` (less than `by_ds`).
+    pub prep_ds: u32,
+    /// Armed units the raid needs (at least 1).
+    pub min_armed: u32,
+    /// Most armed units it takes (`min_armed..=MAX_WAVE_UNITS`).
+    pub max_armed: u32,
+}
+
+/// One difficulty level, `data/ai/difficulty/<id>.ron` (M6). Difficulty is
+/// a disclosed cheat plus wave timing: the sim pays a bot seat whose
+/// `AiSeat.bot` names the level the same `income` bundle every
+/// `income_interval_ds`, from `income_from_ds` on (step 6d'), and
+/// [`resolve`] scales the personality's wave knobs. Retreat, counters,
+/// influence and noise are personality knobs, equal at every level (the bot
+/// does not play better on Hard).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Difficulty {
+    /// Equals the file stem; never `passive`.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// The bonus is paid every this many deciseconds; 0 pays nothing.
+    /// Otherwise `MIN_INCOME_INTERVAL_DS..=MAX_AI_DS`, and more than
+    /// `cmd_delay_ticks` in ticks.
+    pub income_interval_ds: u32,
+    /// The first payment completes one interval after this match time
+    /// (below the match cap).
+    pub income_from_ds: u32,
+    /// The bonus bundle per resource id, each `0..=MAX_BONUS_AMOUNT`.
+    pub income: BTreeMap<String, u32>,
+    /// The age gate of the bot's waves.
+    pub wave_age_gate: WaveAgeGate,
+    /// Every wave waits for the personality's largest wave size.
+    pub largest_wave_only: bool,
+    /// Caps every wave (and `max_wave_units`) at this many armed units.
+    pub max_wave_units: Option<u32>,
+    /// Scales every `wave_sizes` row (rounded up, at least 1),
+    /// `MIN_DIFFICULTY_PERMILLE..=MAX_DIFFICULTY_PERMILLE`.
+    pub wave_size_permille: u32,
+    /// Scales `wave_interval_ds` (rounded to nearest), same range.
+    pub wave_interval_permille: u32,
+    /// Replaces the personality's `all_in_after_ds` (`None` keeps it).
+    pub all_in_after_ds: Option<u32>,
+    /// The guaranteed early raid, if any (slice 2 reads it).
+    pub first_raid: Option<FirstRaid>,
+}
+
+impl Difficulty {
+    /// The bonus interval in ticks (0: no bonus).
+    pub fn income_interval_ticks(&self, rules: &Rules) -> u32 {
+        rules.ticks_from_ds(self.income_interval_ds)
+    }
+
+    /// The match time the bonus schedule counts from, in ticks.
+    pub fn income_from_ticks(&self, rules: &Rules) -> u32 {
+        rules.ticks_from_ds(self.income_from_ds)
+    }
+
+    /// The bonus bundle as a dense vector in `resources.ron` order.
+    pub fn bundle(&self, rules: &Rules) -> Vec<i64> {
+        rules.amounts(&self.income)
+    }
+
+    /// Whether the level pays any bonus at all: a non-zero interval and a
+    /// non-empty bundle.
+    pub fn pays(&self) -> bool {
+        self.income_interval_ds > 0 && self.income.values().any(|v| *v > 0)
+    }
+}
+
+/// The knobs a bot of difficulty `d` plays `p` with (M6): a pure function
+/// of the two rows, so a bot rebuilt mid-match resolves the same knobs.
+///
+/// - `max_wave_units` becomes the smaller of `p`'s and `d`'s cap;
+/// - every `wave_sizes[i].armed` is scaled by `wave_size_permille`, rounded
+///   up, at least 1, at most that cap (the rows stay non-decreasing);
+/// - `largest_wave_only` sets every row to the last (largest) row's size;
+/// - `wave_interval_ds` is scaled by `wave_interval_permille`, rounded to
+///   nearest (half up), at least 1 and at most `MAX_AI_DS`;
+/// - the age gate is `d.wave_age_gate`, the all-in time
+///   `d.all_in_after_ds` when set, and `min_siege` at most the cap.
+///
+/// Nothing else changes: retreat, counters, influence and noise are the
+/// personality's at every level.
+pub fn resolve(p: &Personality, d: &Difficulty) -> Personality {
+    let mut out = p.clone();
+    let cap = d
+        .max_wave_units
+        .map_or(p.max_wave_units, |m| m.min(p.max_wave_units))
+        .max(1);
+    out.max_wave_units = cap;
+    for w in &mut out.wave_sizes {
+        let scaled = (u64::from(w.armed) * u64::from(d.wave_size_permille)).div_ceil(1000);
+        let scaled = u32::try_from(scaled).unwrap_or(u32::MAX);
+        w.armed = scaled.clamp(1, cap);
+    }
+    if d.largest_wave_only
+        && let Some(last) = out.wave_sizes.last().map(|w| w.armed)
+    {
+        for w in &mut out.wave_sizes {
+            w.armed = last;
+        }
+    }
+    let interval =
+        (u64::from(p.wave_interval_ds) * u64::from(d.wave_interval_permille) + 500) / 1000;
+    out.wave_interval_ds = u32::try_from(interval)
+        .unwrap_or(MAX_AI_DS)
+        .clamp(1, MAX_AI_DS);
+    out.wave_requires_age = match &d.wave_age_gate {
+        WaveAgeGate::Personality => p.wave_requires_age.clone(),
+        WaveAgeGate::Age(age) => Some(age.clone()),
+        WaveAgeGate::Off => None,
+    };
+    if let Some(ds) = d.all_in_after_ds {
+        out.all_in_after_ds = ds;
+    }
+    out.min_siege = out.min_siege.min(cap);
+    out
 }
 
 /// Contents of `data/ai/personalities.ron`.
@@ -323,6 +492,10 @@ pub struct Personality {
     /// An assaulting wave is recalled when the threatened Town is at or
     /// below this share of its hit points.
     pub recall_wave_town_hp_permille: u32,
+    /// In the pool the `random` personality choice draws from (M6; `false`
+    /// when absent, so the M5b `standard` row stays out of it).
+    #[serde(default)]
+    pub random: bool,
 }
 
 impl Personality {
@@ -345,13 +518,10 @@ pub fn worker_kind(rules: &Rules) -> Option<(u16, &crate::UnitKind)> {
         .map(|(i, u)| (u16::try_from(i).expect("validated len"), u))
 }
 
-/// Load and validate `dir/ai/` against the rest of `rules`: every build
-/// order under `ai/build_orders/` (non-`.ron` files are ignored, files are
-/// read in path order), then `ai/personalities.ron`.
-pub(crate) fn load(dir: &Path, rules: &Rules) -> Result<AiRules, Error> {
-    let orders_dir = dir.join("ai").join("build_orders");
-    let entries = std::fs::read_dir(&orders_dir).map_err(|source| Error::Io {
-        path: orders_dir.clone(),
+/// The `.ron` files of `dir`, in path order (other files are ignored).
+fn ron_files(dir: &Path) -> Result<Vec<PathBuf>, Error> {
+    let entries = std::fs::read_dir(dir).map_err(|source| Error::Io {
+        path: dir.to_path_buf(),
         source,
     })?;
     let mut paths: Vec<PathBuf> = entries
@@ -360,32 +530,185 @@ pub(crate) fn load(dir: &Path, rules: &Rules) -> Result<AiRules, Error> {
         .filter(|p| p.extension().is_some_and(|e| e == "ron"))
         .collect();
     paths.sort();
+    Ok(paths)
+}
+
+/// The file stem of `path`, which a keyed file's `id` must equal.
+fn stem_of(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `id` must equal the file stem of `path`.
+fn check_stem(path: &Path, id: &str) -> Check {
+    let stem = stem_of(path);
+    if id != stem {
+        return Err(Error::invalid(
+            path,
+            "id",
+            format!("{id:?} must equal the file stem {stem:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Load and validate `dir/ai/` against the rest of `rules`: every build
+/// order under `ai/build_orders/` (non-`.ron` files are ignored, files are
+/// read in path order), then `ai/personalities.ron`, then (M6) every
+/// difficulty level under `ai/difficulty/`, which must include
+/// `standard`.
+pub(crate) fn load(dir: &Path, rules: &Rules) -> Result<AiRules, Error> {
     let mut build_orders = BTreeMap::new();
-    for path in paths {
+    for path in ron_files(&dir.join("ai").join("build_orders"))? {
         let order: BuildOrder = load_ron(&path)?;
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if order.id != stem {
-            return Err(Error::invalid(
-                &path,
-                "id",
-                format!("{:?} must equal the file stem {stem:?}", order.id),
-            ));
-        }
+        check_stem(&path, &order.id)?;
         check_build_order(&path, &order, rules)?;
-        build_orders.insert(stem, order);
+        build_orders.insert(stem_of(&path), order);
     }
     let personalities_path = dir.join("ai").join("personalities.ron");
     let file: Personalities = load_ron(&personalities_path)?;
-    let ai = AiRules {
+    let mut ai = AiRules {
         personalities: file.personalities,
         build_orders,
+        difficulties: BTreeMap::new(),
     };
     check_personalities(&personalities_path, &ai, rules)?;
+    let difficulty_dir = dir.join("ai").join("difficulty");
+    for path in ron_files(&difficulty_dir)? {
+        let level: Difficulty = load_ron(&path)?;
+        check_stem(&path, &level.id)?;
+        check_difficulty(&path, &level, rules)?;
+        ai.difficulties.insert(stem_of(&path), level);
+    }
+    if !ai.difficulties.contains_key(STANDARD_DIFFICULTY) {
+        return Err(Error::invalid(
+            &difficulty_dir.join(format!("{STANDARD_DIFFICULTY}.ron")),
+            "id",
+            format!(
+                "no {STANDARD_DIFFICULTY:?} difficulty (found: {}); every tool defaults to it",
+                ai.difficulties
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
     Ok(ai)
+}
+
+/// One difficulty level: identity, the bonus bundle and its schedule, the
+/// multipliers, the age gate and the first raid (M6).
+fn check_difficulty(path: &Path, d: &Difficulty, rules: &Rules) -> Check {
+    if d.id == PASSIVE_ID {
+        return Err(Error::invalid(
+            path,
+            "id",
+            format!("{PASSIVE_ID:?} is reserved for the bot that never acts"),
+        ));
+    }
+    if d.name.is_empty() {
+        return Err(Error::invalid(path, "name", "must not be empty"));
+    }
+    for (resource, amount) in &d.income {
+        let at = format!("income.{resource}");
+        if rules.resource_index(resource).is_none() {
+            return Err(Error::invalid(
+                path,
+                &at,
+                format!("{resource:?} is not a resource id in resources.ron"),
+            ));
+        }
+        in_range(path, &at, *amount, 0, MAX_BONUS_AMOUNT)?;
+    }
+    if d.income_interval_ds != 0 {
+        in_range(
+            path,
+            "income_interval_ds",
+            d.income_interval_ds,
+            MIN_INCOME_INTERVAL_DS,
+            MAX_AI_DS,
+        )?;
+        if d.income_interval_ticks(rules) <= rules.cmd_delay_ticks {
+            return Err(Error::invalid(
+                path,
+                "income_interval_ds",
+                format!(
+                    "{} ticks must be more than cmd_delay_ticks ({}) in rules.ron",
+                    d.income_interval_ticks(rules),
+                    rules.cmd_delay_ticks
+                ),
+            ));
+        }
+    }
+    let below_cap = |field: &str, ds: u32| -> Check {
+        if ds >= rules.match_cap_ds {
+            return Err(Error::invalid(
+                path,
+                field,
+                format!(
+                    "{ds} is not below match_cap_ds ({}) in rules.ron",
+                    rules.match_cap_ds
+                ),
+            ));
+        }
+        Ok(())
+    };
+    below_cap("income_from_ds", d.income_from_ds)?;
+    for (name, v) in [
+        ("wave_size_permille", d.wave_size_permille),
+        ("wave_interval_permille", d.wave_interval_permille),
+    ] {
+        in_range(
+            path,
+            name,
+            v,
+            MIN_DIFFICULTY_PERMILLE,
+            MAX_DIFFICULTY_PERMILLE,
+        )?;
+    }
+    if let Some(n) = d.max_wave_units {
+        in_range(path, "max_wave_units", n, 1, MAX_WAVE_UNITS)?;
+    }
+    if let Some(ds) = d.all_in_after_ds {
+        in_range(path, "all_in_after_ds", ds, 0, MAX_AI_DS)?;
+    }
+    if let WaveAgeGate::Age(age) = &d.wave_age_gate
+        && rules.age_index(age).is_none()
+    {
+        return Err(Error::invalid(
+            path,
+            "wave_age_gate",
+            format!("{age:?} is not an age id in ages.ron"),
+        ));
+    }
+    if let Some(raid) = &d.first_raid {
+        in_range(
+            path,
+            "first_raid.min_armed",
+            raid.min_armed,
+            1,
+            MAX_WAVE_UNITS,
+        )?;
+        in_range(
+            path,
+            "first_raid.max_armed",
+            raid.max_armed,
+            raid.min_armed,
+            MAX_WAVE_UNITS,
+        )?;
+        below_cap("first_raid.by_ds", raid.by_ds)?;
+        if raid.prep_ds >= raid.by_ds {
+            return Err(Error::invalid(
+                path,
+                "first_raid.prep_ds",
+                format!("{} must be less than by_ds ({})", raid.prep_ds, raid.by_ds),
+            ));
+        }
+    }
+    Ok(())
 }
 
 type Check = Result<(), Error>;
@@ -424,6 +747,7 @@ fn check_build_order(path: &Path, order: &BuildOrder, rules: &Rules) -> Check {
     let mut built: BTreeSet<&str> = BTreeSet::from([town.id.as_str()]);
     let mut researched: BTreeSet<&str> = BTreeSet::new();
     let mut towns: u32 = 1;
+    let mut advanced = false;
     for (i, step) in order.steps.iter().enumerate() {
         let field = |name: &str| format!("steps[{i}].{name}");
         let unreachable = |name: &str, why: String| {
@@ -668,6 +992,17 @@ fn check_build_order(path: &Path, order: &BuildOrder, rules: &Rules) -> Check {
                         ),
                     ));
                 }
+                // M6: a difficulty's deadline raid trains armed units before
+                // the first Advance, so a trainer of an armed kind of the
+                // start age must stand by then.
+                if !advanced && !armed_trainer_built(rules, &built, &researched, age) {
+                    return Err(Error::invalid(
+                        path,
+                        &field("age"),
+                        "no earlier non-optional step builds a trainer of an armed kind (such as a Muster Hall); every build order builds one before its first Advance",
+                    ));
+                }
+                advanced = true;
                 age = index;
             }
             Step::Military => {}
@@ -677,6 +1012,26 @@ fn check_build_order(path: &Path, order: &BuildOrder, rules: &Rules) -> Check {
         }
     }
     Ok(())
+}
+
+/// Whether a building kind in `built` trains an armed, non-civilian unit
+/// kind unlocked by `age` whose `requires_tech`, if any, is `researched`.
+fn armed_trainer_built(
+    rules: &Rules,
+    built: &BTreeSet<&str>,
+    researched: &BTreeSet<&str>,
+    age: u8,
+) -> bool {
+    rules.units.iter().enumerate().any(|(i, u)| {
+        let index = u16::try_from(i).expect("validated len");
+        u.class != UnitClass::Civilian
+            && u.attack.is_some()
+            && built.contains(u.trainer.as_str())
+            && rules.age_of_unit(index) <= age
+            && u.requires_tech
+                .as_ref()
+                .is_none_or(|t| researched.contains(t.as_str()))
+    })
 }
 
 /// The personality rows: ids, build orders, ranges and cross-checks.
@@ -956,6 +1311,8 @@ mod tests {
 
     const BO: &str = "ai/build_orders/standard.ron";
     const PE: &str = "ai/personalities.ron";
+    const EASY: &str = "ai/difficulty/easy.ron";
+    const HARD: &str = "ai/difficulty/hard.ron";
 
     #[test]
     fn repo_ai_data_loads_one_personality_and_one_build_order() {
@@ -985,7 +1342,9 @@ mod tests {
         assert!(rules.ai.personality("rush").is_none());
     }
 
-    /// `data/ai` is in `rules_hash`: a knob edit changes the hash.
+    /// `data/ai` is in `rules_hash`: a knob edit changes the hash, and so
+    /// (M6) does a difficulty edit, the line-4 flip's one-line edit of
+    /// `hard.ron` included.
     #[test]
     fn ai_data_is_in_the_rules_hash() {
         let repo = Rules::load(data_dir()).unwrap();
@@ -994,6 +1353,148 @@ mod tests {
         let mut cleared = repo.clone();
         cleared.ai = AiRules::default();
         assert_ne!(repo.rules_hash(), cleared.rules_hash());
+        let flipped = load_edited(
+            "hash-flip",
+            &[(HARD, "income_interval_ds: 200,", "income_interval_ds: 300,")],
+        )
+        .unwrap();
+        assert_ne!(repo.rules_hash(), flipped.rules_hash());
+        assert_eq!(
+            flipped.ai.difficulty("hard").unwrap().income_interval_ds,
+            300
+        );
+        let mut no_levels = repo.clone();
+        no_levels.ai.difficulties.remove("easy");
+        assert_ne!(repo.rules_hash(), no_levels.rules_hash());
+    }
+
+    /// M6: the three shipped levels, their schedules and the knobs they
+    /// scale. The bundle is the same at every level, so the interval alone
+    /// sizes the cheat.
+    #[test]
+    fn repo_difficulties_are_easy_standard_hard() {
+        let rules = Rules::load(data_dir()).unwrap();
+        assert_eq!(
+            rules
+                .ai
+                .difficulties
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["easy", "hard", "standard"]
+        );
+        let level = |id: &str| rules.ai.difficulty(id).unwrap();
+        let (easy, standard, hard) = (level("easy"), level("standard"), level("hard"));
+        assert_eq!(
+            [easy, standard, hard].map(|d| d.income_interval_ticks(&rules)),
+            [600, 500, 400]
+        );
+        // From 3:00; the first payment completes one interval later.
+        for d in [easy, standard, hard] {
+            assert_eq!(d.income_from_ticks(&rules), 3600);
+            assert!(d.pays());
+            assert_eq!(d.bundle(&rules), standard.bundle(&rules));
+        }
+        let bundle = standard.bundle(&rules);
+        let grain = rules.resource_index("grain").unwrap();
+        let lore = rules.resource_index("lore").unwrap();
+        assert_eq!(bundle[grain], 20);
+        assert_eq!(bundle[lore], 0);
+        assert_eq!(easy.wave_age_gate, WaveAgeGate::Age("masonry".into()));
+        assert_eq!(standard.wave_age_gate, WaveAgeGate::Personality);
+        assert_eq!(hard.wave_age_gate, WaveAgeGate::Off);
+        assert!(easy.largest_wave_only && easy.first_raid.is_none());
+        assert_eq!(hard.first_raid.map(|r| r.by_ds), Some(6000));
+        assert_eq!(standard.first_raid.map(|r| r.by_ds), Some(9000));
+        assert!(rules.ai.difficulty("passive").is_none());
+    }
+
+    /// M6: `resolve` scales the wave sizes once (rounded up, at least 1,
+    /// capped), the interval (rounded to nearest), sets the age gate and
+    /// the all-in time, and `largest_wave_only` flattens the rows; it
+    /// leaves every other knob alone. Standard resolves to the
+    /// personality itself.
+    #[test]
+    fn resolve_scales_sizes_and_intervals_once_and_caps_largest_only() {
+        let rules = Rules::load(data_dir()).unwrap();
+        let p = rules.ai.personality("standard").unwrap();
+        let level = |id: &str| rules.ai.difficulty(id).unwrap();
+        assert_eq!(&resolve(p, level("standard")), p);
+        let sizes = |k: &Personality| k.wave_sizes.iter().map(|w| w.armed).collect::<Vec<_>>();
+        let easy = resolve(p, level("easy"));
+        assert_eq!(sizes(&easy), [14, 14, 14, 14]);
+        assert_eq!(easy.max_wave_units, 14);
+        assert_eq!(easy.wave_interval_ds, 2700);
+        assert_eq!(easy.wave_requires_age.as_deref(), Some("masonry"));
+        assert_eq!(easy.all_in_after_ds, 24000);
+        let hard = resolve(p, level("hard"));
+        assert_eq!(sizes(&hard), sizes(p));
+        assert_eq!(hard.wave_interval_ds, 1620);
+        assert_eq!(hard.wave_requires_age, None);
+        assert_eq!(hard.all_in_after_ds, p.all_in_after_ds);
+        // Rounding: sizes up, at least 1, under the cap; the interval to
+        // nearest, half up.
+        let mut d = level("standard").clone();
+        d.wave_size_permille = 250;
+        d.wave_interval_permille = 333;
+        d.max_wave_units = Some(3);
+        let mut q = p.clone();
+        q.wave_sizes[0].armed = 1;
+        q.wave_interval_ds = 1500;
+        q.min_siege = 5;
+        let r = resolve(&q, &d);
+        assert_eq!(
+            sizes(&r),
+            [1, 3, 3, 3],
+            "1 -> 1, 12 -> 3, 16 -> 4 capped, 24 -> 6 capped"
+        );
+        assert_eq!(r.wave_interval_ds, 500, "1500 x 333 / 1000 = 499.5 -> 500");
+        assert_eq!((r.max_wave_units, r.min_siege), (3, 3));
+        // Nothing else moves.
+        let mut same = r.clone();
+        same.wave_sizes = q.wave_sizes.clone();
+        same.wave_interval_ds = q.wave_interval_ds;
+        same.max_wave_units = q.max_wave_units;
+        same.min_siege = q.min_siege;
+        assert_eq!(same, q);
+    }
+
+    /// M6: `passive` is reserved for the bot that never acts, a `standard`
+    /// level must exist, and non-`.ron` files under `ai/difficulty/` are
+    /// ignored.
+    #[test]
+    fn difficulty_files_reserve_passive_and_require_standard() {
+        let dir = std::env::temp_dir().join(format!(
+            "eonmark-ai-rules-difficulty-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(&data_dir(), &dir);
+        let levels = dir.join("ai").join("difficulty");
+        std::fs::write(levels.join("NOTES.md"), "not a level").unwrap();
+        assert_eq!(Rules::load(&dir).unwrap().ai.difficulties.len(), 3);
+        let hard = std::fs::read_to_string(levels.join("hard.ron")).unwrap();
+        std::fs::write(
+            levels.join("passive.ron"),
+            hard.replacen("id: \"hard\"", "id: \"passive\"", 1),
+        )
+        .unwrap();
+        let err = Rules::load(&dir).unwrap_err().to_string();
+        assert!(
+            err.contains("passive.ron") && err.contains("reserved"),
+            "{err}"
+        );
+        std::fs::remove_file(levels.join("passive.ron")).unwrap();
+        std::fs::remove_file(levels.join("standard.ron")).unwrap();
+        let err = Rules::load(&dir).unwrap_err().to_string();
+        assert!(
+            err.contains("standard.ron") && err.contains("no \"standard\" difficulty"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&levels).unwrap();
+        let err = Rules::load(&dir).unwrap_err().to_string();
+        assert!(err.contains("difficulty"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Non-`.ron` files under `ai/build_orders/` are ignored, and a second
@@ -1466,6 +1967,131 @@ mod tests {
                 "p-recall",
                 &[(PE, "recall_wave: WhileStaging", "recall_wave: Sometimes")],
                 &["personalities.ron", "Sometimes"],
+            ),
+            // M6: a trainer of an armed kind before the first Advance.
+            (
+                "armed-trainer",
+                &[(
+                    BO,
+                    "Build(kind: \"muster_hall\", count: 1, at: NearTown)",
+                    "Build(kind: \"muster_hall\", count: 1, at: NearTown, optional: true)",
+                )],
+                &["standard.ron", "steps[18].age", "trainer of an armed kind"],
+            ),
+            // M6: difficulty levels.
+            (
+                "d-id",
+                &[(HARD, "id: \"hard\"", "id: \"harder\"")],
+                &["hard.ron", "id", "file stem"],
+            ),
+            (
+                "d-name",
+                &[(HARD, "name: \"Hard\"", "name: \"\"")],
+                &["hard.ron", "name", "empty"],
+            ),
+            (
+                "d-income-id",
+                &[(HARD, "\"ore\": 10", "\"iron\": 10")],
+                &["hard.ron", "income.iron", "resource id"],
+            ),
+            (
+                "d-income-max",
+                &[(HARD, "\"grain\": 20", "\"grain\": 501")],
+                &["hard.ron", "income.grain", "0..=500"],
+            ),
+            (
+                "d-interval-short",
+                &[(HARD, "income_interval_ds: 200,", "income_interval_ds: 49,")],
+                &["hard.ron", "income_interval_ds", "50..=72000"],
+            ),
+            (
+                "d-interval-long",
+                &[(
+                    HARD,
+                    "income_interval_ds: 200,",
+                    "income_interval_ds: 72001,",
+                )],
+                &["hard.ron", "income_interval_ds", "50..=72000"],
+            ),
+            (
+                "d-from",
+                &[(HARD, "income_from_ds: 1800,", "income_from_ds: 27000,")],
+                &["hard.ron", "income_from_ds", "match_cap_ds"],
+            ),
+            (
+                "d-size-permille",
+                &[(
+                    HARD,
+                    "wave_size_permille: 1000,",
+                    "wave_size_permille: 249,",
+                )],
+                &["hard.ron", "wave_size_permille", "250..=4000"],
+            ),
+            (
+                "d-interval-permille",
+                &[(
+                    HARD,
+                    "wave_interval_permille: 900,",
+                    "wave_interval_permille: 4001,",
+                )],
+                &["hard.ron", "wave_interval_permille", "250..=4000"],
+            ),
+            (
+                "d-max-units",
+                &[(
+                    EASY,
+                    "max_wave_units: Some(14),",
+                    "max_wave_units: Some(65),",
+                )],
+                &["easy.ron", "max_wave_units", "1..=64"],
+            ),
+            (
+                "d-all-in",
+                &[(
+                    EASY,
+                    "all_in_after_ds: Some(24000),",
+                    "all_in_after_ds: Some(72001),",
+                )],
+                &["easy.ron", "all_in_after_ds", "0..=72000"],
+            ),
+            (
+                "d-age",
+                &[(EASY, "Age(\"masonry\")", "Age(\"bronze\")")],
+                &["easy.ron", "wave_age_gate", "age id"],
+            ),
+            (
+                "d-gate",
+                &[(HARD, "wave_age_gate: Off,", "wave_age_gate: Never,")],
+                &["hard.ron", "Never"],
+            ),
+            (
+                "d-raid-min",
+                &[(HARD, "min_armed: 6,", "min_armed: 0,")],
+                &["hard.ron", "first_raid.min_armed", "1..=64"],
+            ),
+            (
+                "d-raid-max",
+                &[(HARD, "max_armed: 10)", "max_armed: 5)")],
+                &["hard.ron", "first_raid.max_armed", "6..=64"],
+            ),
+            (
+                "d-raid-by",
+                &[(HARD, "by_ds: 6000,", "by_ds: 27000,")],
+                &["hard.ron", "first_raid.by_ds", "match_cap_ds"],
+            ),
+            (
+                "d-raid-prep",
+                &[(HARD, "prep_ds: 1500,", "prep_ds: 6000,")],
+                &["hard.ron", "first_raid.prep_ds", "less than by_ds"],
+            ),
+            (
+                "d-unknown-field",
+                &[(
+                    HARD,
+                    "largest_wave_only: false,",
+                    "largest_wave_only: false, cheat: true,",
+                )],
+                &["hard.ron", "cheat"],
             ),
         ];
         for (name, edits, words) in cases {

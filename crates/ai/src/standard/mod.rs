@@ -35,16 +35,20 @@ pub use facts::Facts;
 pub use memory::{BotMemory, BotStats, stats};
 pub use sites::MapAnalysis;
 
-use rules::{Personality, Rules};
+use rules::{Difficulty, FirstRaid, Personality, Rules};
 use sim::{AiController, AiMemory, Command, MatchSetup, PlayerId, SimView};
 
 /// The Standard bot of one seat. Its only state besides the hashed memory
-/// is the [`MapAnalysis`], a pure function of immutable inputs, so a bot
-/// rebuilt mid-match decides exactly as the one it replaces.
+/// is the [`MapAnalysis`] and (M6) the knobs and first raid resolved from
+/// its personality and difficulty, all pure functions of immutable inputs
+/// (the rules and the header), so a bot rebuilt mid-match decides exactly
+/// as the one it replaces.
 #[derive(Debug, Clone)]
 pub struct StandardBot {
     player: PlayerId,
-    personality: String,
+    difficulty: String,
+    knobs: Personality,
+    first_raid: Option<FirstRaid>,
     map: MapAnalysis,
 }
 
@@ -56,18 +60,23 @@ pub fn phase(me: PlayerId, every: u32, setup: &MatchSetup) -> u32 {
 }
 
 impl StandardBot {
-    /// The bot for seat `player` with `personality` (a row of
-    /// `rules.ai`).
+    /// The bot for seat `player` with `personality` (a row of `rules.ai`)
+    /// at `difficulty` (M6): it plays `rules::ai::resolve(personality,
+    /// difficulty)`, which is the personality itself for `standard`.
     pub fn new(
         rules: &Rules,
         setup: &MatchSetup,
         player: PlayerId,
         personality: &Personality,
+        difficulty: &Difficulty,
     ) -> StandardBot {
+        let knobs = rules::ai::resolve(personality, difficulty);
         StandardBot {
             player,
-            personality: personality.id.clone(),
-            map: MapAnalysis::new(rules, setup, player, personality),
+            difficulty: difficulty.id.clone(),
+            map: MapAnalysis::new(rules, setup, player, &knobs),
+            knobs,
+            first_raid: difficulty.first_raid,
         }
     }
 
@@ -76,22 +85,26 @@ impl StandardBot {
         self.player
     }
 
+    /// The difficulty id the bot plays at.
+    pub fn difficulty(&self) -> &str {
+        &self.difficulty
+    }
+
     /// The bot's static map analysis.
     pub fn map(&self) -> &MapAnalysis {
         &self.map
     }
 
-    /// The personality's knobs, looked up in the rules the sim runs on.
-    ///
-    /// # Panics
-    ///
-    /// If the rules have no such personality (`ai::controller_for` checks
-    /// it before building the bot).
-    pub fn knobs<'r>(&self, rules: &'r Rules) -> &'r Personality {
-        rules
-            .ai
-            .personality(&self.personality)
-            .expect("controller_for checked the personality")
+    /// The knobs the bot plays: its personality resolved for its
+    /// difficulty (`rules::ai::resolve`).
+    pub fn knobs(&self) -> &Personality {
+        &self.knobs
+    }
+
+    /// The difficulty's guaranteed early raid (M6; slice 2's behaviour
+    /// reads it).
+    pub fn first_raid(&self) -> Option<FirstRaid> {
+        self.first_raid
     }
 
     /// One plan, whatever the tick: the pipeline over a fresh [`Ctx`],
@@ -109,9 +122,8 @@ impl StandardBot {
         view: &SimView<'_>,
         memory: &mut AiMemory,
     ) -> (Vec<Command>, PlanStats) {
-        let knobs = self.knobs(view.rules());
         let mut mem = BotMemory::decode(memory.bytes());
-        let mut ctx = Ctx::new(*view, me, knobs, &self.map);
+        let mut ctx = Ctx::new(*view, me, &self.knobs, &self.map);
         run_rules(&mut ctx, &mut mem);
         let bytes = mem.encode();
         if bytes != memory.bytes() {
@@ -135,10 +147,7 @@ impl StandardBot {
         if view.outcome().is_some() {
             return (Vec::new(), None);
         }
-        let every = self
-            .knobs(view.rules())
-            .think_every_ticks(view.rules())
-            .max(1);
+        let every = self.knobs.think_every_ticks(view.rules()).max(1);
         if view.tick % every != phase(me, every, view.setup()) {
             return (Vec::new(), None);
         }

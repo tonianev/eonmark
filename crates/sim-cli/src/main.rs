@@ -3,12 +3,15 @@
 //! Runs on any OS without a GPU. M0 implemented `selftest`, `data-check` and
 //! the scripted `hash-dump`; M1 adds `verify`, `bench`, `fuzz`, `record` and
 //! the replay form of `hash-dump`; M5b adds `play-bots` and builds every
-//! replay's bots from its header (`ai::controller_for`).
+//! replay's bots from its header (`ai::controller_for`); M6 adds
+//! `match-log`, the difficulty ids and the personality pairing of
+//! `play-bots`, and `bench --bots --bot/--personality`.
 //!
 //! Wall-clock timing (`std::time::Instant`) is allowed here and banned in
 //! `sim`, `rules` and `ai`: this crate measures the sim, it is not part of it.
 #![forbid(unsafe_code)]
 
+mod match_log;
 mod play_bots;
 mod scenarios;
 
@@ -117,6 +120,12 @@ enum Cmd {
         /// against a Passive control run.
         #[arg(long, conflicts_with_all = ["astar", "territory", "combat"])]
         bots: bool,
+        /// With --bots (M6): the bot id of both seats (a difficulty id).
+        #[arg(long, requires = "bots", default_value = ai::BOT_STANDARD)]
+        bot: String,
+        /// With --bots (M6): the personality of both seats.
+        #[arg(long, requires = "bots", default_value = "standard")]
+        personality: String,
         /// Border sources placed before the timed edits (--territory).
         #[arg(long, default_value_t = 16)]
         sources: u32,
@@ -183,6 +192,20 @@ enum Cmd {
     /// game (M5b): exit 1 when a game ends without a winner (unless
     /// --allow-undecided) or panics, 2 on usage, rules or bot-id errors.
     PlayBots(play_bots::PlayBotsArgs),
+    /// Re-simulate a replay with its header's bots (verifying every
+    /// recorded hash) and print its docs/PLAYTEST.md match-log row, a
+    /// statistics table and the verify line (M6). Exit codes as `verify`.
+    MatchLog {
+        /// Replay file (.eonreplay).
+        replay: PathBuf,
+        /// The Date cell (`just match-log` passes today's date).
+        #[arg(long, default_value = "")]
+        date: String,
+        /// The Commit cell (`just match-log` passes `git rev-parse --short
+        /// HEAD`; the header's `git_sha` is empty).
+        #[arg(long, default_value = "")]
+        commit: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -223,8 +246,10 @@ fn main() -> ExitCode {
             units,
             ticks,
             seed,
+            bot,
+            personality,
             ..
-        } => bench_bots(&cli.data, units, ticks, seed),
+        } => bench_bots(&cli.data, units, ticks, seed, &bot, &personality),
         Cmd::Bench {
             territory: true,
             sources,
@@ -270,6 +295,41 @@ fn main() -> ExitCode {
             slow_ms,
         ),
         Cmd::PlayBots(args) => play_bots::run(&cli.data, &args),
+        Cmd::MatchLog {
+            replay,
+            date,
+            commit,
+        } => match_log_cmd(&cli.data, &replay, &date, &commit),
+    }
+}
+
+/// `sim-cli match-log` (M6): the row, the table and the verify line; exit
+/// 0 on OK, verify's codes otherwise.
+fn match_log_cmd(data: &Path, replay: &Path, date: &str, commit: &str) -> ExitCode {
+    warn_if_truncated(replay);
+    match match_log::collect(replay, data) {
+        Ok(Ok(log)) => {
+            let name = replay
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            println!("{}", log.row(date, commit, &name));
+            println!();
+            for line in log.table() {
+                println!("{line}");
+            }
+            println!();
+            println!("{}", log.outcome);
+            ExitCode::from(log.outcome.exit_code())
+        }
+        Ok(Err(outcome)) => {
+            println!("{outcome}");
+            ExitCode::from(outcome.exit_code())
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(EXIT_ERROR)
+        }
     }
 }
 
@@ -357,7 +417,7 @@ fn data_check(dir: &Path, assets: Option<&Path>) -> ExitCode {
     match loaded {
         Ok((r, models)) => {
             println!(
-                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} side_techs={} factions={} personalities={} build_orders={} maps={} strings=en visuals=units:{} buildings:{} terrain:{} models={models}{}",
+                "OK rules_version={} rules_hash=0x{:016x} resources={} units={} buildings={} ages={} techs={} side_techs={} factions={} personalities={} build_orders={} difficulties={} maps={} strings=en visuals=units:{} buildings:{} terrain:{} models={models}{}",
                 r.rules_version,
                 r.rules_hash(),
                 r.resources.resources.len(),
@@ -369,6 +429,7 @@ fn data_check(dir: &Path, assets: Option<&Path>) -> ExitCode {
                 r.factions.len(),
                 r.ai.personalities.len(),
                 r.ai.build_orders.len(),
+                r.ai.difficulties.len(),
                 r.maps.keys().cloned().collect::<Vec<_>>().join(","),
                 r.visuals.units.len(),
                 r.visuals.buildings.len(),
@@ -1356,6 +1417,10 @@ struct BotsBench {
     defends: u32,
     /// Seats defending at the end.
     engaged: u32,
+    /// Raids launched, both seats (M6; slice 2's raids).
+    raids: u32,
+    /// Waves called home by the retreat rule, both seats (M6; slice 2).
+    retreats: u32,
     /// Commands rejected, both seats.
     rejected: u32,
     /// The most outstanding path requests after any step.
@@ -1364,15 +1429,23 @@ struct BotsBench {
     final_hash: u64,
 }
 
-/// Run [`scenarios::bots_bench`] for `ticks` ticks with the Standard bots,
-/// timing every `think` and every step, then the same stream with Passive
-/// seats for the control step time.
-fn run_bots_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> BotsBench {
-    let (setup, stream) = scenarios::bots_bench(rules, units, seed, true);
+/// Run [`scenarios::bots_bench`] for `ticks` ticks with the Standard bots
+/// at `bot` (a difficulty id) with `personality` in both seats, timing
+/// every `think` and every step, then the same stream with Passive seats
+/// for the control step time.
+fn run_bots_bench(
+    rules: &Rules,
+    units: u16,
+    ticks: u32,
+    seed: u64,
+    bot: &str,
+    personality: &str,
+) -> BotsBench {
+    let (setup, stream) = scenarios::bots_bench(rules, units, seed, Some((bot, personality)));
     let every = rules
         .ai
-        .personality("standard")
-        .expect("the standard personality")
+        .personality(personality)
+        .expect("bench_bots checked the personality")
         .think_every_ticks(rules)
         .max(1);
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1392,6 +1465,8 @@ fn run_bots_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> BotsBench
         waves_launched: 0,
         defends: 0,
         engaged: 0,
+        raids: 0,
+        retreats: 0,
         rejected: 0,
         path_queue_max: 0,
         final_hash: 0,
@@ -1427,9 +1502,11 @@ fn run_bots_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> BotsBench
         b.waves_launched += u32::from(s.waves_launched);
         b.defends += u32::from(s.defends);
         b.engaged += u32::from(s.defending);
+        b.raids += u32::from(s.raids);
+        b.retreats += u32::from(s.retreats);
     }
     b.final_hash = sim.hash();
-    let (setup, stream) = scenarios::bots_bench(rules, units, seed, false);
+    let (setup, stream) = scenarios::bots_bench(rules, units, seed, None);
     let mut control = scenarios::build(&setup, rules);
     for t in 0..ticks {
         let cmds = sim::scenarios::commands_at(&stream, t);
@@ -1443,12 +1520,21 @@ fn run_bots_bench(rules: &Rules, units: u16, ticks: u32, seed: u64) -> BotsBench
 }
 
 /// The `bench --bots` report, one line per entry.
-fn bots_bench_report(b: &BotsBench, units: u16, ticks: u32, seed: u64) -> Vec<String> {
+fn bots_bench_report(
+    b: &BotsBench,
+    units: u16,
+    ticks: u32,
+    seed: u64,
+    bot: &str,
+    personality: &str,
+) -> Vec<String> {
     let (ai_mean, ai_p95, ai_max) = stats_ms(&b.ai_ms);
     let (mean, p95, max) = stats_ms(&b.step_ms);
     let (control, _, _) = stats_ms(&b.control_step_ms);
     vec![
-        format!("bench bots units={units} ticks={ticks} seed={seed}"),
+        format!(
+            "bench bots units={units} ticks={ticks} seed={seed} bot={bot} personality={personality}"
+        ),
         format!(
             "ai_ms mean={ai_mean:.4} p95={ai_p95:.4} max={ai_max:.4} plans={} plan_ms_max={:.4} commands={}",
             b.plans, b.plan_ms_max, b.commands
@@ -1456,8 +1542,15 @@ fn bots_bench_report(b: &BotsBench, units: u16, ticks: u32, seed: u64) -> Vec<St
         format!("step_ms mean={mean:.3} p95={p95:.3} max={max:.3}"),
         format!("control_step_ms mean={control:.3}"),
         format!(
-            "waves_launched={} defends={} engaged={} rejected={} path_queue_max={} final_hash=0x{:016x}",
-            b.waves_launched, b.defends, b.engaged, b.rejected, b.path_queue_max, b.final_hash
+            "waves_launched={} defends={} engaged={} raids={} retreats={} rejected={} path_queue_max={} final_hash=0x{:016x}",
+            b.waves_launched,
+            b.defends,
+            b.engaged,
+            b.raids,
+            b.retreats,
+            b.rejected,
+            b.path_queue_max,
+            b.final_hash
         ),
     ]
 }
@@ -1470,13 +1563,29 @@ fn bots_bench_report(b: &BotsBench, units: u16, ticks: u32, seed: u64) -> Vec<St
 /// [`BOTS_MIN_PLANS`] plans, [`BOTS_MIN_WAVES`] waves or
 /// [`BOTS_MIN_DEFENDS`] defences), never on the timing budget, like the
 /// other benches.
-fn bench_bots(data: &Path, units: u16, ticks: u32, seed: u64) -> ExitCode {
+fn bench_bots(
+    data: &Path,
+    units: u16,
+    ticks: u32,
+    seed: u64,
+    bot: &str,
+    personality: &str,
+) -> ExitCode {
     let rules = match load_rules(data) {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let b = run_bots_bench(&rules, units, ticks, seed);
-    for line in bots_bench_report(&b, units, ticks, seed) {
+    let seats = MatchSetup::bots(&rules, seed, (bot, personality), (bot, personality));
+    if bot == ai::BOT_PASSIVE {
+        eprintln!("bench bots: --bot must be a difficulty id, not passive");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    if let Err(e) = ai::controller_for(&seats, &rules) {
+        eprintln!("bench bots: {e}");
+        return ExitCode::from(EXIT_ERROR);
+    }
+    let b = run_bots_bench(&rules, units, ticks, seed, bot, personality);
+    for line in bots_bench_report(&b, units, ticks, seed, bot, personality) {
         println!("{line}");
     }
     if b.plans < BOTS_MIN_PLANS
@@ -2133,6 +2242,46 @@ mod tests {
         for other in ["--astar", "--territory", "--combat"] {
             assert!(Cli::try_parse_from(["sim-cli", "bench", "--bots", other]).is_err());
         }
+        // M6: --bot and --personality default to M5b's standard/standard
+        // and need --bots.
+        let cli = Cli::try_parse_from([
+            "sim-cli",
+            "bench",
+            "--bots",
+            "--bot",
+            "hard",
+            "--personality",
+            "rush",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Bench {
+                bot, personality, ..
+            } => assert_eq!((bot.as_str(), personality.as_str()), ("hard", "rush")),
+            _ => panic!("bench"),
+        }
+        let cli = Cli::try_parse_from(["sim-cli", "bench", "--bots"]).unwrap();
+        match cli.cmd {
+            Cmd::Bench {
+                bot, personality, ..
+            } => assert_eq!(
+                (bot.as_str(), personality.as_str()),
+                ("standard", "standard")
+            ),
+            _ => panic!("bench"),
+        }
+        assert!(Cli::try_parse_from(["sim-cli", "bench", "--bot", "hard"]).is_err());
+        let cli = Cli::try_parse_from([
+            "sim-cli",
+            "match-log",
+            "x.eonreplay",
+            "--date",
+            "2026-10-28",
+            "--commit",
+            "abc",
+        ])
+        .unwrap();
+        assert!(matches!(cli.cmd, Cmd::MatchLog { .. }));
     }
 
     /// `bench --bots` at its acceptance size for 60 ticks: 200 units a
@@ -2144,7 +2293,7 @@ mod tests {
     #[test]
     fn bench_bots_reports_ai_time_and_exercises_waves() {
         let rules = load_rules(&data()).unwrap();
-        let (setup, stream) = scenarios::bots_bench(&rules, 400, 1, true);
+        let (setup, stream) = scenarios::bots_bench(&rules, 400, 1, Some(("standard", "standard")));
         let mut sim = scenarios::build(&setup, &rules);
         sim.step(sim::scenarios::commands_at(&stream, 0));
         for _ in 0..setup.cmd_delay {
@@ -2154,16 +2303,19 @@ mod tests {
         for p in [PlayerId(0), PlayerId(1)] {
             assert_eq!(view.units().filter(|u| u.owner == p).count(), 200, "{p:?}");
         }
-        let b = run_bots_bench(&rules, 400, 60, 1);
+        let b = run_bots_bench(&rules, 400, 60, 1, "standard", "standard");
         assert_eq!((b.step_ms.len(), b.control_step_ms.len()), (60, 60));
         assert_eq!(b.ai_ms.len(), 60);
         assert_eq!(b.plans, 12, "every 10 ticks, two seats");
         assert!(b.commands > 0);
         assert_eq!((b.waves_launched, b.engaged), (0, 2));
-        assert_eq!(run_bots_bench(&rules, 400, 60, 1).final_hash, b.final_hash);
-        let report = bots_bench_report(&b, 400, 60, 1);
+        assert_eq!(
+            run_bots_bench(&rules, 400, 60, 1, "standard", "standard").final_hash,
+            b.final_hash
+        );
+        let report = bots_bench_report(&b, 400, 60, 1, "standard", "standard");
         let prefixes = [
-            "bench bots units=400 ticks=60 seed=1",
+            "bench bots units=400 ticks=60 seed=1 bot=standard personality=standard",
             "ai_ms mean=",
             "step_ms mean=",
             "control_step_ms mean=",
@@ -2175,7 +2327,19 @@ mod tests {
         }
         assert!(report[1].contains(" plans=12 ") && report[1].contains(" plan_ms_max="));
         assert!(report[4].contains(" path_queue_max=") && report[4].contains(" final_hash=0x"));
-        assert_eq!(bench_bots(&data(), 400, 60, 1), ExitCode::FAILURE);
+        assert!(report[4].contains(" raids=0 retreats=0 "));
+        assert_eq!(
+            bench_bots(&data(), 400, 60, 1, "standard", "standard"),
+            ExitCode::FAILURE
+        );
+        // M6: an unknown bot or personality, or passive, is a usage error.
+        for (bot, personality) in [("nightmare", "standard"), ("hard", "zerg"), ("passive", "")] {
+            assert_eq!(
+                bench_bots(&data(), 400, 60, 1, bot, personality),
+                ExitCode::from(EXIT_ERROR),
+                "{bot} {personality}"
+            );
+        }
     }
 
     #[test]

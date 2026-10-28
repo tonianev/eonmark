@@ -1,0 +1,19 @@
+// Standard (M6): the fun-gate opponent and the New Game default. The bot
+// receives a bonus bundle every 25 s from 3:00 (the first one at 3:25) and
+// plays its personality's wave timing. Disclosed on New Game and on the
+// game-over screen; never rubber-banded. _ds deciseconds, _permille per mille.
+// Schema: crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,
+// "Difficulty table".
+(
+  id: "standard", name: "Standard",
+  income_interval_ds: 250,                          // Easy 300, Hard 200; 0 = no bonus
+  income_from_ds: 1800,                             // payments complete at 3:00 + n intervals
+  income: {"grain": 20, "lumber": 20, "ore": 10},   // the same in all three files
+  wave_age_gate: Personality,                       // Personality | Age("masonry") | Off
+  largest_wave_only: false,
+  max_wave_units: None,
+  wave_size_permille: 1000,
+  wave_interval_permille: 1000,
+  all_in_after_ds: None,                            // None keeps the personality's
+  first_raid: Some((by_ds: 9000, prep_ds: 1500, min_armed: 6, max_armed: 12)),
+)

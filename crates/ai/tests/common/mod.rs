@@ -96,13 +96,12 @@ impl Arena {
             .iter()
             .map(|slot| {
                 let seat = setup.ai_seats.iter().find(|s| s.player == slot.id)?;
-                (seat.bot == ai::BOT_STANDARD).then(|| {
-                    let knobs = rules
-                        .ai
-                        .personality(&seat.personality)
-                        .expect("personality");
-                    StandardBot::new(&rules, &setup, slot.id, knobs)
-                })
+                let difficulty = rules.ai.difficulty(&seat.bot)?;
+                let knobs = rules
+                    .ai
+                    .personality(&seat.personality)
+                    .expect("personality");
+                Some(StandardBot::new(&rules, &setup, slot.id, knobs, difficulty))
             })
             .collect();
         let memories = vec![AiMemory::default(); setup.players.len()];
@@ -169,7 +168,7 @@ impl Arena {
     /// A live plan context for `me` at the current tick.
     pub fn ctx(&self, me: PlayerId) -> Ctx<'_> {
         let view = self.sim.view();
-        let knobs = self.bot(me).knobs(view.rules());
+        let knobs = self.bot(me).knobs();
         Ctx::new(view, me, knobs, self.bot(me).map())
     }
 

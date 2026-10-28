@@ -48,7 +48,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub use ages::{Age, Ages, Unlocks};
-pub use ai::{AiRules, BuildOrder, MixEntry, Personality, Placement, RecallWave, Step, WaveSize};
+pub use ai::{
+    AiRules, BuildOrder, Difficulty, FirstRaid, MixEntry, Personality, Placement, RecallWave, Step,
+    WaveAgeGate, WaveSize,
+};
 pub use attack::{Attack, Prefer};
 pub use buildings::{BuildingKind, Buildings, GatherSpec, Slots};
 pub use factions::{Faction, Factions};

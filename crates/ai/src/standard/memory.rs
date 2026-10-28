@@ -81,7 +81,8 @@ pub struct Defend {
     pub since: u32,
 }
 
-/// The counts `sim-cli bench --bots` reads from a player's memory.
+/// The counts `sim-cli bench --bots`, the play-bots CSV and the game-over
+/// screen read from a player's memory (`ai::bot_stats`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BotStats {
     /// Waves launched.
@@ -90,6 +91,12 @@ pub struct BotStats {
     pub defends: u16,
     /// Whether a defence is running now.
     pub defending: bool,
+    /// Raids launched (M6; 0 until slice 2's raids write the memory).
+    pub raids: u16,
+    /// Waves called home by the retreat rule (M6; 0 until slice 2).
+    pub retreats: u16,
+    /// Waves that ended below `recall_below_units` (M6; 0 until slice 2).
+    pub wiped: u16,
 }
 
 impl BotMemory {
@@ -123,6 +130,7 @@ pub fn stats(bytes: &[u8]) -> BotStats {
         waves_launched: m.waves_launched,
         defends: m.defends,
         defending: m.defend.is_some(),
+        ..BotStats::default()
     }
 }
 
@@ -164,7 +172,8 @@ mod tests {
             BotStats {
                 waves_launched: 1,
                 defends: 2,
-                defending: true
+                defending: true,
+                ..BotStats::default()
             }
         );
         assert_eq!(stats(&[]), BotStats::default());

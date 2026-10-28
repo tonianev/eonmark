@@ -1,0 +1,19 @@
+// Hard (M6). The bot receives a bonus bundle every 20 s from 3:00 (the first
+// one at 3:20) and attacks before minute 12: no Masonry gate on its waves,
+// 0.9 times the wave interval, and a raid by 10:00. Disclosed on New Game and
+// on the game-over screen; never rubber-banded. Schema:
+// crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,
+// "Difficulty table" (the line-4 flip edits income_interval_ds 200 -> 300).
+(
+  id: "hard", name: "Hard",
+  income_interval_ds: 200,
+  income_from_ds: 1800,
+  income: {"grain": 20, "lumber": 20, "ore": 10},   // the same in all three files
+  wave_age_gate: Off,
+  largest_wave_only: false,
+  max_wave_units: None,
+  wave_size_permille: 1000,
+  wave_interval_permille: 900,
+  all_in_after_ds: None,
+  first_raid: Some((by_ds: 6000, prep_ds: 1500, min_armed: 6, max_armed: 10)),
+)

@@ -442,10 +442,12 @@ pub fn run(cli: &Cli) -> AppExit {
         crate::terrain_props::TerrainPropsPlugin,
     ));
     // M5a: the attrition indicator, supply ring, annexation timer and
-    // readout, and the outcome overlay over the frozen world.
+    // readout, and the outcome overlay over the frozen world. Art pass:
+    // arrows, stones and melee lunges for every hit (presentation only).
     app.add_plugins((
         crate::markers::MarkersPlugin,
         crate::outcome::OutcomeOverlayPlugin,
+        crate::combat_fx::CombatFxPlugin,
     ));
 
     // Art pass AP6 (owner decision 7): the minimap bottom-left over the

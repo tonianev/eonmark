@@ -108,6 +108,12 @@ pub const ANNEX_TRACK: Color = Color::srgba(0.227, 0.227, 0.247, 0.8);
 /// over the frozen world.
 pub const OUTCOME_SCRIM: Color = Color::srgba(0.16, 0.18, 0.20, 0.80);
 
+/// Arrows in flight (art pass hit feedback, unlit): the dark neutral
+/// (#3A3A3F, `docs/ART_STYLE.md`, "Neutral and fog"), a streak, not a glow.
+pub const ARROW: Color = Color::srgb(0.227, 0.227, 0.247);
+/// Mangonel stones in flight (unlit): Ore (#6E6A72, `docs/ART_STYLE.md`).
+pub const STONE_SHOT: Color = Color::srgb(0.431, 0.416, 0.447);
+
 /// The minimap's terrain layer (art pass): each tile's ground colour
 /// scaled to this share of its value, so territory, buildings and units
 /// stand out on it.

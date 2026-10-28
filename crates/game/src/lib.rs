@@ -49,6 +49,8 @@
 //! - [`draw_stats`]: the draw-call counter (art pass), rebuilt from Bevy's
 //!   public render-phase data in the render world; the dev panel row and
 //!   the `draws` and `triangles` exit lines (`--draw-stats`, `dev`).
+//! - [`combat_fx`]: hit feedback (art pass): arrows, Mangonel stones and
+//!   melee lunges from `SimEvent::Hit`, presentation only.
 //! - [`markers`]: the attrition indicator under bleeding units, the supply
 //!   ring around a selected Supply Wain, the annexation timer around a
 //!   contested Town and the annexation readout (M5a).
@@ -70,6 +72,7 @@ pub mod buildings;
 pub mod camera;
 pub mod cli;
 pub mod click_check;
+pub mod combat_fx;
 pub mod command_card;
 #[cfg(feature = "dev")]
 pub mod dev_tools;

@@ -947,9 +947,10 @@ mod tests {
         app
     }
 
-    /// Art pass, decision 11: every selection ring is the one shared ring
-    /// mesh with the one unlit material, and every attrition diamond the
-    /// one diamond mesh and material; none casts a shadow or is pickable.
+    /// Art pass (its plan's decision 11, rings and diamonds as shared
+    /// meshes): every selection ring is the one shared ring mesh with the
+    /// one unlit material, and every attrition diamond the one diamond
+    /// mesh and material; none casts a shadow or is pickable.
     #[test]
     fn rings_and_diamonds_are_one_mesh_and_one_material_each() {
         use crate::selection::{RingMesh, SelectionRing};

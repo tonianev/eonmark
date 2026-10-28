@@ -11,7 +11,8 @@
 //! by `UnitId`, never children of unit entities, so unit transforms stay
 //! flat and a despawned unit never drags a child with it.
 //!
-//! Since the art pass (decision 11) a selection ring is one shared flat
+//! Since the art pass (its plan's decision 11, rings and diamonds as shared
+//! meshes) a selection ring is one shared flat
 //! annulus mesh ([`ring_mesh`], [`RingMesh`]) with one unlit material and
 //! no shadow, so every ring on screen is one draw call: a retained gizmo is
 //! drawn on its own (`docs/IMPLEMENTER_NOTES.md`, "Retained gizmos cost one
@@ -273,7 +274,8 @@ pub struct RingAssets {
 pub const ATTACK_CROSS_HALF: f32 = 0.6;
 
 /// The one mesh and the one material every selection ring is drawn with
-/// (art pass, decision 11): a unit annulus ([`ring_mesh`]) and an unlit
+/// (the art-pass plan's decision 11, rings and diamonds as shared meshes):
+/// a unit annulus ([`ring_mesh`]) and an unlit
 /// `palette::SELECTION_RING`, so all rings are one bin, one draw.
 #[derive(Resource, Debug, Clone)]
 pub struct RingMesh {

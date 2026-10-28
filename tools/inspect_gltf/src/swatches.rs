@@ -1,7 +1,8 @@
 //! `swatches <blue> <red> [<blue> <red> ...]`: KayKit ships each building
 //! in team colours that differ only in texture coordinates over one atlas.
 //! For each pair this asserts identical geometry (positions after node
-//! transforms, bit for bit, and indices), finds the faces whose texture
+//! transforms within [`POSITION_TOLERANCE`], counting the vertices that
+//! differ by float noise, and indices exactly), finds the faces whose texture
 //! coordinates differ (the team faces), and prints the texel rects of the
 //! blue file's texture they sample. Over all pairs it prints the union of
 //! the rects for `visuals.ron`'s `team_swatches` and checks that no

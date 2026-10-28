@@ -180,7 +180,7 @@ The pre-stream art pass ([ROADMAP.md](ROADMAP.md), "Art pass (pre-stream)") vend
 
 ### Budgets (measured in art slice 2)
 
-`inspect_gltf check data assets` (CI's check job) holds every Scene in `data/visuals.ron` to these limits; they were set from `inspect_gltf inspect` on every chosen source, each a little above the heaviest file it covers.
+`inspect_gltf check data assets` (CI's check job) holds every Scene in `data/visuals.ron` to these limits. The file, texture and triangle limits were set from `inspect_gltf inspect` on every chosen source, each a little above the heaviest file it covers. The team-area floors were not measured: they are the plan's (its section 3.4), and most chosen buildings fall under them (below the table). Each `ok` line also prints `facing=`, the horizontal side with the most surface and its share (a hint for the rest-facing rule: units face +X after `yaw_deg`, buildings, sites and rubble +Z toward the camera; props print `-`); a share near 25% means no side dominates, and the 40 m screenshots decide.
 
 | Limit | Value | Heaviest measured |
 |---|---|---|
@@ -195,6 +195,25 @@ The pre-stream art pass ([ROADMAP.md](ROADMAP.md), "Art pass (pre-stream)") vend
 | Team area | units 200‰, the Wain 80‰, buildings 100‰, the Seat flag 300‰ | Hexagon buildings 5‰ (mine) to 280‰ (church); flag 457‰ |
 
 The team area is the share of a model's surface whose faces sample its `team_swatches` rects. KayKit Hexagon's team texels are one rect of the shared atlas, `(17, 787, 91, 207)`, found by `inspect_gltf swatches` over the blue and red variants of every vendored building, the catapult tower and the flag; no non-team face samples it, and no neutral model (stages, rubble, nature, cart props) does either.
+
+**The chosen models against the team floors** (a trial `check` with the building mapping of the art-pass plan, every building `team: Some("kaykit_hexagon")`, slice 2):
+
+| Use | Model | Team area | Floor |
+|---|---|---|---|
+| town | `building_castle_blue` | 67‰ | 100‰, under |
+| lumber_yard | `building_lumbermill_blue` | 64‰ | 100‰, under |
+| ore_pit | `building_mine_blue` | 5‰ | 100‰, under |
+| muster_hall | `building_barracks_blue` | 84‰ | 100‰, under |
+| watchtower | `building_tower_A_blue` | 81‰ | 100‰, under |
+| engine_yard | `building_blacksmith_blue` | 91‰ | 100‰, under |
+| croft | `building_home_A_blue` | 258‰ | 100‰, passes |
+| scriptorium | `building_church_blue` | 280‰ | 100‰, passes |
+| mangonel (unit) | `building_tower_catapult_blue`, catapult nodes | about 25‰ | 200‰, under |
+| Seat flag | `flag_blue` | 457‰ | 300‰, passes |
+
+The rect cannot be widened: it is already every texel that differs between KayKit's blue and red variants, so these buildings simply carry little team surface. Until the owner chooses (ROADMAP "Art pass (pre-stream)", Notes), slice 3 cannot write those six buildings or the Mangonel as team Scenes and still have `check` print `ok` (AP3). The options: lower the building floor (and the Mangonel's) to the measured values; take a different model where the pack has one; or one of the plan's risk-17 levers, such as a `base_disc` (a shared team-coloured disc under the model, one mesh and one material per team).
+
+`inspect_gltf palette <file> [--grid 16]` prints the base texture's cell grid: each used cell's texel rect, mean colour and the nodes whose faces sample it. It is how a character's `team_swatches` rects are picked (art slice 4), since the Adventurers characters ship in one colour and have no red variant for `swatches` to diff.
 
 ## Screenshot sign-off checklist
 

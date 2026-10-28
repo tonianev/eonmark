@@ -58,7 +58,7 @@ pub use resources::{Resource, Resources};
 pub use techs::{Tech, Techs};
 pub use units::{Counter, Defender, UnitClass, UnitKind, UnitRamp, Units};
 pub use visuals::{
-    DecorAt, DecorLook, Part, Primitive, Rubble, TeamSwatch, TerrainDecor, Visual, Visuals,
+    DecorAt, DecorLook, Mount, Part, Primitive, Rubble, TeamSwatch, TerrainDecor, Visual, Visuals,
 };
 
 /// The time unit every income rate is authored in: per 30 s, in

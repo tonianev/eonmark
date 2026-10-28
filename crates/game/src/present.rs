@@ -64,7 +64,7 @@ pub const SPHERE_SUBDIVISIONS: u32 = 1;
 pub const MAX_LOOK_VERTICES: usize = 600;
 
 /// What [`body_mesh`] draws for a `Visual::Scene` without a `fallback`
-/// until the art pass loads glTF models, and for a kind with no visual.
+/// until the art pass draws unit models (slice 4), and for a kind with no visual.
 pub const FALLBACK_VISUAL: Visual = Visual::Primitive(Primitive::Capsule);
 
 /// `StandardMaterial::perceptual_roughness` for every unit (`docs/ART_STYLE.md`: matte).
@@ -154,7 +154,8 @@ pub struct UnitVisuals {
 impl UnitVisuals {
     /// The mesh for `kind`, built by [`body_mesh`] from its `Visual` and
     /// `radius_tiles_x100`. A `Visual::Scene` draws its `fallback` (else
-    /// [`FALLBACK_VISUAL`]) until the art pass loads models. Also caches the
+    /// [`FALLBACK_VISUAL`]) until the art pass draws unit models (slice 4;
+    /// buildings are models since slice 3). Also caches the
     /// look's height for [`UnitVisuals::top_y`].
     pub fn mesh(&mut self, kind: u16, rules: &Rules, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         if let Some(mesh) = self.meshes.get(&kind) {
@@ -271,7 +272,7 @@ impl Look {
     /// `Primitive` sizes the shape from the radius (a capsule 3.4 radii
     /// tall, everything else 2), `Body` takes its own height, and `Scene`
     /// is its `fallback` (a `Primitive` or a `Body`, `rules::Visuals`
-    /// checks), else [`FALLBACK_VISUAL`], until the art pass loads models.
+    /// checks), else [`FALLBACK_VISUAL`], until unit models (art slice 4).
     pub fn of(visual: &Visual, radius: f32) -> Look {
         let diameter = 2.0 * radius;
         match visual {
@@ -645,10 +646,14 @@ mod tests {
             scale_x100: 100,
             y_offset_tiles_x100: 0,
             yaw_deg: 0,
+            x_offset_tiles_x100: 0,
+            z_offset_tiles_x100: 0,
             nodes: Vec::new(),
             parts: Vec::new(),
             team: None,
             fallback: fallback.map(Box::new),
+            banner_at: None,
+            seat_flag_at: None,
         }
     }
 

@@ -289,10 +289,14 @@ mod tests {
             scale_x100: 100,
             y_offset_tiles_x100: 0,
             yaw_deg: 0,
+            x_offset_tiles_x100: 0,
+            z_offset_tiles_x100: 0,
             nodes: Vec::new(),
             parts: Vec::new(),
             team: None,
             fallback: Some(Box::new(Visual::Primitive(Primitive::Cuboid))),
+            banner_at: None,
+            seat_flag_at: None,
         };
         rules.visuals.buildings.insert("town".into(), scene.clone());
         assert_eq!(rules.building_visual(town), Some(&scene));

@@ -9,13 +9,20 @@
 //! with triangles, bytes, top, size, team share and the facing it finds
 //! ([`facing`]), plus a suggested `scale_x100` for a building's footprint
 //! or a unit's look height.
+//!
+//! Art slice 3 (owner decision 12): a building's team share is measured on
+//! the model plus its team banner (`banner_at`, the `banner` model placed
+//! at its data scale), and the line prints the banner's height (and on a
+//! Town the Seat flag's). A banner may not stand taller than its building,
+//! and the Seat flag must stand at least 1.4x taller than the Town's
+//! banner, so the two read apart.
 
 use crate::bake::rig_key;
 use crate::image::Rgba;
 use crate::math::{Mat4, Vec3, cross, sub, triangle_area};
 use crate::model::{Model, bounds};
 use crate::uv::{Cover, Mask, Rect, face_rect};
-use rules::visuals::{DecorAt, Part, Primitive, Visual, Visuals};
+use rules::visuals::{DecorAt, Mount, Part, Primitive, Visual, Visuals};
 use rules::{BuildingKind, UnitKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -63,7 +70,21 @@ pub struct Budgets {
     pub building_team_permille: u32,
     /// Least team share of the Seat flag, permille.
     pub flag_team_permille: u32,
+    /// Building kinds whose team share stays under the floor with a banner
+    /// of readable size, held for the owner (art-pass owner decision 12:
+    /// a banner is never inflated past its building's height or into an
+    /// absurd size at 40 m to pass the floor). `check` prints a `PENDING`
+    /// line with the measured share for each instead of failing, and fails
+    /// if a listed kind passes, so the list cannot go stale.
+    pub pending_team_floor: &'static [&'static str],
 }
+
+/// The building kinds held for the owner in [`Budgets::default`]'s
+/// `pending_team_floor` (art slice 3, measured on model plus banner): the
+/// Ore Pit's mine is almost all rock (5‰), and even a banner as tall as
+/// the mine (1.13 m) lifts it to 31‰; the Town's castle (67‰) would need
+/// a banner about 2.8 m tall with a cloth as wide as the castle.
+pub const PENDING_TEAM_FLOOR: &[&str] = &["ore_pit", "town"];
 
 impl Default for Budgets {
     /// The caps set in art slice 2 from the measured sources
@@ -100,6 +121,7 @@ impl Default for Budgets {
             wain_team_permille: 80,
             building_team_permille: 100,
             flag_team_permille: 300,
+            pending_team_floor: PENDING_TEAM_FLOOR,
         }
     }
 }
@@ -112,18 +134,22 @@ enum Use<'a> {
     Site,
     Rubble,
     Flag,
+    /// The team banner model (owner decision 12 of the art pass).
+    Banner,
     Prop(DecorAt),
 }
 
 struct SceneRef<'a> {
     path: &'a str,
     scale_x100: u32,
-    y_offset_x100: i32,
+    offset_x100: (i32, i32, i32),
     yaw_deg: i32,
     nodes: &'a [String],
     parts: &'a [Part],
     team: Option<&'a str>,
     fallback: Option<&'a Visual>,
+    banner_at: Option<&'a Mount>,
+    seat_flag_at: Option<&'a Mount>,
 }
 
 fn scene_ref(v: &Visual) -> Option<SceneRef<'_>> {
@@ -133,19 +159,29 @@ fn scene_ref(v: &Visual) -> Option<SceneRef<'_>> {
             scale_x100,
             y_offset_tiles_x100,
             yaw_deg,
+            x_offset_tiles_x100,
+            z_offset_tiles_x100,
             nodes,
             parts,
             team,
             fallback,
+            banner_at,
+            seat_flag_at,
         } => Some(SceneRef {
             path,
             scale_x100: *scale_x100,
-            y_offset_x100: *y_offset_tiles_x100,
+            offset_x100: (
+                *x_offset_tiles_x100,
+                *y_offset_tiles_x100,
+                *z_offset_tiles_x100,
+            ),
             yaw_deg: *yaw_deg,
             nodes,
             parts,
             team: team.as_deref(),
             fallback: fallback.as_deref(),
+            banner_at: banner_at.as_ref(),
+            seat_flag_at: seat_flag_at.as_ref(),
         }),
         _ => None,
     }
@@ -160,11 +196,23 @@ struct Placed {
     problems: Vec<String>,
 }
 
-/// `T(0, lift) * S(scale) * R(yaw)`: the game's placement of a Scene.
+/// `T(x, lift, z) * S(scale) * R(yaw)`: the game's placement of a Scene
+/// (`crates/game/src/models.rs`, `scene_transform`).
 fn scene_matrix(s: &SceneRef) -> Mat4 {
-    Mat4::translation([0.0, s.y_offset_x100 as f32 / 100.0, 0.0])
+    let (x, y, z) = s.offset_x100;
+    Mat4::translation([x as f32 / 100.0, y as f32 / 100.0, z as f32 / 100.0])
         .mul(&Mat4::scale(s.scale_x100 as f32 / 100.0))
         .mul(&Mat4::yaw_deg(s.yaw_deg))
+}
+
+/// `T(offset) * R(yaw) * S(scale)`: a banner or the Seat flag on its
+/// building, from the footprint centre on the ground (the game's
+/// `buildings::mount_transform`).
+fn mount_matrix(m: &Mount) -> Mat4 {
+    let (x, y, z) = m.offset_x100;
+    Mat4::translation([x as f32 / 100.0, y as f32 / 100.0, z as f32 / 100.0])
+        .mul(&Mat4::yaw_deg(m.yaw_deg))
+        .mul(&Mat4::scale(m.scale_x100 as f32 / 100.0))
 }
 
 /// `T(offset) * R(yaw) * S(scale)`: a part in its scene's model space.
@@ -175,7 +223,8 @@ fn part_matrix(p: &Part) -> Mat4 {
         .mul(&Mat4::scale(p.scale_x100 as f32 / 100.0))
 }
 
-fn place(s: &SceneRef, assets: &Path, budgets: &Budgets) -> Placed {
+/// Load and merge the Scene `s`, placed by `outer * scene_matrix(s)`.
+fn place(s: &SceneRef, assets: &Path, budgets: &Budgets, outer: &Mat4) -> Placed {
     let mut placed = Placed {
         tris: Vec::new(),
         texture: None,
@@ -183,7 +232,7 @@ fn place(s: &SceneRef, assets: &Path, budgets: &Budgets) -> Placed {
         rig: String::new(),
         problems: Vec::new(),
     };
-    let scene = scene_matrix(s);
+    let scene = outer.mul(&scene_matrix(s));
     let mut sources: Vec<(&str, &[String], Mat4)> = vec![(s.path, s.nodes, Mat4::IDENTITY)];
     for p in s.parts {
         sources.push((&p.path, &p.nodes, part_matrix(p)));
@@ -334,6 +383,56 @@ pub fn facing(tris: &[([Vec3; 3], [[f32; 2]; 3])]) -> Option<(&'static str, u32)
     Some((NAMES[best], (100.0 * area[best] / total).round() as u32))
 }
 
+/// The team and whole surface of a placed model's faces against the
+/// swatch `key`, and how many faces straddle a rect edge.
+struct Surface {
+    team: f64,
+    straddles: usize,
+}
+
+/// Measure `faces` (texel rect and area of each triangle) of a model whose
+/// base texture is `tex` against `team_swatches[key]`: an unknown key or a
+/// rect outside the texture is a problem.
+fn swatch_surface(
+    faces: &[(Rect, f32)],
+    tex: &Rgba,
+    key: &str,
+    visuals: &Visuals,
+) -> Result<Surface, String> {
+    let Some(swatch) = visuals.team_swatches.get(key) else {
+        return Err(format!("team {key:?} is not a key of team_swatches"));
+    };
+    let rects: Vec<Rect> = swatch
+        .rects
+        .iter()
+        .map(|&(x, y, w, h)| Rect { x, y, w, h })
+        .collect();
+    if let Some(r) = rects
+        .iter()
+        .find(|r| r.x + r.w > tex.width || r.y + r.h > tex.height)
+    {
+        return Err(format!(
+            "team_swatches[{key:?}] rect {r} lies outside the {}x{} texture",
+            tex.width, tex.height
+        ));
+    }
+    let mask = Mask::from_rects(tex.width, tex.height, &rects);
+    let (mut team, mut straddles) = (0.0f64, 0);
+    for (r, a) in faces {
+        match mask.cover(r) {
+            Cover::Inside => team += f64::from(*a),
+            Cover::Straddles => straddles += 1,
+            Cover::Outside => {}
+        }
+    }
+    Ok(Surface { team, straddles })
+}
+
+/// Height of placed triangles (top minus base), metres; 0 for none.
+fn height(tris: &[([Vec3; 3], [[f32; 2]; 3])]) -> f32 {
+    bounds(tris.iter().flat_map(|(p, _)| p.iter())).map_or(0.0, |(lo, hi)| hi[1] - lo[1])
+}
+
 /// The nominal height of a unit's Primitive or Body look, metres.
 fn look_height(v: &Visual, kind: &UnitKind) -> Option<f32> {
     let r = kind.radius_tiles_x100 as f32 / 100.0;
@@ -360,6 +459,8 @@ pub struct CheckReport {
     pub lines: Vec<String>,
     /// Every problem found.
     pub problems: Vec<String>,
+    /// Shortfalls held for the owner ([`Budgets::pending_team_floor`]).
+    pub pending: Vec<String>,
     /// Scenes checked.
     pub scenes: usize,
 }
@@ -371,8 +472,14 @@ impl CheckReport {
         if !out.is_empty() {
             out.push('\n');
         }
-        if self.problems.is_empty() {
+        if self.problems.is_empty() && self.pending.is_empty() {
             out.push_str(&format!("check: ok {} scene(s)\n", self.scenes));
+        } else if self.problems.is_empty() {
+            out.push_str(&format!(
+                "check: ok {} scene(s), {} held for the owner\n",
+                self.scenes,
+                self.pending.len()
+            ));
         } else {
             out.push_str(&format!(
                 "check: FAIL {} problem(s) in {} scene(s)\n",
@@ -423,6 +530,9 @@ pub fn check_visuals(
     if let Some(f) = &visuals.seat_flag {
         entries.push(("seat_flag".into(), Use::Flag, f));
     }
+    if let Some(b) = &visuals.banner {
+        entries.push(("banner".into(), Use::Banner, b));
+    }
     for (key, decor) in &visuals.terrain {
         for (i, look) in decor.looks.iter().enumerate() {
             entries.push((
@@ -439,7 +549,7 @@ pub fn check_visuals(
     for (field, usage, visual) in entries {
         let Some(s) = scene_ref(visual) else { continue };
         report.scenes += 1;
-        let placed = place(&s, assets, budgets);
+        let placed = place(&s, assets, budgets, &Mat4::IDENTITY);
         let mut problems = placed.problems.clone();
         let mut notes = Vec::new();
         all_files.extend(placed.files.keys().cloned());
@@ -448,7 +558,7 @@ pub fn check_visuals(
             Use::Unit(_) => budgets.unit_triangles,
             Use::Building(_) => budgets.building_triangles,
             Use::Site | Use::Rubble => budgets.site_triangles,
-            Use::Flag => budgets.flag_triangles,
+            Use::Flag | Use::Banner => budgets.flag_triangles,
             Use::Prop(DecorAt::Interior) => budgets.interior_prop_triangles,
             Use::Prop(_) => budgets.edge_prop_triangles,
         };
@@ -484,7 +594,7 @@ pub fn check_visuals(
         }
         let mut texture_desc = "none".to_string();
         let mut faces = Vec::new();
-        let mut team_permille = None;
+        let mut model_team: Option<f64> = None;
         if let Some((tex, name, _)) = &placed.texture {
             texture_desc = format!("{}x{}", tex.width, tex.height);
             let base = Path::new(name)
@@ -508,54 +618,152 @@ pub fn check_visuals(
                 ));
             }
             if let Some(key) = s.team {
-                match visuals.team_swatches.get(key) {
-                    None => problems.push(format!("team {key:?} is not a key of team_swatches")),
-                    Some(swatch) => {
-                        let rects: Vec<Rect> = swatch
-                            .rects
-                            .iter()
-                            .map(|&(x, y, w, h)| Rect { x, y, w, h })
-                            .collect();
-                        if let Some(r) = rects
-                            .iter()
-                            .find(|r| r.x + r.w > tex.width || r.y + r.h > tex.height)
-                        {
-                            problems.push(format!("team_swatches[{key:?}] rect {r} lies outside the {texture_desc} texture"));
-                        }
-                        let mask = Mask::from_rects(tex.width, tex.height, &rects);
-                        let (mut team_area, mut area, mut straddles) = (0.0f64, 0.0f64, 0);
-                        for (r, a) in &faces {
-                            area += f64::from(*a);
-                            match mask.cover(r) {
-                                Cover::Inside => team_area += f64::from(*a),
-                                Cover::Straddles => straddles += 1,
-                                Cover::Outside => {}
-                            }
-                        }
-                        let permille = if area > 0.0 {
-                            (1000.0 * team_area / area).round() as u32
-                        } else {
-                            0
-                        };
-                        team_permille = Some(permille);
-                        let floor = match usage {
-                            Use::Unit(k) if k.id == "supply_wain" => budgets.wain_team_permille,
-                            Use::Unit(_) => budgets.unit_team_permille,
-                            Use::Building(_) => budgets.building_team_permille,
-                            Use::Flag => budgets.flag_team_permille,
-                            _ => 0,
-                        };
-                        if permille < floor {
-                            problems
-                                .push(format!("team area {permille}‰ is under the {floor}‰ floor"));
-                        }
-                        if straddles > 0 {
+                match swatch_surface(&faces, tex, key, visuals) {
+                    Err(p) => problems.push(p),
+                    Ok(surface) => {
+                        if surface.straddles > 0 {
                             problems.push(format!(
-                                "{straddles} face(s) straddle a team rect edge, so the repaint would split them (reserved-rect rule)"
+                                "{} face(s) straddle a team rect edge, so the repaint would split them (reserved-rect rule)",
+                                surface.straddles
                             ));
                         }
+                        model_team = Some(surface.team);
                     }
                 }
+            }
+        }
+        let model_area: f64 = faces.iter().map(|(_, a)| f64::from(*a)).sum();
+
+        // Owner decision 12: the team banner (and on a Seat the Seat flag)
+        // at the building's mounts, measured at their data scale.
+        let mut mounts_desc = String::new();
+        let mut pending_lines: Vec<String> = Vec::new();
+        let mut banner_team: Option<(f64, f64)> = None;
+        let mut banner_height = None;
+        if let (Use::Building(_), Some(mount)) = (usage, s.banner_at) {
+            match visuals.banner.as_ref().and_then(scene_ref) {
+                None => problems.push(
+                    "banner_at names where the banner stands, but there is no banner model".into(),
+                ),
+                Some(b) => {
+                    let bp = place(&b, assets, budgets, &mount_matrix(mount));
+                    problems.extend(bp.problems.iter().map(|p| format!("banner: {p}")));
+                    all_files.extend(bp.files.keys().cloned());
+                    let h = height(&bp.tris);
+                    banner_height = Some(h);
+                    mounts_desc.push_str(&format!(" banner={h:.2}m"));
+                    if tris > 0 && h > size[1] {
+                        problems.push(format!(
+                            "the banner stands {h:.2} m tall, taller than the building's {:.2} m; keep it readable and take the team share to the owner instead (decision 12)",
+                            size[1]
+                        ));
+                    }
+                    let area: f64 = bp
+                        .tris
+                        .iter()
+                        .map(|(p, _)| f64::from(triangle_area(p[0], p[1], p[2])))
+                        .sum();
+                    let mut team = 0.0;
+                    if let (Some(key), Some((tex, _, _))) = (b.team, &bp.texture) {
+                        let bfaces: Vec<(Rect, f32)> = bp
+                            .tris
+                            .iter()
+                            .map(|(p, uv)| {
+                                (
+                                    face_rect(*uv, tex.width, tex.height),
+                                    triangle_area(p[0], p[1], p[2]),
+                                )
+                            })
+                            .collect();
+                        match swatch_surface(&bfaces, tex, key, visuals) {
+                            Err(p) => problems.push(format!("banner: {p}")),
+                            Ok(surface) => {
+                                if surface.straddles > 0 {
+                                    problems.push(format!(
+                                        "banner: {} face(s) straddle a team rect edge (reserved-rect rule)",
+                                        surface.straddles
+                                    ));
+                                }
+                                team = surface.team;
+                            }
+                        }
+                    }
+                    banner_team = Some((team, area));
+                }
+            }
+        }
+        if let (Use::Building(kind), Some(mount)) = (usage, s.seat_flag_at)
+            && kind.town
+        {
+            match visuals.seat_flag.as_ref().and_then(scene_ref) {
+                None => problems.push(
+                    "seat_flag_at names where the Seat flag stands, but there is no seat_flag model"
+                        .into(),
+                ),
+                Some(f) => {
+                    let fp = place(&f, assets, budgets, &mount_matrix(mount));
+                    problems.extend(fp.problems.iter().map(|p| format!("seat flag: {p}")));
+                    let h = height(&fp.tris);
+                    mounts_desc.push_str(&format!(" seat_flag={h:.2}m"));
+                    if let Some(b) = banner_height
+                        && h < b * 1.4
+                    {
+                        problems.push(format!(
+                            "the Seat flag stands {h:.2} m tall, less than 1.4x the banner's {b:.2} m; it must read apart from the ordinary banners"
+                        ));
+                    }
+                }
+            }
+        }
+        let mut model_team_desc = String::new();
+        let team_permille = match (model_team, banner_team) {
+            (None, None) => None,
+            (model, banner) => {
+                let (bt, ba) = banner.unwrap_or((0.0, 0.0));
+                let total = model_area + ba;
+                let share = |team: f64, area: f64| {
+                    if area > 0.0 {
+                        (1000.0 * team / area).round() as u32
+                    } else {
+                        0
+                    }
+                };
+                if banner.is_some() {
+                    model_team_desc =
+                        format!(" model_team={}‰", share(model.unwrap_or(0.0), model_area));
+                }
+                Some(share(model.unwrap_or(0.0) + bt, total))
+            }
+        };
+        if let Some(permille) = team_permille {
+            let floor = match usage {
+                Use::Unit(k) if k.id == "supply_wain" => budgets.wain_team_permille,
+                Use::Unit(_) => budgets.unit_team_permille,
+                Use::Building(_) => budgets.building_team_permille,
+                Use::Flag | Use::Banner => budgets.flag_team_permille,
+                _ => 0,
+            };
+            let with = if banner_team.is_some() {
+                " (model plus banner)"
+            } else {
+                ""
+            };
+            let pending = match usage {
+                Use::Building(k) => budgets.pending_team_floor.contains(&k.id.as_str()),
+                _ => false,
+            };
+            if permille < floor && pending {
+                pending_lines.push(format!(
+                    "team area {permille}‰{with} is under the {floor}‰ floor; held for the owner (art-pass owner decision 12, inspect_gltf::check::PENDING_TEAM_FLOOR)"
+                ));
+            } else if permille < floor {
+                problems.push(format!(
+                    "team area {permille}‰{with} is under the {floor}‰ floor"
+                ));
+            } else if pending {
+                problems.push(format!(
+                    "team area {permille}‰{with} meets the {floor}‰ floor but the kind is still held for the owner; drop it from Budgets::pending_team_floor"
+                ));
             }
         }
         let mut suggest = String::new();
@@ -600,7 +808,7 @@ pub fn check_visuals(
             (_, Some((dir, share))) => format!("{dir}({share}%)"),
         };
         let measures = format!(
-            "tris={tris} bytes={bytes} top={:.2} size={:.2}x{:.2}x{:.2} team={team_desc} facing={facing_desc} texture={texture_desc}{suggest}",
+            "tris={tris} bytes={bytes} top={:.2} size={:.2}x{:.2}x{:.2} team={team_desc}{model_team_desc}{mounts_desc} facing={facing_desc} texture={texture_desc}{suggest}",
             hi[1], size[0], size[1], size[2]
         );
         if problems.is_empty() {
@@ -615,6 +823,12 @@ pub fn check_visuals(
             if tris > 0 {
                 report.lines.push(format!("  measured {field}: {measures}"));
             }
+        }
+        for p in pending_lines {
+            report
+                .lines
+                .push(format!("PENDING {field} {}: {p}", s.path));
+            report.pending.push(format!("{field}: {p}"));
         }
         for n in notes {
             report.lines.push(format!("  note {field}: {n}"));
@@ -1169,5 +1383,137 @@ mod tests {
             "{text}"
         );
         assert_eq!(facing(&[]), None);
+    }
+
+    /// Owner decision 12 of the art pass: a building's team share is
+    /// measured on the model plus its banner at the mount's scale; a
+    /// banner taller than its building fails, as does a Seat flag under
+    /// 1.4x the Town's banner; the banner model gets its own line with its
+    /// facing; and the Scene's x/z offsets centre an off-centre model.
+    #[test]
+    fn check_measures_model_plus_banner_and_mounts() {
+        let dir = TempDir::new("check-banner");
+        let m = dir.path().join("m");
+        std::fs::create_dir_all(&m).unwrap();
+        // A neutral 2 x 1.5 x 2 m barn (20 m², none on team texels) and a
+        // 0.1 x 0.5 x 1 m flag whose four sides sample the team rect.
+        box_gltf(&m, "barn", [2.0, 1.5, 2.0], 0.0, false);
+        box_gltf(&m, "flag", [0.1, 0.5, 1.0], 0.0, true);
+        let rules = rules::Rules::load(repo_root().join("data")).unwrap();
+        let flag = r#"Scene(path: "m/flag.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 270, team: Some("t"))"#;
+        // Nothing held for the owner: every floor applies.
+        let strict = Budgets {
+            pending_team_floor: &[],
+            ..Budgets::default()
+        };
+        let run_with = |town: &str, sites: &str, budgets: &Budgets| {
+            let text = format!(
+                r#"(units: {{}}, buildings: {{ "town": {town} }},
+                   team_swatches: {{ "t": (rects: [(4, 0, 4, 4)], desaturate_permille: 0) }},
+                   banner: Some({flag}), seat_flag: Some({flag}), sites: [{sites}])"#
+            );
+            let v: Visuals = ron::from_str(&text).unwrap();
+            check_visuals(&v, &rules.units, &rules.buildings, dir.path(), budgets).text()
+        };
+        let run = |town: &str, sites: &str| run_with(town, sites, &strict);
+        let town = |banner: u32, seat_flag: u32| {
+            format!(
+                r#"Scene(path: "m/barn.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, team: Some("t"), banner_at: Some((offset_x100: (80, 0, 80), scale_x100: {banner}, yaw_deg: 30)), seat_flag_at: Some((offset_x100: (0, 150, 0), scale_x100: {seat_flag})))"#
+            )
+        };
+        let site = r#"Primitive(Cuboid)"#;
+
+        // At 1.5x the flag adds 2.475 of 2.925 m² on team texels:
+        // 2.475 / 22.925 = 108‰, over the 100‰ floor; the model alone is 0‰.
+        let text = run(&town(150, 250), site);
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("ok buildings[\"town\"]"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            line.contains(" team=108‰ model_team=0‰ banner=0.75m seat_flag=1.25m "),
+            "{line}"
+        );
+        assert!(text.ends_with("check: ok 3 scene(s)\n"), "{text}");
+        // The banner model is checked like the Seat flag, with its facing:
+        // its broad sides turned toward the camera (+Z) by the 270° yaw.
+        let banner = text
+            .lines()
+            .find(|l| l.starts_with("ok banner m/flag.gltf"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            banner.contains(" team=846‰ ") && banner.contains(" facing=+Z("),
+            "{banner}"
+        );
+
+        // At its own size the banner is too small: 1.1 / 21.3 = 52‰.
+        let text = run(&town(100, 250), site);
+        assert!(
+            text.contains(
+                "FAIL buildings[\"town\"] m/barn.gltf: team area 52‰ (model plus banner) is under the 100‰ floor"
+            ),
+            "{text}"
+        );
+        // Inflated past the building's own 1.5 m, it fails however much
+        // team colour it adds.
+        let text = run(&town(400, 600), site);
+        assert!(
+            text.contains("the banner stands 2.00 m tall, taller than the building's 1.50 m"),
+            "{text}"
+        );
+        assert!(!text.contains("under the 100‰ floor"), "{text}");
+        // A kind held for the owner prints its shortfall as PENDING and the
+        // check passes; once it meets the floor it must leave the list.
+        let held = Budgets {
+            pending_team_floor: &["town"],
+            ..Budgets::default()
+        };
+        let text = run_with(&town(100, 250), site, &held);
+        assert!(
+            text.contains(
+                "PENDING buildings[\"town\"] m/barn.gltf: team area 52‰ (model plus banner) is under the 100‰ floor; held for the owner"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("check: ok 3 scene(s), 1 held for the owner\n"),
+            "{text}"
+        );
+        let text = run_with(&town(150, 250), site, &held);
+        assert!(
+            text.contains("meets the 100‰ floor but the kind is still held for the owner"),
+            "{text}"
+        );
+        assert!(text.contains("check: FAIL 1 problem(s)"), "{text}");
+        assert_eq!(Budgets::default().pending_team_floor, PENDING_TEAM_FLOOR);
+        // A Seat flag hardly larger than the banner does not read apart.
+        let text = run(&town(150, 160), site);
+        assert!(
+            text.contains("the Seat flag stands 0.80 m tall, less than 1.4x the banner's 0.75 m"),
+            "{text}"
+        );
+
+        // The x/z offsets: the barn with a copy of itself 0.6 m along +X
+        // is centred 0.3 m off; x_offset_tiles_x100: -30 centres it.
+        let pair = |offset: &str| {
+            format!(
+                r#"Scene(path: "m/barn.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, parts: [(path: "m/barn.gltf", offset_x100: (60, 0, 0))]{offset})"#
+            )
+        };
+        let text = run(&town(150, 250), &pair(""));
+        assert!(
+            text.contains("FAIL sites[0] m/barn.gltf: its x/z centre is (0.300, 0.000) m"),
+            "{text}"
+        );
+        let text = run(&town(150, 250), &pair(", x_offset_tiles_x100: -30"));
+        assert!(text.contains("ok sites[0] m/barn.gltf"), "{text}");
+        let text = run(
+            &town(150, 250),
+            &pair(", x_offset_tiles_x100: -30, z_offset_tiles_x100: 25"),
+        );
+        assert!(
+            text.contains("FAIL sites[0] m/barn.gltf: its x/z centre is (0.000, 0.250) m"),
+            "{text}"
+        );
     }
 }

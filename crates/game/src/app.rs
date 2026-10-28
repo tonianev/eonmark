@@ -388,6 +388,11 @@ pub fn run(cli: &Cli) -> AppExit {
     // tracing subscriber, and an event before it is dropped.
     // `scripts/render_smoke.sh` requires this line.
     info!("assets: {}", assets.display());
+    // Art pass: Inter replaces Bevy's built-in FiraMono before the first
+    // text layout (`crate::fonts`).
+    app.add_plugins(crate::fonts::FontsPlugin {
+        assets: assets.clone(),
+    });
     // Display sleep or a screen lock must not end the session.
     app.add_plugins(MonitorLossPlugin);
     if background {

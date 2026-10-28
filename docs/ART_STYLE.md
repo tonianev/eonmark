@@ -121,7 +121,7 @@ The ground's material is the `FieldExt` extended material (`crates/game/src/fiel
 
 ## HUD
 
-`bevy_ui` only in shipped builds. Inter (variable weight) for all text. Kenney UI Pack 9-slice panels through `NodeImageMode::Sliced`. Matte panels, thin borders, no drop shadows, no glow. The top resource bar shows current stockpile and per-30-s rate per resource and turns the readout amber while production is being discarded at the Yield Cap. Disabled command-card buttons are greyed with a tooltip, not hidden. Layout-only root nodes are `Pickable::IGNORE` so empty HUD space passes clicks to the world. `bevy_egui` appears only behind the `dev` feature.
+`bevy_ui` only in shipped builds. Inter (variable weight) for all text: shipped by the art pass as `assets/fonts/InterVariable.ttf` (Inter 4.1, OFL-1.1, its licence beside it as `OFL-Inter.txt`), installed over Bevy's built-in FiraMono at startup (`crates/game/src/fonts.rs`; a missing file is a warning and FiraMono stays), and the HUD's fit tests measure text with Inter's real advance widths. Kenney UI Pack 9-slice panels through `NodeImageMode::Sliced` stay in M7. Matte panels, thin borders, no drop shadows, no glow. The top resource bar shows current stockpile and per-30-s rate per resource and turns the readout amber while production is being discarded at the Yield Cap. Disabled command-card buttons are greyed with a tooltip, not hidden. Layout-only root nodes are `Pickable::IGNORE` so empty HUD space passes clicks to the world. `bevy_egui` appears only behind the `dev` feature.
 
 ## P3 and sRGB check
 

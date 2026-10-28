@@ -30,6 +30,8 @@
 //!   units and buildings, flat entities keyed by `TargetId` (M4b), and the
 //!   dev-only hierarchy check.
 //! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
+//! - [`fonts`]: Inter as the UI font, installed over Bevy's Fira Mono in
+//!   `Startup` (art pass).
 //! - [`age_hud`]: the age readout and the Advance button on a strip under
 //!   the top bar (M4b), greyed by `SimView::check_advance_age`.
 //! - [`camera`]: the yaw-locked RTS camera.
@@ -71,6 +73,7 @@ pub mod director;
 pub mod draw_stats;
 pub mod economy_hud;
 pub mod field;
+pub mod fonts;
 pub mod frame_stats;
 pub mod ground;
 pub mod headless;

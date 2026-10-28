@@ -75,9 +75,11 @@ Primitive silhouettes (M2 to M7):
 | Kind | Primitive | Notes |
 |---|---|---|
 | Units | One shape per kind (table below) | Since M4b each kind has its own silhouette and height, low-poly and flat-shaded; M2 drew every unit as a smooth `Capsule` |
-| Buildings | `Cuboid` | Footprint from `buildings.ron` |
-| Town | `Cylinder` | Larger when it reaches the second radius tier |
-| Resource node | `Sphere` | Grain gold, timber, ore colours |
+| Buildings | KayKit Hexagon models since art slice 3 (the table under "Building looks"); `Primitive(Cuboid)`, the M3b team-coloured box over the footprint, is every building's fallback | Team colour on roofs and trim, plus a team banner beside each building |
+| Town | KayKit castle; a Seat flies the large Seat flag on its keep | The Seat flag is 1.8 m tall, at least 1.4 times any banner (the check holds it) |
+| Construction site | KayKit construction stages A, B and C, one per third of the build, neutral | Scaled by the footprint side; the health bar shows the progress |
+| Rubble | KayKit `building_destroyed`, neutral, for 30 s | Where a building or site was destroyed; gone early when a new building takes the footprint |
+| Terrain props | KayKit trees on forest, mountains and rocks on mountain, lilies and plants on water (`terrain` in `visuals.ron`) | Never on grass; a look only where its footprint stays on its own terrain; nothing over 1.6 m on a tile whose north neighbour is passable, so props never hide units |
 | Selection ring | Flat annulus mesh, unlit (retained gizmo lines until the art pass) | Separate entities keyed by id, never children of moving units; one shared mesh and material for every ring, so any number of rings is one draw call |
 | Rally marker, move marker | Retained gizmo lines | Same rule |
 | Attrition indicator (M5a) | Flat 4-segment annulus mesh, unlit (retained gizmo lines until the art pass) | Same rule; a steady Yield Cap amber (#D29B3B) diamond under a unit bleeding on enemy land, one shared mesh and material for every diamond; nothing pulses |
@@ -127,7 +129,7 @@ wgpu on a wide-gamut display can render colours more saturated than authored. Ev
 
 ## Primitives first, models by data
 
-Every unit kind is drawn through one `Visual` value from `data/visuals.ron`, keyed by its `units.ron` id, and since the art pass every building kind too, keyed by its `buildings.ron` id (`Primitive(Cuboid)` is the M3b box `crates/game/src/buildings.rs` draws; slice 1 maps all eight kinds to it, so the look is unchanged):
+Every unit kind is drawn through one `Visual` value from `data/visuals.ron`, keyed by its `units.ron` id, and since the art pass every building kind too, keyed by its `buildings.ron` id (`Primitive(Cuboid)` is the M3b box `crates/game/src/buildings.rs` draws; slice 1 mapped all eight kinds to it, slice 3 maps them to KayKit models, "Building looks" below):
 
 ```ron
 "yeoman": Primitive(Capsule),
@@ -136,24 +138,61 @@ Every unit kind is drawn through one `Visual` value from `data/visuals.ron`, key
 "mangonel": Scene(path: "models/mangonel.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, fallback: Some(Primitive(Sphere))),
 ```
 
-`Visual::Primitive(shape)` draws a team-coloured primitive sized from the kind's radius (`Capsule`, `Cuboid`, `Cylinder`, `Sphere` or `Cone`). `Visual::Body(shape, height_tiles_x100, lying)` (M4b) draws the same primitive two radii wide with its own height in hundredths of a metre (20 to 400; never a `Sphere`); `lying: true` lays a `Capsule` or `Cylinder` along the unit's facing, that long and two radii tall. `Visual::Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` loads a glTF scene; the scale and offset are in hundredths and the yaw in whole degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change, and since `rules_version` 25 it needs no `rules_version` bump or re-record either: `data-check` validates `visuals.ron`, but `rules_hash` leaves it out ([ADR 0003](adr/0003-visuals-outside-rules-hash.md)). M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive look as the fallback. Anything drawn above a unit (the M4b health bar) takes its height from `present::look_top_y`, computed from the `Visual`, so the art pass changes that one function. Until models load (art-pass slice 3) the presenter draws a `Scene` as its `fallback`, else `Primitive(Capsule)` (`present::FALLBACK_VISUAL`), and a building `Scene` as the box. `data-check` holds the 1.4x silhouette rule over the live file's `Primitive` and `Body` looks (a Scene by its fallback), while the `present.rs` look tests measure the M4b looks frozen as `M4B_LOOKS`, so a look edit never fails a Rust test.
+`Visual::Primitive(shape)` draws a team-coloured primitive sized from the kind's radius (`Capsule`, `Cuboid`, `Cylinder`, `Sphere` or `Cone`). `Visual::Body(shape, height_tiles_x100, lying)` (M4b) draws the same primitive two radii wide with its own height in hundredths of a metre (20 to 400; never a `Sphere`); `lying: true` lays a `Capsule` or `Cylinder` along the unit's facing, that long and two radii tall. `Visual::Scene(path, scale_x100, y_offset_tiles_x100, yaw_deg)` loads a glTF scene; the scale and offset are in hundredths and the yaw in whole degrees, so the file stays float-free. Swapping a cube for a model is a RON edit, never a Rust change, and since `rules_version` 25 it needs no `rules_version` bump or re-record either: `data-check` validates `visuals.ron`, but `rules_hash` leaves it out ([ADR 0003](adr/0003-visuals-outside-rules-hash.md)). M0 to M6 ship primitives only; M7 maps every kind to CC0 models and keeps the primitive look as the fallback. Anything drawn above a unit (the M4b health bar) takes its height from `present::look_top_y`, computed from the `Visual`, so the art pass changes that one function. Since art slice 3, `crates/game/src/models.rs` loads every Scene the game draws as a model once, merges each into one placed mesh, and holds the sim's first tick until every model is ready or has failed (the load gate in `sim_driver::match_running`), so nothing appears as a box and then swaps; a building whose model fails draws the box with one `error!` (the render smoke fails on it). Units still draw their `Primitive` or `Body` looks until slice 4, and a unit `Scene` draws its `fallback`, else `Primitive(Capsule)` (`present::FALLBACK_VISUAL`). Bars and attack markers over a building take its top from `buildings::building_top_y` (the model's top, a site's stage times its scale, or the box). `data-check` holds the 1.4x silhouette rule over the live file's `Primitive` and `Body` looks (a Scene by its fallback), while the `present.rs` look tests measure the M4b looks frozen as `M4B_LOOKS`, so a look edit never fails a Rust test.
 
 ## glTF import rules
 
+These replace the Blender-export rules of M0; they describe the files the art pass vendors and bakes, and `inspect_gltf check` enforces every row it can measure.
+
 | Rule | Value |
 |---|---|
-| Exporter | Blender to glTF Binary (`.glb`) |
-| Up axis | +Y |
-| Forward | -Z |
-| Scale | 1 unit = 1 m; apply transforms before export |
-| Origin | base centre of the model |
+| Format | glTF 2.0: a pack's `.gltf` + `.bin` + one PNG as shipped, or a baked `.glb` (art slice 4) |
+| Up and units | +Y up, 1 unit = 1 m; any other size is set by `scale_x100`; `convert_coordinates` stays off |
+| Facing | units face +X at rest after `yaw_deg`; buildings, sites and rubble put their front toward +Z, toward the camera; props have no facing. KayKit Hexagon buildings already face +Z at yaw 0 (their doors, the mine's entrance and the forge face +Z; screenshots at four yaws, art slice 3), so every building uses `yaw_deg: 0`. The KayKit flag's cloth faces ±X, so the banner and the Seat flag turn it with `yaw_deg: -90` to face the camera |
+| Origin | not required in the file. The placed model's bounds must have their base within -0.02..0.05 m and their x/z centre within 0.10 m of the origin (0.5 m for props), set with `y_offset_tiles_x100`, `x_offset_tiles_x100` and `z_offset_tiles_x100` (art slice 3), applied after the yaw and the scale |
+| Contents | indexed triangles with `POSITION`, `NORMAL` and `TEXCOORD_0` on every kept primitive; one base-colour texture per model; no cameras or lights; skins and animations only in bake inputs |
+| Material | the file's material gives only its base colour and texture; the game builds `StandardMaterial { perceptual_roughness: 0.95, reflectance: 0.2, metallic: 0 }`, no emissive |
+| Sampler | nearest, forced with `override_sampler` |
 | Texture | one palette or gradient texture at most 256 px on a side, except a pack's shared palette atlas, which ships as is (KayKit Hexagon's 1024 px `hexagons_medieval.png`, art-pass owner decision 5); baked characters are downsampled only when every face keeps its colour |
-| Contents | meshes and materials only; no embedded lights or cameras |
-| Naming | `kind_variant.glb`, lower case |
-| Loading | `GltfAssetLabel::Scene(0)` |
+| Naming | the pack's own names under `models/<pack>/...`; baked files `models/kaykit_adventurers/<kind>.glb` |
 | Inspection | `cargo run -p inspect_gltf --release -- inspect <file>` prints scenes, the node tree with transforms, meshes and primitives, images, skins, clips, rest bounds and a T-pose hint; `swatches`, `palette`, `bake` and `check` are described below |
 
-The glTF specification says +Z forward and Blender's default export writes -Z forward; kits differ in scale and origin. Normalize at import, record `scale`, `y_offset` and `yaw` in `visuals.ron`, and check the result at the standard camera.
+Node globs in a Scene's `nodes` match a node's own name only (`rules::visuals::glob_match`, shared by the game's merge and the tool), so keeping a node keeps its mesh, not its children.
+
+## Building looks (art slice 3)
+
+Each building kind is one line of `data/visuals.ron`: a KayKit Hexagon model (blue variant, recoloured at run time), scaled to fill 0.95 of its footprint side (`inspect_gltf check` prints the suggestion), lifted 1 cm, centred where the file is off-centre, at yaw 0, with the owner's `kaykit_hexagon` swatch and a team banner beside it. Team shares are measured by `inspect_gltf check` on the model plus its banner at its data scale (owner decision 12 of the art pass, 2026-10-28):
+
+| Kind | Model | Scale | Offsets (cm) | Placed size (m) | Banner (height) | Team share: model / with banner |
+|---|---|---|---|---|---|---|
+| Town | `building_castle_blue` | 126 | - | 2.49 x 5.01 x 2.84 | 1.25 m at the front-right; the Seat flag 1.80 m on the keep | 67‰ / 74‰, held for the owner |
+| Croft | `building_home_A_blue` | 223 | - | 1.77 x 2.07 x 1.90 | 0.69 m | 258‰ / 263‰ |
+| Lumber Yard | `building_lumbermill_blue` | 139 | z -19 | 1.90 x 2.37 x 1.65 | 1.53 m | 64‰ / 102‰ |
+| Ore Pit | `building_mine_blue` | 99 | - | 1.59 x 1.13 x 1.90 | 0.97 m | 5‰ / 25‰, held for the owner |
+| Scriptorium | `building_church_blue` | 247 | - | 2.54 x 4.06 x 2.85 | 0.83 m | 280‰ / 283‰ |
+| Muster Hall | `building_barracks_blue` | 182 | z -12 | 2.62 x 2.98 x 2.85 | 2.16 m | 84‰ / 102‰ |
+| Watchtower | `building_tower_A_blue` | 82 | - | 0.81 x 1.80 x 0.95 | 0.83 m on its roof | 81‰ / 109‰ |
+| Engine Yard | `building_blacksmith_blue` | 221 | x -3, z -14 | 2.85 x 2.18 x 2.75 | 0.97 m | 91‰ / 102‰ |
+
+The banner is the KayKit flag (48 triangles, 457‰ team area), one shared mesh with one material per team (the same team material as the buildings on the atlas), so all banners add about two draw bins; banners and the Seat flag cast no shadow. Its `banner_at` mount places the flag's centre from the footprint centre on the ground, and its pole stands 0.11 m x scale to the left of that point. A banner may not stand taller than its building, and the Seat flag must stand at least 1.4 times taller than the Town's banner (both are `check` rules). The Ore Pit cannot reach 100‰ with a banner no taller than the mine (1.13 m gives 31‰), and the Town would need a banner about 2.8 m tall with a cloth as wide as the castle; both keep a readable banner and are listed in `inspect_gltf::check::PENDING_TEAM_FLOOR`, which `check` prints as `PENDING` lines until the owner decides (ROADMAP "Art pass (pre-stream)", Notes). A site carries no banner (the stages are neutral scaffolding; its builders show whose it is), and rubble never does.
+
+Sites draw the KayKit construction stages A, B and C (neutral, scaled 91, 84 and 82 so one tile of footprint is 0.95 m, then scaled by the footprint side), rubble `building_destroyed` (scale 62, 30 s). Terrain props: forest interiors take the four KayKit tree patches at 130% (1.2-1.7 m), forest edges the single trees (1.2-1.3 m); mountain interiors the three mountains at 110% (1.6-2.0 m) and, two rings deep in a range, mountains B and C at 190% (2.9-3.4 m); mountain edges single rocks; water 6% lilies and plants, without shadows.
+
+### Swapping a building's look (walkthrough)
+
+Swapping a look is one line of `data/visuals.ron` and no Rust. Here the Croft goes back to the M3b box:
+
+```bash
+cp data/visuals.ron /tmp/visuals.ron.bak
+sed -i 's|^    "croft": Scene(.*|    "croft": Primitive(Cuboid),|' data/visuals.ron
+cargo run -q -p sim-cli -- data-check data      # OK ... visuals=units:8 buildings:8 terrain:3 models=<n>
+cargo nextest run -p game --cargo-profile ci    # green: no test reads the live building looks
+git diff --stat                                 # data/visuals.ron only
+just verify                                     # every fixture OK: visuals.ron is not in rules_hash
+cp /tmp/visuals.ron.bak data/visuals.ron
+```
+
+The Croft's line carries its banner mount, so the box (which is team-coloured all over) has none. The swap back to a model is the same edit the other way; `inspect_gltf check` then prints the new model's measurements. The literal walkthrough of the ROADMAP's M7 line (the Yeoman back to `Primitive(Capsule)`) follows with the unit models in art slice 4.
 
 ## Allowed asset sources
 
@@ -180,7 +219,7 @@ The pre-stream art pass ([ROADMAP.md](ROADMAP.md), "Art pass (pre-stream)") vend
 
 ### Budgets (measured in art slice 2)
 
-`inspect_gltf check data assets` (CI's check job) holds every Scene in `data/visuals.ron` to these limits. The file, texture and triangle limits were set from `inspect_gltf inspect` on every chosen source, each a little above the heaviest file it covers. The team-area floors were not measured: they are the plan's (its section 3.4), and most chosen buildings fall under them (below the table). Each `ok` line also prints `facing=`, the horizontal side with the most surface and its share (a hint for the rest-facing rule: units face +X after `yaw_deg`, buildings, sites and rubble +Z toward the camera; props print `-`); a share near 25% means no side dominates, and the 40 m screenshots decide.
+`inspect_gltf check data assets` (CI's check job) holds every Scene in `data/visuals.ron` to these limits. The file, texture and triangle limits were set from `inspect_gltf inspect` on every chosen source, each a little above the heaviest file it covers. The team-area floors were not measured: they are the plan's (its section 3.4); since art slice 3 a building's share counts its banner (below the table). Each `ok` line also prints `facing=`, the horizontal side with the most surface and its share (a hint for the rest-facing rule: units face +X after `yaw_deg`, buildings, sites and rubble +Z toward the camera; props print `-`); a share near 25% means no side dominates. It does not find a door: on the KayKit buildings it reads 26-29% on whichever side is largest (for example `+X(29%)` for the Croft, whose door faces +Z), so the yaws were set from screenshots and the 40 m screenshots decide.
 
 | Limit | Value | Heaviest measured |
 |---|---|---|
@@ -189,10 +228,10 @@ The pre-stream art pass ([ROADMAP.md](ROADMAP.md), "Art pass (pre-stream)") vend
 | Unit triangles | 5,500 (a note above 5,000) | Adventurers body plus kept items 4,005 (hooded Rogue) to 5,325 (Barbarian with two axes); Mangonel catapult nodes 1,326; Wain parts 668 |
 | Building triangles | 6,000 | castle 5,659 (under the plan's 12,000, so it stays) |
 | Site and rubble triangles | 1,500 | `building_stage_C` 1,218 |
-| Seat flag triangles | 100 | `flag_blue` 48 |
+| Seat flag and banner triangles | 100 | `flag_blue` 48 |
 | Interior prop triangles | 1,600 | `trees_B_large` 1,540 (the large trees stay) |
 | Edge prop triangles | 300 | `tree_single_B` 220 |
-| Team area | units 200‰, the Wain 80‰, buildings 100‰, the Seat flag 300‰ | Hexagon buildings 5‰ (mine) to 280‰ (church); flag 457‰ |
+| Team area | units 200‰, the Wain 80‰, buildings 100‰ (model plus banner), the Seat flag and the banner 300‰ | Hexagon buildings 5‰ (mine) to 280‰ (church); flag 457‰ |
 
 The team area is the share of a model's surface whose faces sample its `team_swatches` rects. KayKit Hexagon's team texels are one rect of the shared atlas, `(17, 787, 91, 207)`, found by `inspect_gltf swatches` over the blue and red variants of every vendored building, the catapult tower and the flag; no non-team face samples it, and no neutral model (stages, rubble, nature, cart props) does either.
 
@@ -211,7 +250,7 @@ The team area is the share of a model's surface whose faces sample its `team_swa
 | mangonel (unit) | `building_tower_catapult_blue`, catapult nodes | about 25‰ | 200‰, under |
 | Seat flag | `flag_blue` | 457‰ | 300‰, passes |
 
-The rect cannot be widened: it is already every texel that differs between KayKit's blue and red variants, so these buildings simply carry little team surface. Until the owner chooses (ROADMAP "Art pass (pre-stream)", Notes), slice 3 cannot write those six buildings or the Mangonel as team Scenes and still have `check` print `ok` (AP3). The options: lower the building floor (and the Mangonel's) to the measured values; take a different model where the pack has one; or one of the plan's risk-17 levers, such as a `base_disc` (a shared team-coloured disc under the model, one mesh and one material per team).
+The rect cannot be widened: it is already every texel that differs between KayKit's blue and red variants, so these buildings simply carry little team surface. The owner chose a team banner on every team building and on the Mangonel (owner decision 12 of the art pass, 2026-10-28; a base disc, lower floors and other models were declined), with the floor measured on model plus banner: the "Building looks" table above has the result, four of the six reach the floor with a banner no taller than their building, and the Town and the Ore Pit are held for the owner. The Mangonel's banner comes with the unit models in slice 4.
 
 `inspect_gltf palette <file> [--grid 16]` prints the base texture's cell grid: each used cell's texel rect, mean colour and the nodes whose faces sample it. It is how a character's `team_swatches` rects are picked (art slice 4), since the Adventurers characters ship in one colour and have no red variant for `swatches` to diff.
 
@@ -232,7 +271,7 @@ Attach one 1280x720 screenshot at 40 m to every PR that adds or changes art, and
 | `visuals.ron` changed, Rust did not (for a model swap) | |
 | Draw-call counter in the dev panel is under 500 with the test scene | |
 
-The last row has no counter to read yet: Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so through M4b it is marked n/a in the PR with the expected counts instead (at 200 vs 200 about 75 to 100 batches, [design/ui.md](design/ui.md#health-bars-rings-and-markers)), and an Xcode Metal frame capture on the Mac stands in for it. The dev-panel counter arrives with the pre-stream art pass, where glTF models make it matter (ROADMAP M3b).
+The last row had no counter to read through M4b: Bevy 0.19.1 keeps its batch counts `pub(crate)` and wgpu has no draw counters, so it was marked n/a in the PR with the expected counts instead (at 200 vs 200 about 75 to 100 batches, [design/ui.md](design/ui.md#health-bars-rings-and-markers)), and an Xcode Metal frame capture on the Mac stood in for it. The art pass's counter (`--draw-stats`, the dev panel) reads it: `art_bench` with every building, site, banner and terrain prop as a model peaks at 111 draws under lavapipe (art slice 3).
 
 ## Milestones
 

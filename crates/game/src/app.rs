@@ -443,6 +443,12 @@ pub fn run(cli: &Cli) -> AppExit {
         crate::outcome::OutcomeOverlayPlugin,
     ));
 
+    // Art pass AP10: every unit selectable by a real click (a driver
+    // clicks the printed targets; `crate::click_check`).
+    if cli.click_check {
+        app.add_plugins(crate::click_check::ClickCheckPlugin);
+    }
+
     // Presentation only: frames and selects the walkthrough's beats, or
     // selects `art_bench`'s army.
     if let Some(beats) = director_beats {

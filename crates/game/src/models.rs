@@ -1,13 +1,13 @@
-//! glTF models from `data/visuals.ron` (art pass, slice 3): every Scene's
+//! glTF models from `data/visuals.ron` (art pass, slices 3 and 4): every Scene's
 //! files are loaded once through Bevy's asset server, each Scene is merged
 //! into one placed mesh, and the sim waits until every model is ready or
 //! has failed (the load gate, [`models_settled`], joined with `&&` into
 //! `sim_driver::match_running`).
 //!
 //! - [`request_models`] (`Startup`) loads every distinct file of every Scene
-//!   the game draws as a model in this slice (the buildings, the sites, the
-//!   rubble, the Seat flag, the team banner and the terrain props; units
-//!   follow in slice 4) with `load_cameras`, `load_lights` and
+//!   the game draws as a model (the units since slice 4, the buildings, the
+//!   sites, the rubble, the Seat flag, the team banner and the terrain
+//!   props) with `load_cameras`, `load_lights` and
 //!   `load_animations` off, the source meshes kept in the main world only,
 //!   and a nearest sampler forced on every texture (`override_sampler`).
 //! - [`finish_models`] (`Update`) waits until every file of an entry is
@@ -22,8 +22,9 @@
 //!   textures (compared by content) or two base colours fail the entry. A
 //!   failed load, a failed merge or more than [`MODEL_LOAD_TIMEOUT_SECS`]
 //!   of real time marks the entry failed with one `error!`, and the game
-//!   draws the fallback (buildings and sites their M3b box; the rubble,
-//!   flags, banners and props nothing), so `scripts/render_smoke.sh`
+//!   draws the fallback (units their Scene's `fallback` look, buildings
+//!   and sites their M3b box; the rubble, flags, banners and props
+//!   nothing), so `scripts/render_smoke.sh`
 //!   fails on the ERROR line while a player still sees a look.
 //! - Textures are deduplicated by content ([`content_hash`]): `KayKit` ships
 //!   the same `hexagons_medieval.png` in every folder, and every model on
@@ -332,11 +333,11 @@ pub fn models_settled(lib: Option<Res<ModelLibrary>>) -> bool {
     lib.is_none_or(|l| l.is_settled())
 }
 
-/// Every Scene the game draws as a model in this slice, in file order:
-/// buildings, sites, rubble, Seat flag, banner, terrain props. Units come
-/// in slice 4 (`present.rs` still draws their fallback looks).
+/// Every Scene the game draws as a model, in file order: units (art
+/// slice 4), buildings, sites, rubble, Seat flag, banner, terrain props.
 pub fn drawn_scenes(visuals: &Visuals) -> Vec<&Visual> {
-    let mut out: Vec<&Visual> = visuals.buildings.values().collect();
+    let mut out: Vec<&Visual> = visuals.units.values().collect();
+    out.extend(visuals.buildings.values());
     out.extend(visuals.sites.iter());
     out.extend(visuals.rubble.as_ref().map(|r| &r.visual));
     out.extend(visuals.seat_flag.as_ref());
@@ -1021,8 +1022,8 @@ pub fn team_texture(src: &Image, swatch: &TeamSwatch, team: Color) -> Option<Ima
     Some(image)
 }
 
-/// Every Scene file `visuals` names that the game loads in this slice,
-/// distinct (for logs and tests).
+/// Every Scene file `visuals` names that the game loads, distinct (for
+/// logs and tests).
 pub fn drawn_files(visuals: &Visuals) -> BTreeSet<String> {
     drawn_scenes(visuals)
         .into_iter()
@@ -1574,10 +1575,10 @@ mod tests {
         );
     }
 
-    /// The files the game loads in this slice: buildings, sites, rubble,
-    /// flags and props, never a unit's.
+    /// The files the game loads: units' (since art slice 4), buildings',
+    /// sites', the rubble's, the flags' and the props'.
     #[test]
-    fn drawn_scenes_cover_this_slice_and_skip_units() {
+    fn drawn_scenes_cover_units_buildings_and_props() {
         let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let mut rules = rules::Rules::load(&data).expect("data loads");
         let unit = Visual::Scene {
@@ -1596,10 +1597,31 @@ mod tests {
         };
         rules.visuals.units.insert("yeoman".into(), unit);
         let files = drawn_files(&rules.visuals);
-        assert!(!files.contains("models/unit.glb"), "{files:?}");
-        for v in rules.visuals.buildings.values() {
+        assert!(files.contains("models/unit.glb"), "{files:?}");
+        // A unit that is not a Scene loads nothing.
+        rules.visuals.units.insert(
+            "yeoman".into(),
+            Visual::Primitive(rules::Primitive::Capsule),
+        );
+        assert!(
+            !drawn_files(&rules.visuals).contains("models/unit.glb"),
+            "a Primitive look is no file"
+        );
+        for v in rules
+            .visuals
+            .buildings
+            .values()
+            .chain(rules.visuals.units.values())
+        {
             if let Visual::Scene { path, .. } = v {
                 assert!(files.contains(path), "{path}");
+            }
+        }
+        for decor in rules.visuals.terrain.values() {
+            for look in &decor.looks {
+                if let Visual::Scene { path, .. } = &look.visual {
+                    assert!(files.contains(path), "{path}");
+                }
             }
         }
     }

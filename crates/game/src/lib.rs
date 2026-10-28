@@ -63,6 +63,7 @@ pub mod background;
 pub mod buildings;
 pub mod camera;
 pub mod cli;
+pub mod click_check;
 pub mod command_card;
 #[cfg(feature = "dev")]
 pub mod dev_tools;

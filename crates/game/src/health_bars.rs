@@ -1515,4 +1515,116 @@ mod tests {
         let aabb = quad.compute_aabb().unwrap();
         assert!((aabb.min().x - 0.0).abs() < 1e-6 && (aabb.max().x - 1.0).abs() < 1e-6);
     }
+
+    /// Art slice 4: a unit kind drawn as its model carries its bar
+    /// [`UNIT_BAR_GAP`] over the model's top, not over its fallback look's.
+    #[test]
+    fn bar_sits_above_a_model_top() {
+        use crate::models::{Geometry, ModelKey, ModelLibrary, content_hash, finish_geometry};
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+        let mut rules = rules();
+        let yeoman = rules::Visual::Scene {
+            path: "m/yeoman.glb".into(),
+            scale_x100: 100,
+            y_offset_tiles_x100: 0,
+            yaw_deg: 0,
+            x_offset_tiles_x100: 0,
+            z_offset_tiles_x100: 0,
+            nodes: vec![],
+            parts: vec![],
+            team: None,
+            fallback: Some(Box::new(rules::Visual::Primitive(
+                rules::Primitive::Capsule,
+            ))),
+            banner_at: None,
+            seat_flag_at: None,
+        };
+        rules.visuals.units.insert("yeoman".into(), yeoman.clone());
+        let (mut meshes, mut images) = (Assets::<Mesh>::default(), Assets::<Image>::default());
+        let image = Image::new(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![200; 4 * 4 * 4],
+            TextureFormat::Rgba8UnormSrgb,
+            bevy::asset::RenderAssetUsages::default(),
+        );
+        let hash = content_hash(&image);
+        let model = finish_geometry(
+            Geometry {
+                positions: vec![[-0.3, 0.0, -0.3], [0.3, 2.5, 0.3], [0.0, 0.0, 0.3]],
+                normals: vec![[0.0, 1.0, 0.0]; 3],
+                uvs: vec![[0.1, 0.1]; 3],
+                indices: vec![0, 1, 2],
+                textures: vec![],
+                base_color: None,
+            },
+            hash,
+            &mut meshes,
+        );
+        let mut lib = ModelLibrary::new(&rules.visuals);
+        lib.insert_ready(ModelKey::of(&yeoman).unwrap(), model, images.add(image));
+        let kind = unit_kind(&rules, "yeoman");
+        // The cached top: the model's with the library, the capsule's
+        // 1.19 m without.
+        let mut with = UnitVisuals::default();
+        with.mesh_with(kind.0, &rules, &mut meshes, Some(&lib));
+        assert_eq!(unit_top_y(&with, &rules, kind), 2.5);
+        let without = UnitVisuals::default();
+        assert!((unit_top_y(&without, &rules, kind) - 1.19).abs() < 1e-5);
+
+        // In the game: a selected Yeoman's bar rides over its model.
+        let setup = sim::MatchSetup::scenario(&rules, 7);
+        let handle = SimHandle::from_setup(setup, rules.clone());
+        let stream = vec![(0, vec![spawn(LOCAL_PLAYER, 0, kind, (20, 30), 1)])];
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(meshes)
+            .insert_resource(images)
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(lib)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::ZERO,
+            ))
+            .init_resource::<Selection>()
+            .add_plugins((
+                SimPlugin::new(handle, Box::new(ScenarioInput::new(stream))),
+                PresentPlugin,
+                HealthBarsPlugin,
+            ));
+        let camera = RtsCamera {
+            zoom: BAR_REFERENCE_ZOOM,
+            zoom_target: BAR_REFERENCE_ZOOM,
+            ..default()
+        };
+        let cam_tf = Transform::from_translation(camera.eye()).looking_at(camera.focus, Vec3::Y);
+        app.world_mut().spawn((camera, cam_tf));
+        app.update();
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_millis(50),
+        ));
+        run_to(&mut app, 5);
+        app.world_mut().resource_mut::<Selection>().set([UnitId(1)]);
+        app.update();
+        app.update();
+        let bar = bars(&app)[&TargetId::Unit(UnitId(1))];
+        assert_eq!(bar.spec.anchor, BarAnchor::Unit { top_y: 2.5 });
+        let unit = app.world().resource::<UnitEntities>().0[&UnitId(1)];
+        let pos = app.world().get::<Interp>(unit).unwrap().curr;
+        let want = bar_layout(
+            pos + Vec3::Y * (2.5 + UNIT_BAR_GAP),
+            cam_tf.rotation,
+            bar_scale(BAR_REFERENCE_ZOOM),
+            1.0,
+        );
+        let back = *app.world().get::<Transform>(bar.back).unwrap();
+        assert!(
+            (back.translation - want.back.translation).length() < 1e-4,
+            "{back:?} vs {:?}",
+            want.back
+        );
+    }
 }

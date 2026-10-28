@@ -5,7 +5,9 @@
 //! indexed triangles with `POSITION`, `NORMAL` and `TEXCOORD_0` and one base
 //! texture, no cameras, lights, skins or animations, ground contact, team
 //! area against `team_swatches`, the reserved-rect rule and the 1.4x
-//! silhouette rule within a rig group. It prints one `ok` line per Scene
+//! silhouette rule within a rig group (units sharing a skeleton, or a
+//! file, and a base texture: variants of one character, see
+//! `same_rig_group`). It prints one `ok` line per Scene
 //! with triangles, bytes, top, size, team share and the facing it finds
 //! ([`facing`]), plus a suggested `scale_x100` for a building's footprint
 //! or a unit's look height.
@@ -640,7 +642,7 @@ pub fn check_visuals(
         let mut pending_lines: Vec<String> = Vec::new();
         let mut banner_team: Option<(f64, f64)> = None;
         let mut banner_height = None;
-        if let (Use::Building(_), Some(mount)) = (usage, s.banner_at) {
+        if let (Use::Building(_) | Use::Unit(_), Some(mount)) = (usage, s.banner_at) {
             match visuals.banner.as_ref().and_then(scene_ref) {
                 None => problems.push(
                     "banner_at names where the banner stands, but there is no banner model".into(),
@@ -652,7 +654,7 @@ pub fn check_visuals(
                     let h = height(&bp.tris);
                     banner_height = Some(h);
                     mounts_desc.push_str(&format!(" banner={h:.2}m"));
-                    if tris > 0 && h > size[1] {
+                    if tris > 0 && h > size[1] && matches!(usage, Use::Building(_)) {
                         problems.push(format!(
                             "the banner stands {h:.2} m tall, taller than the building's {:.2} m; keep it readable and take the team share to the owner instead (decision 12)",
                             size[1]
@@ -891,7 +893,7 @@ pub fn check_visuals(
             let (Use::Unit(_), Use::Unit(_)) = (a.usage, b.usage) else {
                 continue;
             };
-            if a.rig != b.rig {
+            if !same_rig_group(a, b) {
                 continue;
             }
             let apart = (0..3).any(|c| {
@@ -914,6 +916,20 @@ pub fn check_visuals(
         .lines
         .push(format!("files: {} distinct", all_files.len()));
     report
+}
+
+/// Whether two measured units are variants of one character, whose
+/// silhouettes the 1.4x rule compares: the same rig (the baked
+/// `asset.extras.rig`, the hash of a skin's joint names, else the file)
+/// and the same base texture. Art slice 4 added the texture: every `KayKit`
+/// Adventurers character is skinned to one 41-joint skeleton, so the rig
+/// alone would hold the Knight, the Mage, the Barbarian and both Rogues in
+/// one group, while their bodies, heads and clothes differ; each one's
+/// atlas (`knight_texture`, `mage_texture`, ...) is what its variants
+/// share (the hooded Rogue embeds the Rogue's bytes, so the Yeoman and the
+/// Bowman are compared, as are the Shieldbearer and the Outrider).
+fn same_rig_group(a: &Measured, b: &Measured) -> bool {
+    a.rig == b.rig && a.texture_hash == b.texture_hash
 }
 
 /// Load the rules under `data` and check `visuals.ron` against `assets`.
@@ -1513,6 +1529,118 @@ mod tests {
         );
         assert!(
             text.contains("FAIL sites[0] m/barn.gltf: its x/z centre is (0.000, 0.250) m"),
+            "{text}"
+        );
+    }
+
+    /// Art slice 4 (owner decision 12): a unit's `banner_at` plants the
+    /// team banner on it too, and its team share is measured on model plus
+    /// banner against the unit floor (200‰). A unit's banner may stand
+    /// taller than the unit (a standard on a pole over a siege engine),
+    /// unlike a building's.
+    #[test]
+    fn check_measures_a_unit_banner() {
+        let dir = TempDir::new("check-unit-banner");
+        let m = dir.path().join("m");
+        std::fs::create_dir_all(&m).unwrap();
+        box_gltf(&m, "cart", [2.0, 1.5, 2.0], 0.0, false);
+        box_gltf(&m, "flag", [0.1, 0.5, 1.0], 0.0, true);
+        let rules = rules::Rules::load(repo_root().join("data")).unwrap();
+        let run = |banner: u32| {
+            let text = format!(
+                r#"(units: {{ "mangonel": Scene(path: "m/cart.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, team: Some("t"), banner_at: Some((offset_x100: (-80, 0, 80), scale_x100: {banner}))) }},
+                   buildings: {{}},
+                   team_swatches: {{ "t": (rects: [(4, 0, 4, 4)], desaturate_permille: 0) }},
+                   banner: Some(Scene(path: "m/flag.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 270, team: Some("t"))))"#
+            );
+            let v: Visuals = ron::from_str(&text).unwrap();
+            check_visuals(
+                &v,
+                &rules.units,
+                &rules.buildings,
+                dir.path(),
+                &Budgets::default(),
+            )
+            .text()
+        };
+        // At 1.5x the banner lifts the neutral cart to 108‰: under 200‰.
+        let text = run(150);
+        assert!(
+            text.contains(
+                "FAIL units[\"mangonel\"] m/cart.gltf: team area 108‰ (model plus banner) is under the 200‰ floor"
+            ),
+            "{text}"
+        );
+        // At 4x it stands 2.00 m over the 1.5 m cart and passes: 17.6 of
+        // 40.8 m² on team texels.
+        let text = run(400);
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("ok units[\"mangonel\"]"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            line.contains(" team=431‰ model_team=0‰ banner=2.00m "),
+            "{line}"
+        );
+        assert!(!text.contains("taller than"), "{text}");
+    }
+
+    /// Art slice 4: the silhouette rule compares units of one rig only when
+    /// they also share a base texture. Two bakes of one skeleton with
+    /// different textures (two characters on a shared rig) are never
+    /// compared; with the same texture they clash.
+    #[test]
+    fn silhouettes_compare_one_rig_on_one_texture() {
+        let dir = TempDir::new("check-rig-texture");
+        let cache = dir.path().join("cache");
+        let assets = dir.path().join("assets");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("rig.glb"),
+            crate::testkit::rig_glb("LINEAR", false),
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("other.png"),
+            crate::testkit::atlas(true).encode_png().unwrap(),
+        )
+        .unwrap();
+        let bake_ron = dir.path().join("bake.ron");
+        std::fs::write(
+            &bake_ron,
+            r#"(models: [
+                (out: "m/a.glb", src: "rig.glb", keep: ["Body"], pose: (clip: "Bend", at_ms: 0), max_texture: 8),
+                (out: "m/b.glb", src: "rig.glb", keep: ["Body"], pose: (clip: "Bend", at_ms: 0), max_texture: 8),
+                (out: "m/c.glb", src: "rig.glb", texture: Some("other.png"), keep: ["Body"], pose: (clip: "Bend", at_ms: 0), max_texture: 8),
+            ])"#,
+        )
+        .unwrap();
+        crate::bake::bake(&bake_ron, &cache, &assets, None).unwrap();
+        let rig = |f: &str| crate::bake::rig_key(&Model::load(&assets.join(f)).unwrap());
+        assert_eq!(rig("m/a.glb"), rig("m/c.glb"), "one skeleton");
+        let rules = rules::Rules::load(repo_root().join("data")).unwrap();
+        let unit = |kind: &str, file: &str| {
+            format!(
+                r#""{kind}": Scene(path: "m/{file}", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0),"#
+            )
+        };
+        let run = |units: String| {
+            let v: Visuals =
+                ron::from_str(&format!("(units: {{ {units} }}, buildings: {{}})")).unwrap();
+            check_visuals(
+                &v,
+                &rules.units,
+                &rules.buildings,
+                &assets,
+                &Budgets::default(),
+            )
+            .text()
+        };
+        let text = run(unit("yeoman", "a.glb") + &unit("scribe", "c.glb"));
+        assert!(!text.contains("less than 1.4x apart"), "{text}");
+        let text = run(unit("yeoman", "a.glb") + &unit("scribe", "b.glb"));
+        assert!(
+            text.contains(r#"FAIL units["yeoman"] m/a.glb: same rig as units["scribe"] and less than 1.4x apart"#),
             "{text}"
         );
     }

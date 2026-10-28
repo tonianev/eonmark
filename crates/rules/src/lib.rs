@@ -2096,12 +2096,15 @@ mod tests {
         cleared.visuals = Visuals::default();
         assert_eq!(a.rules_hash(), cleared.rules_hash());
 
+        // The Skirmisher's line as the repository has it (a model since
+        // art slice 4), so the test does not depend on its look.
+        let skirmisher = live_visuals_line("skirmisher");
         let edited = loads_after_edits(
             "visuals-edit",
             &[(
                 "visuals.ron",
-                r#""skirmisher": Body(shape: Cone, height_tiles_x100: 150)"#,
-                r#""skirmisher": Body(shape: Cone, height_tiles_x100: 160)"#,
+                skirmisher.as_str(),
+                r#"    "skirmisher": Body(shape: Cone, height_tiles_x100: 160),"#,
             )],
         );
         assert_eq!(
@@ -2127,8 +2130,8 @@ mod tests {
         let msg = load_error_after_edit(
             "visual-bad-height",
             "visuals.ron",
-            r#""skirmisher": Body(shape: Cone, height_tiles_x100: 150)"#,
-            r#""skirmisher": Body(shape: Cone, height_tiles_x100: 500)"#,
+            &live_visuals_line("skirmisher"),
+            r#"    "skirmisher": Body(shape: Cone, height_tiles_x100: 500),"#,
         );
         assert!(msg.contains("visuals.ron"), "{msg}");
         assert!(
@@ -2298,6 +2301,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(&data_dir(), &dir);
         dir
+    }
+
+    /// The line of the repository's `data/visuals.ron` that maps the unit
+    /// or building kind `id` (`    "id": ...,`), so a test that edits a
+    /// look does not depend on what the look is.
+    fn live_visuals_line(id: &str) -> String {
+        let text = std::fs::read_to_string(data_dir().join("visuals.ron")).unwrap();
+        let key = format!("    \"{id}\": ");
+        text.lines()
+            .find(|l| l.starts_with(&key))
+            .unwrap_or_else(|| panic!("visuals.ron has no line for {id:?}"))
+            .to_string()
     }
 
     /// Replace the first `from` in the copied `file` with `to`, asserting

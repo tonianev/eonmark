@@ -258,10 +258,13 @@ fn a_cadence_inside_the_command_delay_exits_1_naming_personalities_ron() {
 /// unit kind without a visual fails data-check naming the file and kind.
 #[test]
 fn a_unit_kind_without_a_visual_exits_1_naming_visuals_ron() {
+    // The Yeoman's line as the repository has it (a model since art slice
+    // 4), so the test does not depend on its look.
+    let yeoman = format!("{}\n", visuals_line("yeoman"));
     rejects_edit(
         "visual-missing",
         "visuals.ron",
-        "    \"yeoman\": Primitive(Capsule),\n",
+        &yeoman,
         "",
         &[r#"units["yeoman"]: "#, "needs a visual"],
     );
@@ -273,8 +276,8 @@ fn a_visual_out_of_range_exits_1_naming_visuals_ron() {
     rejects_edit(
         "visual-height",
         "visuals.ron",
-        r#""skirmisher": Body(shape: Cone, height_tiles_x100: 150)"#,
-        r#""skirmisher": Body(shape: Cone, height_tiles_x100: 500)"#,
+        &visuals_line("skirmisher"),
+        r#"    "skirmisher": Body(shape: Cone, height_tiles_x100: 500),"#,
         &[r#"units["skirmisher"].height_tiles_x100: "#, "20..=400"],
     );
 }
@@ -302,17 +305,19 @@ fn a_missing_visuals_ron_exits_1_naming_it() {
 #[test]
 fn a_valid_visuals_edit_keeps_the_rules_hash() {
     let repo = data_check(&repo_data());
-    let from = r#""skirmisher": Body(shape: Cone, height_tiles_x100: 150)"#;
+    // The Skirmisher's line as the repository has it, one size step
+    // bigger (its model's scale since art slice 4, a Body's height before),
+    // so the test does not depend on its look and the edit names the same
+    // files (the `models=` count stays).
+    let from = visuals_line("skirmisher");
+    let to = bump_size(&from);
+    assert_ne!(from, to, "the Skirmisher's line has a size to change");
     let dir = edited_copy("visuals-edit", "visuals.ron", |text| {
         assert!(
-            text.contains(from),
+            text.contains(&from),
             "visuals.ron no longer contains {from:?}"
         );
-        text.replacen(
-            from,
-            r#""skirmisher": Body(shape: Cone, height_tiles_x100: 160)"#,
-            1,
-        )
+        text.replacen(&from, &to, 1)
     });
     let edited = data_check(&dir);
     let (repo_out, edited_out) = (text(&repo.stdout), text(&edited.stdout));
@@ -351,6 +356,23 @@ fn a_building_without_a_visual_exits_1_naming_visuals_ron() {
 }
 
 /// The whole line of the repository's `visuals.ron` that maps `id`.
+/// `line` (a `visuals.ron` look) with its first `scale_x100` raised by 1,
+/// or, without one, its first `height_tiles_x100` raised by 10: a valid
+/// edit of any Scene or Body look that keeps the files it names.
+fn bump_size(line: &str) -> String {
+    for (key, step) in [("scale_x100: ", 1u32), ("height_tiles_x100: ", 10)] {
+        if let Some(at) = line.find(key) {
+            let start = at + key.len();
+            let digits = line[start..]
+                .find(|c: char| !c.is_ascii_digit())
+                .map_or(line.len(), |n| start + n);
+            let value: u32 = line[start..digits].parse().expect("a number");
+            return format!("{}{}{}", &line[..start], value + step, &line[digits..]);
+        }
+    }
+    line.to_string()
+}
+
 fn visuals_line(id: &str) -> String {
     let text = std::fs::read_to_string(repo_data().join("visuals.ron")).unwrap();
     let key = format!("    \"{id}\": ");

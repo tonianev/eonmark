@@ -128,9 +128,10 @@ pub enum Visual {
         /// skipped when their model fails.
         #[serde(default)]
         fallback: Option<Box<Visual>>,
-        /// Where this building's team banner ([`Visuals::banner`]) stands
-        /// (owner decision 12 of the art pass): buildings only, and only
-        /// with a `banner` model. `None` draws no banner.
+        /// Where this building's or unit's team banner ([`Visuals::banner`])
+        /// stands (owner decision 12 of the art pass: team buildings and
+        /// the Mangonel), and only with a `banner` model. `None` draws no
+        /// banner.
         #[serde(default)]
         banner_at: Option<Mount>,
         /// Where the Seat flag ([`Visuals::seat_flag`]) stands on a Seat:
@@ -144,15 +145,17 @@ pub enum Visual {
 /// Where a team banner or the Seat flag stands on a building (art slice
 /// 3): placed from the footprint's centre on the ground, after the
 /// building's own model placement, in world axes (+Z toward the camera).
-/// The banner or flag model is turned by `yaw_deg` and scaled by
-/// `scale_x100` there; its own Scene placement (centring offsets, yaw)
-/// applies first.
+/// On a unit (art slice 4, the Mangonel's banner) the offset is from the
+/// unit's position on the ground in the unit's own axes (+X its facing),
+/// so the banner turns and moves with it. The banner or flag model is
+/// turned by `yaw_deg` and scaled by `scale_x100` there; its own Scene
+/// placement (centring offsets, yaw) applies first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
-    /// `(x, y, z)` in hundredths of a tile from the footprint centre on
-    /// the ground: `x` and `z` within ±[`MAX_MOUNT_REACH_X100`], `y` in
-    /// 0..=[`MAX_MOUNT_HEIGHT_X100`].
+    /// `(x, y, z)` in hundredths of a tile from the footprint centre (a
+    /// unit's position) on the ground: `x` and `z` within
+    /// ±[`MAX_MOUNT_REACH_X100`], `y` in 0..=[`MAX_MOUNT_HEIGHT_X100`].
     pub offset_x100: (i32, i32, i32),
     /// Uniform scale of the banner or flag model, hundredths,
     /// 1..=[`MAX_SCALE_X100`]; defaults to 100.
@@ -285,11 +288,11 @@ pub struct Visuals {
     /// `seat_flag_at` says; `None` draws none.
     #[serde(default)]
     pub seat_flag: Option<Visual>,
-    /// The team banner every complete building with a `banner_at` carries
-    /// (owner decision 12 of the art pass): a Scene with a `team` swatch
-    /// and no fallback, drawn as one shared mesh with one material per
-    /// team. `None` draws none, and then no building may name a
-    /// `banner_at`.
+    /// The team banner every complete building and every unit with a
+    /// `banner_at` carries (owner decision 12 of the art pass): a Scene
+    /// with a `team` swatch and no fallback, drawn as one shared mesh with
+    /// one material per team. `None` draws none, and then no building or
+    /// unit may name a `banner_at`.
     #[serde(default)]
     pub banner: Option<Visual>,
     /// Props per impassable terrain, keyed `forest`, `mountain` or
@@ -680,14 +683,20 @@ impl Visuals {
                 ));
             }
         }
-        let building = matches!(usage, SceneUse::Footprint { neutral: false, .. });
+        // Owner decision 12 of the art pass: team buildings and units (the
+        // Mangonel, art slice 4) carry the banner; sites, rubble, props and
+        // flags are neutral or are banners themselves.
+        let carrier = matches!(
+            usage,
+            SceneUse::Footprint { neutral: false, .. } | SceneUse::Unit
+        );
         if let Some(mount) = banner_at {
             let field = sub(field, "banner_at");
-            if !building {
+            if !carrier {
                 return Err(Error::invalid(
                     path,
                     &field,
-                    "only a building carries a team banner",
+                    "only a building or a unit carries a team banner",
                 ));
             }
             if self.banner.is_none() {
@@ -2274,7 +2283,8 @@ mod tests {
             "{err}"
         );
         // Only a Town kind carries the Seat flag (the helper's "town" is
-        // not one), and only buildings carry banners.
+        // not one), and only buildings and units carry banners (a unit
+        // since art slice 4: the Mangonel's, owner decision 12).
         let err = rejects(
             &file(
                 YEOMAN,
@@ -2284,9 +2294,28 @@ mod tests {
             r#"buildings["town"].seat_flag_at"#,
         );
         assert!(err.contains("only a Town kind"), "{err}");
-        let unit = r#""yeoman": Scene(path: "m/y.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, banner_at: Some((offset_x100: (0, 0, 0))))"#;
-        let err = rejects(&file(unit, CUBOID, &banner), r#"units["yeoman"].banner_at"#);
-        assert!(err.contains("only a building"), "{err}");
+        let unit = r#""yeoman": Scene(path: "m/y.glb", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, banner_at: Some((offset_x100: (-40, 0, 30), scale_x100: 300)))"#;
+        check(&file(unit, CUBOID, &banner)).unwrap();
+        let v = parse(&file(unit, CUBOID, &banner)).unwrap();
+        let Some(Visual::Scene {
+            banner_at: Some(m), ..
+        }) = v.units.get("yeoman")
+        else {
+            panic!("a unit's banner_at parses");
+        };
+        assert_eq!((m.offset_x100, m.scale_x100), ((-40, 0, 30), 300));
+        // A unit's banner needs the banner model too, and its mount the
+        // same ranges.
+        let err = rejects(&file(unit, CUBOID, SWATCH), r#"units["yeoman"].banner_at"#);
+        assert!(err.contains("no banner model"), "{err}");
+        rejects(
+            &file(
+                &unit.replace("(-40, 0, 30)", "(-301, 0, 30)"),
+                CUBOID,
+                &banner,
+            ),
+            r#"units["yeoman"].banner_at.offset_x100"#,
+        );
         let site = r#"Scene(path: "m/s.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, banner_at: Some((offset_x100: (0, 0, 0))))"#;
         rejects(
             &file(YEOMAN, CUBOID, &format!("{banner}, sites: [{site}]")),

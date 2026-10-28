@@ -29,8 +29,8 @@ fn repo_models_pass_check() {
 
 /// Every vendored row of sources.tsv and every output of bake.ron has an
 /// ATTRIBUTION.md row whose Author, Source URL, License and Modifications
-/// match, and every third-party row of ATTRIBUTION.md comes from one of
-/// them.
+/// match (and a sha256 pin), and every third-party row of ATTRIBUTION.md
+/// comes from one of them.
 #[test]
 fn attribution_rows_match_the_sources() {
     let tsv = std::fs::read_to_string(root().join("tools/assets/sources.tsv")).unwrap();
@@ -88,6 +88,9 @@ fn attribution_rows_match_the_sources() {
     }
     let bake = std::fs::read_to_string(root().join("tools/assets/bake.ron")).unwrap();
     for m in inspect_gltf::bake::parse(&bake).unwrap().models {
+        // Pinned like a vendored file (scripts/check_assets.sh holds the
+        // committed output to it).
+        assert_eq!(m.sha256.len(), 64, "{} is not pinned", m.out);
         let row = find(&m.out).unwrap_or_else(|| panic!("no ATTRIBUTION.md row for {}", m.out));
         let src = sources
             .iter()

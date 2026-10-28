@@ -53,7 +53,6 @@
 use bevy::picking::events::{Click, Pointer};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
-use bevy::text::FontSize;
 use rules::Rules;
 use rules::strings::fill;
 use sim::{
@@ -196,10 +195,7 @@ impl Plugin for CommandCardPlugin {
 fn text(value: &str, size: f32) -> impl Bundle {
     (
         Text::new(value),
-        TextFont {
-            font_size: FontSize::Px(size),
-            ..default()
-        },
+        crate::fonts::hud_font(size),
         TextColor(palette::HUD_TEXT),
     )
 }

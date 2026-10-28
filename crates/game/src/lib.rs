@@ -103,3 +103,5 @@ pub mod render_watchdog;
 pub mod selection;
 pub mod sim_driver;
 pub mod terrain_props;
+#[cfg(test)]
+mod ui_test;

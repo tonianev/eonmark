@@ -199,7 +199,7 @@ Rendering of units between ticks: `present.rs` keeps the previous and current si
 
 The bundle declares `NSHighResolutionCapable` (see [macos-packaging.md](macos-packaging.md)). Bevy's `WindowResolution` keeps logical and physical size apart, so a 1280 x 800 window renders at 2560 x 1600 on a Retina display. `UiScale` multiplies `Val::Px` only, so every HUD dimension is authored in `Val::Px` and the UI scale setting is a single persisted multiplier. Percent and viewport units are avoided in the HUD for this reason.
 
-Text uses the Inter variable font through a variable `TextFont`; the OFL license text ships beside the font file. Panels use Kenney UI Pack 9-slice images through `NodeImageMode::Sliced`. The palette is matte and judged on both a P3 display and an sRGB screenshot, because wgpu 29 can oversaturate on wide-gamut surfaces (see [../ART_STYLE.md](../ART_STYLE.md)).
+Text uses the Inter variable font through a variable `TextFont`; the OFL license text ships beside the font file. Every HUD, overlay and menu text takes its `TextFont` from `fonts::hud_font`, which turns on Inter's tabular figures (`tnum`): with Inter's default proportional figures a stock going from 111 to 144 would move every readout right of it by about 10 px, so the top bar would twitch with each drop-off (`readouts_hold_their_place_when_a_number_changes`). Panels use Kenney UI Pack 9-slice images through `NodeImageMode::Sliced`. The palette is matte and judged on both a P3 display and an sRGB screenshot, because wgpu 29 can oversaturate on wide-gamut surfaces (see [../ART_STYLE.md](../ART_STYLE.md)).
 
 ## Health bars, rings and markers
 

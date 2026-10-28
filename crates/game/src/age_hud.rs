@@ -28,7 +28,6 @@
 use bevy::picking::events::{Click, Pointer};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
-use bevy::text::FontSize;
 use rules::Rules;
 use rules::strings::fill;
 use sim::{Command, RejectReason, SimView};
@@ -145,10 +144,7 @@ impl Plugin for AgeHudPlugin {
 fn text(value: &str, size: f32) -> impl Bundle {
     (
         Text::new(value),
-        TextFont {
-            font_size: FontSize::Px(size),
-            ..default()
-        },
+        crate::fonts::hud_font(size),
         TextColor(palette::HUD_TEXT),
         TextLayout::no_wrap(),
     )
@@ -287,6 +283,7 @@ mod tests {
     use super::*;
     use crate::economy_hud::PopReadout;
     use crate::hud::spawn_hud;
+    use bevy::text::FontSize;
 
     fn data_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")

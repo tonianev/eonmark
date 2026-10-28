@@ -34,20 +34,23 @@
 //     banner or the Seat flag stands, from the footprint centre on the
 //     ground (on a unit: from its position, in its own axes, +X ahead);
 //     the offset places the flag's centre, its pole stands 0.11 m x scale
-//     to its left.
+//     to its left, and yaw turns it (at 0 its cloth flies east, facing the
+//     camera; the cloth is two-sided).
 //
 // buildings: a Scene with the owner's team swatch, or Primitive(Cuboid), the
 //     M3b team-coloured box over the footprint (also every Scene's fallback).
 //     A one-line swap: `"croft": Primitive(Cuboid),` (docs/ART_STYLE.md).
 //     banner_at (owner decision 12 of the art pass) plants `banner`, the
-//     KayKit flag repainted in team colour, beside the building, sized so
-//     the team share of model plus banner reaches the 100‰ floor where a
-//     banner no taller than the building can (the Town and the Ore Pit are
-//     held for the owner, inspect_gltf::check::PENDING_TEAM_FLOOR); every
-//     banner is one shared mesh with one material per team. The Mangonel
-//     carries the same banner (art slice 4), which follows it. seat_flag_at
-//     (Town kinds) puts `seat_flag` on a Seat: on the castle's keep, at
-//     least 1.4x the size of a banner.
+//     KayKit flag repainted in team colour, on the building, sized so the
+//     team share of model plus banner reaches the 100‰ floor of every kind
+//     and placed inside the footprint (`inspect_gltf check` holds both): a
+//     roof mount sinks the pole into the building so the cloth clears it,
+//     and a free front corner of the footprint takes it on the ground.
+//     Every banner is one shared mesh with one material per team. The
+//     Mangonel carries the same banner (art slice 4), which follows it.
+//     seat_flag_at (Town kinds) puts `seat_flag` on a Seat: on the castle's
+//     keep, inside the footprint and wholly above the Town's own banner, so
+//     a Seat reads apart from any other Town by its place.
 // sites: one look per equal share of the build progress, neutral, scaled by
 //     the footprint side; rubble: the wreck of a destroyed building for
 //     ds deciseconds; terrain: props on forest, mountain and water (never
@@ -77,16 +80,22 @@
   },
   // Scales fill 0.95 of the footprint side (the check's suggestion);
   // y_offset 1 lifts each base 1 cm off the ground; the x/z offsets centre
-  // the lumbermill, barracks and blacksmith files.
+  // the lumbermill, barracks and blacksmith files. Banners (2026-10-28
+  // review): on the castle's front-left tower over the gate (2.83 m, 102‰),
+  // the cottage's front ridge, the lumbermill's front over its log yard,
+  // the mine's front-left foot flying over the mine at 45° (2.33 m, the
+  // only size that reaches 100‰ on 5‰ of rock), the barracks' west wing
+  // over its roof, the tower's front edge, and the free front-left corner
+  // of the church and the blacksmith on the ground.
   buildings: {
-    "town": Scene(path: "models/kaykit_hexagon/buildings/blue/building_castle_blue.gltf", scale_x100: 126, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (185, 0, 90), scale_x100: 450)), seat_flag_at: Some((offset_x100: (72, 490, 0), scale_x100: 650))),
-    "croft": Scene(path: "models/kaykit_hexagon/buildings/blue/building_home_A_blue.gltf", scale_x100: 223, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (123, 0, 60), scale_x100: 250))),
-    "lumber_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_lumbermill_blue.gltf", scale_x100: 139, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -19, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (160, 0, 50), scale_x100: 550))),
-    "ore_pit": Scene(path: "models/kaykit_hexagon/buildings/blue/building_mine_blue.gltf", scale_x100: 99, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (129, 0, 60), scale_x100: 350))),
-    "scriptorium": Scene(path: "models/kaykit_hexagon/buildings/blue/building_church_blue.gltf", scale_x100: 247, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (168, 0, 90), scale_x100: 300))),
-    "muster_hall": Scene(path: "models/kaykit_hexagon/buildings/blue/building_barracks_blue.gltf", scale_x100: 182, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -12, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (228, 0, 90), scale_x100: 780))),
-    "watchtower": Scene(path: "models/kaykit_hexagon/buildings/blue/building_tower_A_blue.gltf", scale_x100: 82, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (33, 175, 0), scale_x100: 300))),
-    "engine_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_blacksmith_blue.gltf", scale_x100: 221, y_offset_tiles_x100: 1, yaw_deg: 0, x_offset_tiles_x100: -3, z_offset_tiles_x100: -14, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (187, 0, 80), scale_x100: 350))),
+    "town": Scene(path: "models/kaykit_hexagon/buildings/blue/building_castle_blue.gltf", scale_x100: 126, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (-9, 91, 110), scale_x100: 1020, yaw_deg: -15)), seat_flag_at: Some((offset_x100: (60, 490, 0), scale_x100: 650))),
+    "croft": Scene(path: "models/kaykit_hexagon/buildings/blue/building_home_A_blue.gltf", scale_x100: 223, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (28, 168, 70), scale_x100: 250))),
+    "lumber_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_lumbermill_blue.gltf", scale_x100: 139, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -19, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (5, 124, 84), scale_x100: 550))),
+    "ore_pit": Scene(path: "models/kaykit_hexagon/buildings/blue/building_mine_blue.gltf", scale_x100: 99, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (0, 0, 0), scale_x100: 840, yaw_deg: 45))),
+    "scriptorium": Scene(path: "models/kaykit_hexagon/buildings/blue/building_church_blue.gltf", scale_x100: 247, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (-110, 0, 130), scale_x100: 300, yaw_deg: -15))),
+    "muster_hall": Scene(path: "models/kaykit_hexagon/buildings/blue/building_barracks_blue.gltf", scale_x100: 182, y_offset_tiles_x100: 1, yaw_deg: 0, z_offset_tiles_x100: -12, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (-37, 124, -18), scale_x100: 780))),
+    "watchtower": Scene(path: "models/kaykit_hexagon/buildings/blue/building_tower_A_blue.gltf", scale_x100: 82, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (0, 111, 41), scale_x100: 300))),
+    "engine_yard": Scene(path: "models/kaykit_hexagon/buildings/blue/building_blacksmith_blue.gltf", scale_x100: 221, y_offset_tiles_x100: 1, yaw_deg: 0, x_offset_tiles_x100: -3, z_offset_tiles_x100: -14, team: Some("kaykit_hexagon"), fallback: Some(Primitive(Cuboid)), banner_at: Some((offset_x100: (-103, 0, 80), scale_x100: 350, yaw_deg: -15))),
   },
   // Construction stages A, B, C: a third of the build each.
   sites: [

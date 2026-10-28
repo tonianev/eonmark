@@ -220,7 +220,7 @@ A global `--data <dir>` flag (default `data`) selects the data directory. Every 
 
 ### `tools/`
 
-`tools/inspect_gltf` (art pass): the asset tool, engine-free (it links `rules`, `gltf`, `png`, `clap`, `ron` and `serde`, no Bevy or glam), with `inspect`, `swatches`, `palette`, `bake` and `check`. `check data assets` measures every Scene of `data/visuals.ron` as the game places it (budgets, import rules, ground contact and centre, team share against `team_swatches` with a building's banner counted, the reserved-rect and 1.4x rules, facing) and runs in CI's check job and as the `repo_models_pass_check` test; kinds held for an owner decision are listed in `check::PENDING_TEAM_FLOOR` and print `PENDING`. `tools/assets/` holds `sources.tsv` (every remote file with its sha256 pin) and `bake.ron`.
+`tools/inspect_gltf` (art pass): the asset tool, engine-free (it links `rules`, `gltf`, `png`, `clap`, `ron` and `serde`, no Bevy or glam), with `inspect`, `swatches`, `palette`, `bake` and `check`. `check data assets` measures every Scene of `data/visuals.ron` as the game places it (budgets, import rules, ground contact and centre, team share against `team_swatches` with a building's banner counted, the reserved-rect and 1.4x rules, facing) and runs in CI's check job and as the `repo_models_pass_check` test; it also keeps every banner and Seat flag inside its building's footprint and the Seat flag above the Town's banner. `tools/assets/` holds `sources.tsv` (every remote file with its sha256 pin) and `bake.ron`.
 
 ### `data/`
 

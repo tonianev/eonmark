@@ -12,12 +12,17 @@
 //! ([`facing`]), plus a suggested `scale_x100` for a building's footprint
 //! or a unit's look height.
 //!
-//! Art slice 3 (owner decision 12): a building's team share is measured on
-//! the model plus its team banner (`banner_at`, the `banner` model placed
-//! at its data scale), and the line prints the banner's height (and on a
-//! Town the Seat flag's). A banner may not stand taller than its building,
-//! and the Seat flag must stand at least 1.4x taller than the Town's
-//! banner, so the two read apart.
+//! Owner decision 12 of the art pass: a building's team share is measured
+//! on the model plus its team banner (`banner_at`, the `banner` model placed
+//! at its data scale), against the same floors, and the line prints the
+//! banner's height (and on a Town the Seat flag's). Every mount on a
+//! building keeps its banner or flag inside the footprint in plan view, so
+//! no cloth hangs over a neighbour's tiles, into the terrain beside it or
+//! over the units walking there (a building's own rule, not a unit's: a
+//! unit's banner moves with it). On a Town the Seat flag flies wholly
+//! above the Town's own banner, so a Seat reads apart from any other Town
+//! by its place. A banner taller than its building is only a note: its
+//! size is the owner's to judge at the 40 m sign-off.
 
 use crate::bake::rig_key;
 use crate::image::Rgba;
@@ -40,6 +45,9 @@ pub const GROUND_Y: (f32, f32) = (-0.02, 0.05);
 pub const CENTRE_TOLERANCE: f32 = 0.10;
 /// The same for terrain props, which are jittered anyway.
 pub const PROP_CENTRE_TOLERANCE: f32 = 0.5;
+/// How far a banner or the Seat flag may reach past its building's
+/// footprint edge, metres (rounding; the rule is that it stays inside).
+pub const FOOTPRINT_TOLERANCE: f32 = 0.01;
 /// Share of a footprint side a building model should fill.
 pub const FOOTPRINT_FILL: f32 = 0.95;
 
@@ -72,21 +80,7 @@ pub struct Budgets {
     pub building_team_permille: u32,
     /// Least team share of the Seat flag, permille.
     pub flag_team_permille: u32,
-    /// Building kinds whose team share stays under the floor with a banner
-    /// of readable size, held for the owner (art-pass owner decision 12:
-    /// a banner is never inflated past its building's height or into an
-    /// absurd size at 40 m to pass the floor). `check` prints a `PENDING`
-    /// line with the measured share for each instead of failing, and fails
-    /// if a listed kind passes, so the list cannot go stale.
-    pub pending_team_floor: &'static [&'static str],
 }
-
-/// The building kinds held for the owner in [`Budgets::default`]'s
-/// `pending_team_floor` (art slice 3, measured on model plus banner): the
-/// Ore Pit's mine is almost all rock (5‰), and even a banner as tall as
-/// the mine (1.13 m) lifts it to 31‰; the Town's castle (67‰) would need
-/// a banner about 2.8 m tall with a cloth as wide as the castle.
-pub const PENDING_TEAM_FLOOR: &[&str] = &["ore_pit", "town"];
 
 impl Default for Budgets {
     /// The caps set in art slice 2 from the measured sources
@@ -123,7 +117,6 @@ impl Default for Budgets {
             wain_team_permille: 80,
             building_team_permille: 100,
             flag_team_permille: 300,
-            pending_team_floor: PENDING_TEAM_FLOOR,
         }
     }
 }
@@ -430,6 +423,21 @@ fn swatch_surface(
     Ok(Surface { team, straddles })
 }
 
+/// How far placed triangles (metres from a building's footprint centre)
+/// reach past the edge of `kind`'s footprint in plan view, if they do.
+fn past_footprint(tris: &[([Vec3; 3], [[f32; 2]; 3])], kind: &BuildingKind) -> Option<f32> {
+    let (lo, hi) = bounds(tris.iter().flat_map(|(p, _)| p.iter()))?;
+    let (hx, hz) = (
+        kind.width_tiles as f32 / 2.0,
+        kind.height_tiles as f32 / 2.0,
+    );
+    let past = (-hx - lo[0])
+        .max(hi[0] - hx)
+        .max(-hz - lo[2])
+        .max(hi[2] - hz);
+    (past > FOOTPRINT_TOLERANCE).then_some(past)
+}
+
 /// Height of placed triangles (top minus base), metres; 0 for none.
 fn height(tris: &[([Vec3; 3], [[f32; 2]; 3])]) -> f32 {
     bounds(tris.iter().flat_map(|(p, _)| p.iter())).map_or(0.0, |(lo, hi)| hi[1] - lo[1])
@@ -461,8 +469,6 @@ pub struct CheckReport {
     pub lines: Vec<String>,
     /// Every problem found.
     pub problems: Vec<String>,
-    /// Shortfalls held for the owner ([`Budgets::pending_team_floor`]).
-    pub pending: Vec<String>,
     /// Scenes checked.
     pub scenes: usize,
 }
@@ -474,14 +480,8 @@ impl CheckReport {
         if !out.is_empty() {
             out.push('\n');
         }
-        if self.problems.is_empty() && self.pending.is_empty() {
+        if self.problems.is_empty() {
             out.push_str(&format!("check: ok {} scene(s)\n", self.scenes));
-        } else if self.problems.is_empty() {
-            out.push_str(&format!(
-                "check: ok {} scene(s), {} held for the owner\n",
-                self.scenes,
-                self.pending.len()
-            ));
         } else {
             out.push_str(&format!(
                 "check: FAIL {} problem(s) in {} scene(s)\n",
@@ -639,9 +639,8 @@ pub fn check_visuals(
         // Owner decision 12: the team banner (and on a Seat the Seat flag)
         // at the building's mounts, measured at their data scale.
         let mut mounts_desc = String::new();
-        let mut pending_lines: Vec<String> = Vec::new();
         let mut banner_team: Option<(f64, f64)> = None;
-        let mut banner_height = None;
+        let mut banner_top = None;
         if let (Use::Building(_) | Use::Unit(_), Some(mount)) = (usage, s.banner_at) {
             match visuals.banner.as_ref().and_then(scene_ref) {
                 None => problems.push(
@@ -652,13 +651,21 @@ pub fn check_visuals(
                     problems.extend(bp.problems.iter().map(|p| format!("banner: {p}")));
                     all_files.extend(bp.files.keys().cloned());
                     let h = height(&bp.tris);
-                    banner_height = Some(h);
+                    banner_top = bounds(bp.tris.iter().flat_map(|(p, _)| p.iter())).map(|b| b.1[1]);
                     mounts_desc.push_str(&format!(" banner={h:.2}m"));
-                    if tris > 0 && h > size[1] && matches!(usage, Use::Building(_)) {
-                        problems.push(format!(
-                            "the banner stands {h:.2} m tall, taller than the building's {:.2} m; keep it readable and take the team share to the owner instead (decision 12)",
-                            size[1]
-                        ));
+                    if let Use::Building(kind) = usage {
+                        if let Some(past) = past_footprint(&bp.tris, kind) {
+                            problems.push(format!(
+                                "the banner reaches {past:.2} m past the {}x{} footprint's edge, over a neighbour's tiles (a building or prop beside it would be pierced, units there covered); keep banner_at inside the footprint",
+                                kind.width_tiles, kind.height_tiles
+                            ));
+                        }
+                        if tris > 0 && h > size[1] {
+                            notes.push(format!(
+                                "the banner stands {h:.2} m tall, over the building's {:.2} m (a size for the owner to judge at the 40 m sign-off)",
+                                size[1]
+                            ));
+                        }
                     }
                     let area: f64 = bp
                         .tris
@@ -707,11 +714,18 @@ pub fn check_visuals(
                     problems.extend(fp.problems.iter().map(|p| format!("seat flag: {p}")));
                     let h = height(&fp.tris);
                     mounts_desc.push_str(&format!(" seat_flag={h:.2}m"));
-                    if let Some(b) = banner_height
-                        && h < b * 1.4
+                    if let Some(past) = past_footprint(&fp.tris, kind) {
+                        problems.push(format!(
+                            "the Seat flag reaches {past:.2} m past the {}x{} footprint's edge; keep seat_flag_at inside the footprint",
+                            kind.width_tiles, kind.height_tiles
+                        ));
+                    }
+                    let foot = bounds(fp.tris.iter().flat_map(|(p, _)| p.iter())).map(|b| b.0[1]);
+                    if let (Some(foot), Some(top)) = (foot, banner_top)
+                        && foot <= top
                     {
                         problems.push(format!(
-                            "the Seat flag stands {h:.2} m tall, less than 1.4x the banner's {b:.2} m; it must read apart from the ordinary banners"
+                            "the Seat flag's foot at {foot:.2} m stands under the top of the Town's banner at {top:.2} m; it must fly wholly above that banner, so a Seat reads apart from any other Town"
                         ));
                     }
                 }
@@ -750,21 +764,9 @@ pub fn check_visuals(
             } else {
                 ""
             };
-            let pending = match usage {
-                Use::Building(k) => budgets.pending_team_floor.contains(&k.id.as_str()),
-                _ => false,
-            };
-            if permille < floor && pending {
-                pending_lines.push(format!(
-                    "team area {permille}‰{with} is under the {floor}‰ floor; held for the owner (art-pass owner decision 12, inspect_gltf::check::PENDING_TEAM_FLOOR)"
-                ));
-            } else if permille < floor {
+            if permille < floor {
                 problems.push(format!(
                     "team area {permille}‰{with} is under the {floor}‰ floor"
-                ));
-            } else if pending {
-                problems.push(format!(
-                    "team area {permille}‰{with} meets the {floor}‰ floor but the kind is still held for the owner; drop it from Budgets::pending_team_floor"
                 ));
             }
         }
@@ -825,12 +827,6 @@ pub fn check_visuals(
             if tris > 0 {
                 report.lines.push(format!("  measured {field}: {measures}"));
             }
-        }
-        for p in pending_lines {
-            report
-                .lines
-                .push(format!("PENDING {field} {}: {p}", s.path));
-            report.pending.push(format!("{field}: {p}"));
         }
         for n in notes {
             report.lines.push(format!("  note {field}: {n}"));
@@ -1402,10 +1398,12 @@ mod tests {
     }
 
     /// Owner decision 12 of the art pass: a building's team share is
-    /// measured on the model plus its banner at the mount's scale; a
-    /// banner taller than its building fails, as does a Seat flag under
-    /// 1.4x the Town's banner; the banner model gets its own line with its
-    /// facing; and the Scene's x/z offsets centre an off-centre model.
+    /// measured on the model plus its banner at the mount's scale, against
+    /// the same floor for every kind; a banner or Seat flag that reaches
+    /// past the footprint fails, as does a Seat flag whose foot is not
+    /// above the Town's banner; a banner taller than its building is a
+    /// note; the banner model gets its own line with its facing; and the
+    /// Scene's x/z offsets centre an off-centre model.
     #[test]
     fn check_measures_model_plus_banner_and_mounts() {
         let dir = TempDir::new("check-banner");
@@ -1417,26 +1415,31 @@ mod tests {
         box_gltf(&m, "flag", [0.1, 0.5, 1.0], 0.0, true);
         let rules = rules::Rules::load(repo_root().join("data")).unwrap();
         let flag = r#"Scene(path: "m/flag.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 270, team: Some("t"))"#;
-        // Nothing held for the owner: every floor applies.
-        let strict = Budgets {
-            pending_team_floor: &[],
-            ..Budgets::default()
-        };
-        let run_with = |town: &str, sites: &str, budgets: &Budgets| {
+        let run = |town: &str, sites: &str| {
             let text = format!(
                 r#"(units: {{}}, buildings: {{ "town": {town} }},
                    team_swatches: {{ "t": (rects: [(4, 0, 4, 4)], desaturate_permille: 0) }},
                    banner: Some({flag}), seat_flag: Some({flag}), sites: [{sites}])"#
             );
             let v: Visuals = ron::from_str(&text).unwrap();
-            check_visuals(&v, &rules.units, &rules.buildings, dir.path(), budgets).text()
+            check_visuals(
+                &v,
+                &rules.units,
+                &rules.buildings,
+                dir.path(),
+                &Budgets::default(),
+            )
+            .text()
         };
-        let run = |town: &str, sites: &str| run_with(town, sites, &strict);
-        let town = |banner: u32, seat_flag: u32| {
+        // The flag is 1 m long and 0.1 m deep after its 270° yaw; the
+        // Town's footprint is 3 x 3 m.
+        let town_at = |banner: u32, at: (i32, i32), seat_flag: u32, seat_flag_y: i32| {
             format!(
-                r#"Scene(path: "m/barn.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, team: Some("t"), banner_at: Some((offset_x100: (80, 0, 80), scale_x100: {banner}, yaw_deg: 30)), seat_flag_at: Some((offset_x100: (0, 150, 0), scale_x100: {seat_flag})))"#
+                r#"Scene(path: "m/barn.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0, team: Some("t"), banner_at: Some((offset_x100: ({}, 0, {}), scale_x100: {banner}, yaw_deg: 30)), seat_flag_at: Some((offset_x100: (0, {seat_flag_y}, 0), scale_x100: {seat_flag})))"#,
+                at.0, at.1
             )
         };
+        let town = |banner: u32, seat_flag: u32| town_at(banner, (80, 80), seat_flag, 150);
         let site = r#"Primitive(Cuboid)"#;
 
         // At 1.5x the flag adds 2.475 of 2.925 m² on team texels:
@@ -1470,42 +1473,46 @@ mod tests {
             ),
             "{text}"
         );
-        // Inflated past the building's own 1.5 m, it fails however much
-        // team colour it adds.
+        // At 4x, 1 m east of the centre, the turned banner reaches 1.13 m
+        // past the footprint's east edge: it fails however much team
+        // colour it adds. Its height over the building's is only a note.
         let text = run(&town(400, 600), site);
         assert!(
-            text.contains("the banner stands 2.00 m tall, taller than the building's 1.50 m"),
-            "{text}"
-        );
-        assert!(!text.contains("under the 100‰ floor"), "{text}");
-        // A kind held for the owner prints its shortfall as PENDING and the
-        // check passes; once it meets the floor it must leave the list.
-        let held = Budgets {
-            pending_team_floor: &["town"],
-            ..Budgets::default()
-        };
-        let text = run_with(&town(100, 250), site, &held);
-        assert!(
             text.contains(
-                "PENDING buildings[\"town\"] m/barn.gltf: team area 52‰ (model plus banner) is under the 100‰ floor; held for the owner"
+                "FAIL buildings[\"town\"] m/barn.gltf: the banner reaches 1.13 m past the 3x3 footprint's edge"
             ),
             "{text}"
         );
+        assert!(!text.contains("under the 100‰ floor"), "{text}");
         assert!(
-            text.ends_with("check: ok 3 scene(s), 1 held for the owner\n"),
+            text.contains(
+                "note buildings[\"town\"]: the banner stands 2.00 m tall, over the building's 1.50 m"
+            ),
             "{text}"
         );
-        let text = run_with(&town(150, 250), site, &held);
+        // Centred, a 1.60 m banner stays inside and passes, with the note.
+        let text = run(&town_at(320, (0, 0), 250, 250), site);
+        assert!(text.contains("ok buildings[\"town\"]"), "{text}");
         assert!(
-            text.contains("meets the 100‰ floor but the kind is still held for the owner"),
+            text.contains("the banner stands 1.60 m tall, over the building's 1.50 m"),
             "{text}"
         );
-        assert!(text.contains("check: FAIL 1 problem(s)"), "{text}");
-        assert_eq!(Budgets::default().pending_team_floor, PENDING_TEAM_FLOOR);
-        // A Seat flag hardly larger than the banner does not read apart.
-        let text = run(&town(150, 160), site);
+        assert!(text.ends_with("check: ok 3 scene(s)\n"), "{text}");
+        // So does a Seat flag 4 m long over a 3 m footprint.
+        let text = run(&town(150, 400), site);
         assert!(
-            text.contains("the Seat flag stands 0.80 m tall, less than 1.4x the banner's 0.75 m"),
+            text.contains(
+                "FAIL buildings[\"town\"] m/barn.gltf: the Seat flag reaches 0.50 m past the 3x3 footprint's edge"
+            ),
+            "{text}"
+        );
+        // A Seat flag standing on the ground beside the banner does not
+        // read apart from it: its foot must be above the banner's top.
+        let text = run(&town_at(150, (80, 80), 160, 0), site);
+        assert!(
+            text.contains(
+                "the Seat flag's foot at 0.00 m stands under the top of the Town's banner at 0.75 m"
+            ),
             "{text}"
         );
 

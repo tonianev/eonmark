@@ -363,7 +363,6 @@ pub fn run(cli: &Cli) -> AppExit {
     // are embedded and need no asset root. No `.meta` files are vendored.
     let assets = cli.resolve_assets_dir();
     let assets = std::path::absolute(&assets).unwrap_or(assets);
-    info!("assets: {}", assets.display());
 
     let mut app = App::new();
     let plugins = DefaultPlugins
@@ -383,6 +382,10 @@ pub fn run(cli: &Cli) -> AppExit {
         })),
         None => app.add_plugins(plugins),
     };
+    // Logged only now: `LogPlugin` (in `DefaultPlugins`) installs the
+    // tracing subscriber, and an event before it is dropped.
+    // `scripts/render_smoke.sh` requires this line.
+    info!("assets: {}", assets.display());
     // Display sleep or a screen lock must not end the session.
     app.add_plugins(MonitorLossPlugin);
     if background {

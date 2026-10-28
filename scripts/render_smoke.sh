@@ -15,7 +15,11 @@
 #   3. the log has no ERROR line, which covers both shader cases above;
 #   4. (art pass) the draw-call counter ran: the game always gets
 #      --draw-stats, so the log must hold the `frame_stats: draws` line,
-#      which this script prints with the `triangles` and `fight` lines.
+#      which this script prints with the `triangles` and `fight` lines;
+#   5. (art pass) the log names the asset root the game resolved
+#      (`game::app: assets: <dir>`, logged once the log plugin exists) and
+#      that directory holds `ATTRIBUTION.md`, so a model that fails to load
+#      can be traced to the root it was looked up under.
 # The game runs in background mode, as every automated windowed check does
 # (docs/IMPLEMENTER_NOTES.md rule 25).
 #
@@ -107,10 +111,19 @@ if ! grep -q '^frame_stats: draws ' "$log"; then
   echo "error: no 'frame_stats: draws' line (the draw-call counter did not report)" >&2
   fail=1
 fi
+assets_dir=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | sed -n 's/^[^ ]* *INFO game::app: assets: //p' | head -1)
+if [ -z "$assets_dir" ]; then
+  echo "error: no 'game::app: assets: <dir>' line (the asset root was not logged)" >&2
+  fail=1
+elif [ ! -f "$assets_dir/ATTRIBUTION.md" ]; then
+  echo "error: the logged asset root '$assets_dir' holds no ATTRIBUTION.md" >&2
+  fail=1
+fi
 if [ "$fail" -ne 0 ]; then
   echo "--- $log (last 40 lines) ---" >&2
   tail -n 40 "$log" >&2
   exit 1
 fi
 grep -E '^frame_stats: (draws|triangles|fight) ' "$log" || true
+echo "render_smoke: assets $assets_dir"
 echo "render_smoke: ok, $scenario at tick $tick ($png)"

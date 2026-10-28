@@ -108,6 +108,28 @@ pub const ANNEX_TRACK: Color = Color::srgba(0.227, 0.227, 0.247, 0.8);
 /// over the frozen world.
 pub const OUTCOME_SCRIM: Color = Color::srgba(0.16, 0.18, 0.20, 0.80);
 
+/// The minimap's terrain layer (art pass): each tile's ground colour
+/// scaled to this share of its value, so territory, buildings and units
+/// stand out on it.
+pub const MINIMAP_TERRAIN_SHADE: f32 = 0.70;
+/// How far an owned tile on the minimap blends toward its owner's team
+/// colour.
+pub const MINIMAP_TERRITORY: f32 = 0.35;
+/// How far an owned tile on the border (a 4-neighbour of another owner or
+/// neutral land) blends toward its owner's team colour.
+pub const MINIMAP_BORDER: f32 = 0.75;
+/// How far a construction site on the minimap blends from its owner's
+/// colour toward [`STONE`].
+pub const MINIMAP_SITE: f32 = 0.5;
+/// How far a unit's dot on the minimap is brightened from its team colour
+/// toward white: 45%, so a dot stands out on its own team's tinted land
+/// (the plan's 15% left P0's Yeomen nearly invisible on P0's territory in
+/// the first lavapipe shot).
+pub const MINIMAP_UNIT_BRIGHTEN: f32 = 0.45;
+/// How far the camera's view trapezoid on the minimap blends toward
+/// [`HUD_TEXT`] (it reads as the HUD text at 80%).
+pub const MINIMAP_VIEW: f32 = 0.80;
+
 #[cfg(test)]
 mod tests {
     use super::*;

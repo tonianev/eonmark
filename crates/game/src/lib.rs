@@ -30,6 +30,10 @@
 //!   units and buildings, flat entities keyed by `TargetId` (M4b), and the
 //!   dev-only hierarchy check.
 //! - [`hud`]: top and bottom bars, `PointerOverUi`, the `hud_click` check.
+//! - [`minimap`]: the minimap bottom-left over the bottom bar (art pass):
+//!   terrain, territory, buildings, units, the selection and the view
+//!   trapezoid; a click or drag moves the camera, a right click orders;
+//!   [`minimap_check`] is its real-input check (`--minimap-check`).
 //! - [`fonts`]: Inter as the UI font, installed over Bevy's Fira Mono in
 //!   `Startup` (art pass).
 //! - [`age_hud`]: the age readout and the Advance button on a strip under
@@ -83,6 +87,8 @@ pub mod hud;
 pub mod macos_menu;
 pub mod markers;
 pub mod menu;
+pub mod minimap;
+pub mod minimap_check;
 pub mod models;
 pub mod monitor_loss;
 pub mod orders;

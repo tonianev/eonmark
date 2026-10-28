@@ -448,10 +448,19 @@ pub fn run(cli: &Cli) -> AppExit {
         crate::outcome::OutcomeOverlayPlugin,
     ));
 
+    // Art pass AP6 (owner decision 7): the minimap bottom-left over the
+    // bottom bar; it prints `frame_stats: minimap ...` on exit.
+    app.add_plugins(crate::minimap::MinimapPlugin);
+
     // Art pass AP10: every unit selectable by a real click (a driver
     // clicks the printed targets; `crate::click_check`).
     if cli.click_check {
         app.add_plugins(crate::click_check::ClickCheckPlugin);
+    }
+    // Art pass AP6: the minimap's input with real X input (a driver
+    // performs the printed steps; `crate::minimap_check`).
+    if cli.minimap_check {
+        app.add_plugins(crate::minimap_check::MinimapCheckPlugin);
     }
 
     // Presentation only: frames and selects the walkthrough's beats, or

@@ -113,7 +113,7 @@ Anything not in this table is not accepted.
 
 ## Checks
 
-`scripts/check_assets.sh` runs in CI and in `just ci`. It confirms that every file under `assets/` has a row or is on the original-file allowlist, that every license is in the allowed table, that every OFL font has its license text beside it, and that files stay under the size caps set in the script. Run it before committing an asset:
+`scripts/check_assets.sh` runs in CI and in `just ci`. It confirms that every file under `assets/` has a row or is on the original-file allowlist, that every license is in the allowed table, that every OFL font has its license text beside it, that files stay under the size caps set in the script, and that every file vendored through `tools/assets/sources.tsv` still matches its sha256 pin there (so a row whose Modifications is `none` stays true). Run it before committing an asset:
 
 ```bash
 scripts/check_assets.sh

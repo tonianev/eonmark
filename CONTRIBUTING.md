@@ -43,7 +43,7 @@ The game opens on its main menu (since M5b); New Game starts a skirmish against 
 | Unused dependencies | `cargo machete` |
 | Spelling | `typos` |
 | Licenses and advisories | `cargo deny check` (a separate `deny` job in CI; skipped locally if cargo-deny is missing) |
-| Assets | `scripts/check_assets.sh`, then `scripts/check_assets.sh --self-test` (an unattributed file must fail with its path) |
+| Assets | `scripts/check_assets.sh` (it also holds every file vendored through `tools/assets/sources.tsv` to its sha256 pin), then `scripts/check_assets.sh --self-test` (an unattributed file, and a changed pinned file, must fail with its path) |
 | Models | `cargo run -p inspect_gltf --locked --release -- check data assets`: every Scene of `data/visuals.ron` against the art pass's budgets and import rules ([docs/ART_STYLE.md](docs/ART_STYLE.md)) |
 | Naming | `scripts/check_trademark.sh` |
 | One Bevy | `cargo tree -i bevy_ecs --depth 0` must print exactly one line |

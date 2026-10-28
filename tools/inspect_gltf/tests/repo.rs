@@ -70,7 +70,7 @@ fn attribution_rows_match_the_sources() {
         if src_name == dest_name {
             assert!(
                 row.modifications == "none" || row.modifications.starts_with("none ("),
-                "{dest}: a vendored file is byte for byte as shipped, so Modifications is none: {:?}",
+                "{dest}: a vendored file is byte for byte as shipped (scripts/check_assets.sh holds its bytes to the pin), so Modifications is none: {:?}",
                 row.modifications
             );
         } else {

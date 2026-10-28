@@ -3,7 +3,8 @@
 # tab-separated row per remote file; see the script's header for the columns.
 # dest `-` keeps a tool-only input (red KayKit variants for `inspect_gltf
 # swatches`, character sources for `inspect_gltf bake`) in the download cache;
-# every other row is vendored under assets/ byte for byte and has its own
+# every other row is vendored under assets/ byte for byte (scripts/check_assets.sh
+# checks each one against its sha256 offline, in CI) and has its own
 # ATTRIBUTION.md row (tools/inspect_gltf's attribution_rows_match_the_sources).
 # Only raw.githubusercontent.com is reachable from the agent's VM (github.com,
 # its API and codeload refuse), so files are pinned by sha256, not by commit.

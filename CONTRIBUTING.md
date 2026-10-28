@@ -118,7 +118,7 @@ $ git status --short
 
 Only `economy_second_town` changes its final hash: it is the only fixture with a worked Croft. A test that hard-codes a number the data controls fails this walkthrough; read the value from `Rules` instead.
 
-Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, and since M5b (`rules_version` 21) it counts the bot data under `data/ai/` (`personalities`, `build_orders`), which is in `rules_hash` too, and since the art pass it ends with the `visuals.ron` counts and the number of glTF files its Scenes name (`visuals=units:8 buildings:8 terrain:<n> models=<n>`; each file must exist under `assets/`, `--no-assets` skips that check), so with the repository at `rules_version` 25 and the bump to 26 of step 2, step 3 now prints a line of the form `OK rules_version=26 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en visuals=units:8 buildings:8 terrain:3 models=26` (before the bump it prints `rules_version=25`; `models` counts the distinct glTF files, 26 since art slice 3). An edit under `data/ai/` takes the same path: bump `rules_version`, `just rerecord`, run the tests.
+Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, and since M5b (`rules_version` 21) it counts the bot data under `data/ai/` (`personalities`, `build_orders`), which is in `rules_hash` too, and since the art pass it ends with the `visuals.ron` counts and the number of glTF files its Scenes name (`visuals=units:8 buildings:8 terrain:<n> models=<n>`; each file must exist under `assets/`, `--no-assets` skips that check), so with the repository at `rules_version` 25 and the bump to 26 of step 2, step 3 now prints a line of the form `OK rules_version=26 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en visuals=units:8 buildings:8 terrain:3 models=36` (before the bump it prints `rules_version=25`; `models` counts the distinct glTF files, 36 since art slice 4). An edit under `data/ai/` takes the same path: bump `rules_version`, `just rerecord`, run the tests.
 
 ### A build order or personality (`data/ai/`)
 
@@ -184,16 +184,21 @@ cargo run -p inspect_gltf --release -- inspect assets/models/<pack>/<file>.gltf
 # 3. Edit the kind's one line in data/visuals.ron: path, scale_x100, yaw_deg
 #    (buildings face +Z, units +X), the offsets, team and, for a building (or
 #    a unit with too little team colour, like the Mangonel), its banner_at
-#    mount; a unit keeps its M4b look as its fallback.
+#    mount (a building's inside its footprint: on the roof with the pole
+#    sunk in, or in a free corner); a unit keeps its M4b look as its
+#    fallback.
 # 4. Measure it: one `ok` line per Scene with triangles, bytes, top, size, team
 #    share (with its banner), facing and a suggested scale_x100. Fix what a
-#    FAIL line names (base height, centre, budgets, team floor, a unit less
-#    than 1.4x apart from a sibling on the same character).
+#    FAIL line names (base height, centre, budgets, team floor, a banner past
+#    the footprint, a unit less than 1.4x apart from a sibling on the same
+#    character).
 cargo run -p inspect_gltf --release -- check data assets
 # 5. Validate (the file must exist under assets/) and look at it at 40 m.
+#    With 400 character models art_bench runs at about 1 fps on lavapipe and
+#    reaches tick 300 some 80 s in, so give it 120 s.
 cargo run -p sim-cli -- data-check data
 scripts/check_assets.sh
-just render-smoke out art_bench 24,64,40 400 75
+just render-smoke out art_bench 24,64,40 300 120
 ```
 
 Swapping a kind back to its box or primitive is step 3 alone (`"croft": Primitive(Cuboid),`, `"yeoman": Primitive(Capsule),`); [docs/ART_STYLE.md](docs/ART_STYLE.md) ("Building looks", "Unit looks (art slice 4)") walks both through, with `just verify` showing every fixture unchanged. Commit the RON line, the asset files and their rows together, and attach the 40 m screenshot ([docs/ART_STYLE.md](docs/ART_STYLE.md), sign-off checklist).

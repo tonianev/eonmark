@@ -64,10 +64,12 @@
   // Shieldbearer 1.45 m, Outrider 2.05 m, 1.41x the Shieldbearer), lifted
   // 1 cm, each in its character's team swatch; the Mangonel is the catapult
   // of the KayKit catapult tower (its `catapult_*` nodes, turned to face +X,
-  // lowered from the tower top) with the team banner; the Wain a KayKit
-  // wheelbarrow loaded with a sack and a crate, flying the flag 1.4x as a
-  // pennant. Each fallback is the kind's M4b look. A one-line swap back:
-  // `"yeoman": Primitive(Capsule),` (docs/ART_STYLE.md).
+  // lowered from the tower top) with the team banner (scale 700, 204‰; it
+  // reaches past the engine's 0.5 m radius, so packed Mangonels' poles and
+  // cloths cross, an owner trade-off in docs/ART_STYLE.md); the Wain a
+  // KayKit wheelbarrow loaded with a sack and a crate, flying the flag 1.4x
+  // as a pennant. Each fallback is the kind's M4b look. A one-line swap
+  // back: `"yeoman": Primitive(Capsule),` (docs/ART_STYLE.md).
   units: {
     "yeoman": Scene(path: "models/kaykit_adventurers/yeoman.glb", scale_x100: 58, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("adv_rogue"), fallback: Some(Primitive(Capsule))),
     "scribe": Scene(path: "models/kaykit_adventurers/scribe.glb", scale_x100: 53, y_offset_tiles_x100: 1, yaw_deg: 0, team: Some("adv_mage"), fallback: Some(Primitive(Cylinder))),

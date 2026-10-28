@@ -223,29 +223,59 @@ fn draw_grid(mut gizmos: Gizmos) {
 mod tests {
     use super::*;
 
-    /// The grid is off unless asked for, and G flips it each press.
-    #[test]
-    fn grid_is_off_by_default_and_g_toggles_it() {
-        #[derive(Resource, Default)]
-        struct Drawn(u32);
+    /// An app with the real [`GroundPlugin`] and the default gizmo group,
+    /// as `app::run` has them (the asset stores stand in for
+    /// `DefaultPlugins`), with `show` inserted first when given, as
+    /// `app::run` inserts `ShowGrid(cli.grid)`.
+    fn ground_app(show: Option<ShowGrid>) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(Assets::<GroundMaterial>::default())
+            .insert_resource(Assets::<GizmoAsset>::default())
             .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<ShowGrid>()
-            .init_resource::<Drawn>()
-            .add_systems(
-                Update,
-                (
-                    toggle_grid,
-                    (|mut d: ResMut<Drawn>| d.0 += 1).run_if(grid_shown),
-                )
-                    .chain(),
-            )
+            .init_gizmo_group::<DefaultGizmoConfigGroup>()
             .add_systems(Last, |mut keys: ResMut<ButtonInput<KeyCode>>| keys.clear());
+        if let Some(show) = show {
+            app.insert_resource(show);
+        }
+        app.add_plugins(GroundPlugin);
+        app
+    }
+
+    /// The line vertices the default gizmo group handed to the renderer
+    /// this frame: `update_gizmo_meshes` (`bevy_gizmos` 0.19.1, in `Last`)
+    /// moves the frame's lines into the group's `GizmoAsset`, or clears
+    /// the group's handle when nothing was drawn.
+    fn grid_vertices(app: &App) -> usize {
+        let handles = app.world().resource::<bevy::gizmos::GizmoHandles>();
+        let Some(Some(handle)) = handles
+            .handles()
+            .get(&std::any::TypeId::of::<DefaultGizmoConfigGroup>())
+        else {
+            return 0;
+        };
+        let asset = app
+            .world()
+            .resource::<Assets<GizmoAsset>>()
+            .get(handle)
+            .expect("the group's asset");
+        let buffer = asset.buffer();
+        buffer.list_positions.len() + buffer.strip_positions.len()
+    }
+
+    /// The grid is off unless asked for, and G flips it each press. This
+    /// drives [`GroundPlugin`] itself, so the real `draw_grid` and its
+    /// `run_if(grid_shown)` wiring are what is measured: the only gizmo
+    /// lines in the app are the grid's.
+    #[test]
+    fn grid_is_off_by_default_and_g_toggles_it() {
+        let mut app = ground_app(None);
         assert_eq!(ShowGrid::default(), ShowGrid(false));
         app.update();
         assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(false));
-        assert_eq!(app.world().resource::<Drawn>().0, 0, "off by default");
+        assert_eq!(grid_vertices(&app), 0, "off by default");
         let press = |app: &mut App| {
             app.world_mut()
                 .resource_mut::<ButtonInput<KeyCode>>()
@@ -257,21 +287,15 @@ mod tests {
         };
         press(&mut app);
         assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(true));
-        assert_eq!(
-            app.world().resource::<Drawn>().0,
-            1,
-            "drawn in the same frame"
-        );
+        let lines = grid_vertices(&app);
+        assert!(lines > 0, "drawn in the same frame");
         app.update();
-        assert_eq!(
-            app.world().resource::<Drawn>().0,
-            2,
-            "and every frame after"
-        );
+        assert_eq!(grid_vertices(&app), lines, "and every frame after");
         press(&mut app);
         assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(false));
+        assert_eq!(grid_vertices(&app), 0, "off again in the same frame");
         app.update();
-        assert_eq!(app.world().resource::<Drawn>().0, 2, "off again");
+        assert_eq!(grid_vertices(&app), 0, "and stays off");
         // Holding the key is one toggle, not one per frame.
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -280,7 +304,14 @@ mod tests {
             app.update();
         }
         assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(true));
-        // GroundPlugin's own schedule: the condition reads the resource.
+        assert_eq!(grid_vertices(&app), lines);
+        // `--grid`: `app::run` inserts ShowGrid(true) before the plugin,
+        // which keeps it, and the grid is drawn from the first frame.
+        let mut app = ground_app(Some(ShowGrid(true)));
+        app.update();
+        assert_eq!(*app.world().resource::<ShowGrid>(), ShowGrid(true));
+        assert_eq!(grid_vertices(&app), lines, "--grid draws it at once");
+        // The condition reads the resource and is off without it.
         let mut world = World::new();
         assert!(!world.run_system_cached(grid_shown).unwrap(), "no resource");
         world.insert_resource(ShowGrid(true));

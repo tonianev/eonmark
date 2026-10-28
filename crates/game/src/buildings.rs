@@ -21,15 +21,17 @@
 //! when its model is ready:
 //!
 //! - the team banner (owner decision 12 of the art pass): every complete
-//!   building whose Scene names a `banner_at` carries `visuals.banner` there
-//!   ([`mount_transform`]). All banners share one mesh and one material per
-//!   team (the same team material as the buildings on that texture), so
-//!   they add about two draw bins whatever the building count; they cast
-//!   no shadow.
+//!   building drawn as its model whose Scene names a `banner_at` carries
+//!   `visuals.banner` there ([`mount_transform`]); the M3b box of a failed
+//!   model is team-coloured all over and carries none. All banners share
+//!   one mesh and one material per team (the same team material as the
+//!   buildings on that texture), so they add about two draw bins whatever
+//!   the building count; they cast no shadow.
 //! - the Seat flag ([`SeatFlag`]): on every complete Seat, at its Scene's
-//!   `seat_flag_at`, or on the ground at the footprint's north-east corner
-//!   when it names none; larger than the banners and on the Town's top in
-//!   the shipped data, so a Seat reads apart from any other Town.
+//!   `seat_flag_at` while the Seat is drawn as its model, else on the
+//!   ground at the footprint's north-east corner; on the keep in the
+//!   shipped data, above the Town's own banner, so a Seat reads apart from
+//!   any other Town.
 //! - rubble ([`Rubble`]): where a building or site was destroyed, for
 //!   `rubble.ds` of real time, removed early when a new building occupies
 //!   its footprint. [`spawn_rubble`] reads the destroyed entity's place
@@ -376,12 +378,15 @@ impl DrawAssets<'_> {
         }
     }
 
-    /// The team banner of `b`: a complete building whose Scene names a
-    /// `banner_at`, with the banner model ready.
+    /// The team banner of `b`: a complete building drawn as its model (the
+    /// mounts are measured on the model; the M3b box, team-coloured all
+    /// over, carries none) whose Scene names a `banner_at`, with the banner
+    /// model ready.
     pub fn banner(&mut self, rules: &Rules, b: &Building) -> Option<Drawn> {
         if !matches!(b.construction, Construction::Complete) {
             return None;
         }
+        ready_model(rules, b, self.models.as_deref())?;
         let Some(Visual::Scene {
             banner_at: Some(mount),
             ..
@@ -400,8 +405,11 @@ impl DrawAssets<'_> {
     }
 
     /// The Seat flag of `b`: a complete Seat, with the flag model ready; at
-    /// its Scene's `seat_flag_at`, else on the ground at the footprint's
-    /// north-east corner.
+    /// its Scene's `seat_flag_at` while the building is drawn as that
+    /// model, else (no mount, or the M3b box of a failed model, which has
+    /// no keep to stand on) on the ground at the footprint's north-east
+    /// corner. It is the only thing that tells a Seat's box from another
+    /// Town's, so the box keeps it.
     pub fn seat_flag(&mut self, rules: &Rules, b: &Building) -> Option<Drawn> {
         if !matches!(b.construction, Construction::Complete)
             || !b.town_state.as_ref().is_some_and(|t| t.seat)
@@ -411,11 +419,12 @@ impl DrawAssets<'_> {
         let flag = rules.visuals.seat_flag.as_ref()?;
         let model = self.models.as_deref()?.model(flag)?.clone();
         let centre = footprint_centre(rules, b);
+        let on_model = ready_model(rules, b, self.models.as_deref()).is_some();
         let transform = match rules.building_visual(b.kind.0) {
             Some(Visual::Scene {
                 seat_flag_at: Some(mount),
                 ..
-            }) => mount_transform(centre, mount),
+            }) if on_model => mount_transform(centre, mount),
             _ => {
                 let kind = rules.building_kind(b.kind.0)?;
                 let corner = Vec3::new(
@@ -1016,13 +1025,66 @@ mod tests {
         }
     }
 
+    /// `v` (a Scene) with these mounts.
+    fn with_mounts(v: Visual, banner: Option<Mount>, seat_flag: Option<Mount>) -> Visual {
+        match v {
+            Visual::Scene {
+                path,
+                scale_x100,
+                y_offset_tiles_x100,
+                yaw_deg,
+                x_offset_tiles_x100,
+                z_offset_tiles_x100,
+                nodes,
+                parts,
+                team,
+                fallback,
+                ..
+            } => Visual::Scene {
+                path,
+                scale_x100,
+                y_offset_tiles_x100,
+                yaw_deg,
+                x_offset_tiles_x100,
+                z_offset_tiles_x100,
+                nodes,
+                parts,
+                team,
+                fallback,
+                banner_at: banner,
+                seat_flag_at: seat_flag,
+            },
+            other => other,
+        }
+    }
+
+    /// The fixture with its Croft drawn as a model too (the castle's mesh,
+    /// so it is ready) carrying a banner.
+    fn croft_with_banner(f: &mut Fixture) {
+        let croft = with_mounts(
+            with_team(scene("m/castle.gltf"), "hex"),
+            Some(Mount {
+                offset_x100: (50, 0, 50),
+                scale_x100: 200,
+                yaw_deg: 0,
+            }),
+            None,
+        );
+        f.rules.visuals.buildings.insert("croft".into(), croft);
+    }
+
     /// An app that runs [`BuildingsPlugin`] on the scenario `name` with
     /// the fixture's rules and ready models, one tick per update after the
     /// first.
     fn models_app(f: Fixture, name: &str) -> App {
+        let (setup, stream, _) = sim::scenarios::by_name(name, &f.rules).expect("a scenario");
+        models_app_with(f, setup, stream)
+    }
+
+    /// [`models_app`] on a hand-written match.
+    fn models_app_with(f: Fixture, setup: sim::MatchSetup, stream: sim::scenarios::Stream) -> App {
         use crate::sim_driver::{ScenarioInput, SimPlugin};
         use bevy::time::TimeUpdateStrategy;
-        let (setup, stream, _) = sim::scenarios::by_name(name, &f.rules).expect("a scenario");
         let handle = SimHandle::from_setup(setup, f.rules);
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -1317,48 +1379,77 @@ mod tests {
         );
     }
 
+    /// A building whose model failed draws the M3b box, which is
+    /// team-coloured all over: it carries no banner, and a Seat flies its
+    /// flag on the ground at the footprint's north-east corner, not at the
+    /// `seat_flag_at` mount measured on the model (the keep the box lacks).
+    #[test]
+    fn a_box_building_carries_no_banner_and_flies_the_flag_at_its_corner() {
+        let mut f = fixture();
+        let kind = town(&f.rules);
+        let castle = f.rules.building_visual(kind).unwrap().clone();
+        f.lib.fail(&ModelKey::of(&castle).unwrap(), "test");
+        let mut world = World::new();
+        world.insert_resource(std::mem::take(&mut f.meshes));
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(std::mem::take(&mut f.images));
+        world.insert_resource(std::mem::take(&mut f.lib));
+        let rules = f.rules;
+        let centre = footprint_centre(&rules, &building(kind, Construction::Complete));
+        let (drawn, banner, flag) = world
+            .run_system_once(move |mut assets: DrawAssets| {
+                let mut boxes = BuildingVisuals::default();
+                let mut seat = building(kind, Construction::Complete);
+                seat.town_state = seat_state();
+                let drawn = assets.building(&rules, &seat, &mut boxes);
+                let cube = boxes.cube(&mut assets.meshes);
+                (
+                    (drawn, cube),
+                    assets.banner(&rules, &seat),
+                    assets.seat_flag(&rules, &seat),
+                )
+            })
+            .unwrap();
+        let (drawn, cube) = drawn;
+        assert_eq!(drawn.mesh, cube, "the failed model draws the box");
+        assert!(banner.is_none(), "a box carries no banner");
+        let flag = flag.expect("a Seat still flies its flag");
+        assert_eq!(
+            flag.transform.translation,
+            centre + Vec3::new(1.5, 0.0, -1.5),
+            "on the ground at the north-east corner, not on the missing keep"
+        );
+    }
+
+    /// The material `e` is drawn with.
+    fn material_of(app: &App, e: Entity) -> AssetId<StandardMaterial> {
+        app.world()
+            .get::<MeshMaterial3d<StandardMaterial>>(e)
+            .expect("a drawn entity")
+            .0
+            .id()
+    }
+
+    /// The banner and Seat flag entities of `id`.
+    fn extras_of(app: &App, id: BuildingId) -> Extras {
+        app.world()
+            .resource::<BuildingExtras>()
+            .0
+            .get(&id)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// In `art_bench` both Seats fly the flag, every complete building
     /// whose Scene names a `banner_at` carries one banner, all banners share
-    /// one mesh, no extra is a child, and banners cast no shadow.
+    /// one mesh, no extra is a child, and banners cast no shadow. In
+    /// `capture_seat`, when P0 annexes P1's Seat, [`sync_buildings`]
+    /// recolours the Seat, its banner and its flag together in P0's
+    /// material on the same three entities, and the Seat keeps its flag.
     #[test]
     fn seat_flag_follows_the_seat_and_its_owner() {
         let mut f = fixture();
-        // The Croft carries a banner too.
-        let croft = with_team(scene("m/castle.gltf"), "hex");
-        let croft = match croft {
-            Visual::Scene {
-                path,
-                scale_x100,
-                y_offset_tiles_x100,
-                yaw_deg,
-                x_offset_tiles_x100,
-                z_offset_tiles_x100,
-                nodes,
-                parts,
-                team,
-                fallback,
-                ..
-            } => Visual::Scene {
-                path,
-                scale_x100,
-                y_offset_tiles_x100,
-                yaw_deg,
-                x_offset_tiles_x100,
-                z_offset_tiles_x100,
-                nodes,
-                parts,
-                team,
-                fallback,
-                banner_at: Some(Mount {
-                    offset_x100: (50, 0, 50),
-                    scale_x100: 200,
-                    yaw_deg: 0,
-                }),
-                seat_flag_at: None,
-            },
-            _ => unreachable!(),
-        };
-        f.rules.visuals.buildings.insert("croft".into(), croft);
+        croft_with_banner(&mut f);
         let mut app = models_app(f, "art_bench");
         run_ticks(&mut app, 4);
         let (seats, towns, crofts) = {
@@ -1410,10 +1501,179 @@ mod tests {
             "boxes, sites and two team materials: {}",
             mats.len()
         );
+
+        // The owner flip: P0 annexes P1's Seat in `capture_seat`.
+        let mut app = models_app(fixture(), "capture_seat");
+        run_ticks(&mut app, 2);
+        let (p0_seat, p1_seat) = (BuildingId(1), BuildingId(2));
+        let owner = |app: &App| {
+            let sim = app.world().non_send::<SimHandle>();
+            sim.view().building(p1_seat).map(|b| b.owner)
+        };
+        let drawn = |app: &App| {
+            let x = extras_of(app, p1_seat);
+            (
+                entity_of(app, p1_seat),
+                x.banner.expect("the Seat carries its banner"),
+                x.flag.expect("the Seat flies its flag"),
+            )
+        };
+        assert_eq!(owner(&app), Some(PlayerId(1)));
+        let (seat, banner, flag) = drawn(&app);
+        let p0 = material_of(&app, entity_of(&app, p0_seat));
+        let p1 = material_of(&app, seat);
+        assert_ne!(p0, p1, "one team material each");
+        assert_eq!(material_of(&app, banner), p1);
+        assert_eq!(material_of(&app, flag), p1);
+        for _ in 0..3000 {
+            if owner(&app) == Some(PlayerId(0)) {
+                break;
+            }
+            app.update();
+        }
+        assert_eq!(owner(&app), Some(PlayerId(0)), "P0 annexed P1's Seat");
+        assert_eq!(drawn(&app), (seat, banner, flag), "on the same entities");
+        for (what, e) in [("Seat", seat), ("banner", banner), ("Seat flag", flag)] {
+            assert_eq!(material_of(&app, e), p0, "the {what} takes P0's material");
+        }
+        let sim = app.world().non_send::<SimHandle>();
+        let still_seat = sim
+            .view()
+            .building(p1_seat)
+            .and_then(|b| b.town_state.as_ref())
+            .is_some_and(|t| t.seat);
+        assert!(still_seat, "an annexed Seat stays a Seat");
+    }
+
+    /// [`sync_buildings`] on a site that completes: while a site it draws
+    /// the construction stages A, B and C in turn (neutral, scaled by the
+    /// footprint side, no banner), then on the same entity its kind's model
+    /// at scale 1 in the owner's team material, and its banner appears.
+    /// Should that model fail, the next tick draws the box on the same
+    /// entity, its banner goes, and a Seat on the same model moves its
+    /// flag to the footprint's north-east corner.
+    #[test]
+    fn a_site_becomes_its_model_and_raises_its_banner() {
+        let mut f = fixture();
+        croft_with_banner(&mut f);
+        let stages: Vec<Handle<Mesh>> = f.stages.iter().map(|m| m.mesh.clone()).collect();
+        let (model_mesh, banner_mesh) = (f.town.mesh.clone(), f.banner.mesh.clone());
+        let castle = ModelKey::of(f.rules.building_visual(town(&f.rules)).unwrap()).unwrap();
+        let croft = BuildingKindId(f.rules.building_kind_by_id("croft").unwrap().0);
+        let mut setup = sim::MatchSetup::scenario(&f.rules, 7);
+        setup.start = sim::StartKind::Standard;
+        let (p0, tile) = (PlayerId(0), Tile::new(15, 69));
+        let command = |seq, c| vec![sim::PlayerCommand::new(p0, seq, c)];
+        let stream = vec![
+            (
+                0,
+                command(
+                    0,
+                    sim::Command::DebugPlaceBuilding {
+                        owner: p0,
+                        kind: croft,
+                        tile,
+                        complete: false,
+                    },
+                ),
+            ),
+            (
+                2,
+                command(
+                    1,
+                    sim::Command::Build {
+                        unit: sim::UnitId(1),
+                        kind: croft,
+                        tile,
+                    },
+                ),
+            ),
+        ];
+        let mut app = models_app_with(f, setup, stream);
+        let (seat, site) = (BuildingId(1), BuildingId(3));
+        run_ticks(&mut app, 3);
+        let e = entity_of(&app, site);
+        let complete = |app: &App| {
+            let sim = app.world().non_send::<SimHandle>();
+            sim.view()
+                .building(site)
+                .is_some_and(|b| matches!(b.construction, Construction::Complete))
+        };
+        let (mut seen, mut site_material) = (Vec::new(), None);
+        for _ in 0..2000 {
+            if complete(&app) {
+                break;
+            }
+            let world = app.world();
+            let mesh = &world.get::<Mesh3d>(e).unwrap().0;
+            let stage = stages
+                .iter()
+                .position(|s| s == mesh)
+                .expect("a site draws a construction stage");
+            if seen.last() != Some(&stage) {
+                seen.push(stage);
+            }
+            assert_eq!(
+                world.get::<Transform>(e).unwrap().scale,
+                Vec3::splat(2.0),
+                "scaled by the 2-tile side"
+            );
+            assert_eq!(extras_of(&app, site).banner, None, "no banner on a site");
+            site_material = Some(material_of(&app, e));
+            app.update();
+        }
+        assert!(complete(&app), "the Croft was built");
+        assert_eq!(seen, vec![0, 1, 2], "stages A, B and C in turn");
+        assert_eq!(entity_of(&app, site), e, "the same entity");
+        let world = app.world();
+        assert_eq!(world.get::<Mesh3d>(e).unwrap().0, model_mesh, "its model");
+        assert_eq!(world.get::<Transform>(e).unwrap().scale, Vec3::ONE);
+        let team = material_of(&app, entity_of(&app, seat));
+        assert_eq!(material_of(&app, e), team, "P0's team material");
+        assert_ne!(Some(team), site_material, "sites are neutral");
+        let banner = extras_of(&app, site).banner.expect("the banner is raised");
+        assert_eq!(world.get::<Mesh3d>(banner).unwrap().0, banner_mesh);
+        assert_eq!(material_of(&app, banner), team);
+
+        // The model fails: the box on the same entity, and no banner.
+        app.world_mut()
+            .resource_mut::<ModelLibrary>()
+            .fail(&castle, "test");
+        run_ticks(&mut app, 1);
+        let cube = app
+            .world()
+            .resource::<BuildingVisuals>()
+            .cube
+            .clone()
+            .expect("the box mesh");
+        let (box_transform, flag_at) = {
+            let sim = app.world().non_send::<SimHandle>();
+            let view = sim.view();
+            let corner = footprint_centre(sim.rules(), view.building(seat).unwrap())
+                + Vec3::new(1.5, 0.0, -1.5);
+            (
+                building_transform(sim.rules(), view.building(site).unwrap()),
+                corner,
+            )
+        };
+        assert_eq!(entity_of(&app, site), e, "still the same entity");
+        assert_eq!(app.world().get::<Mesh3d>(e).unwrap().0, cube, "the box");
+        assert_eq!(*app.world().get::<Transform>(e).unwrap(), box_transform);
+        assert!(app.world().get_entity(banner).is_err(), "its banner went");
+        assert_eq!(extras_of(&app, site).banner, None);
+        assert_eq!(extras_of(&app, seat).banner, None, "the Seat's too");
+        let flag = extras_of(&app, seat).flag.expect("the Seat keeps its flag");
+        assert_eq!(
+            app.world().get::<Transform>(flag).unwrap().translation,
+            flag_at,
+            "at the box's north-east corner"
+        );
     }
 
     #[test]
     fn rubble_spawns_at_the_footprint_and_expires_or_yields() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
         let r = Rubble {
             until: 30.0,
             tile: (10, 10),
@@ -1424,50 +1684,104 @@ mod tests {
         assert!(!r.overlaps((12, 10), (1, 1)), "east of it");
         assert!(!r.overlaps((8, 10), (2, 2)), "west of it, touching");
         // A destroyed P0 Croft in art_bench leaves rubble on its
-        // footprint, scaled by its side; the Croft's entity goes.
-        let f = fixture();
+        // footprint, scaled by its side; the Croft's entity and its
+        // banner go.
+        let mut f = fixture();
+        croft_with_banner(&mut f);
         let rubble_mesh = f.rubble.mesh.clone();
+        let croft_kind = BuildingKindId(f.rules.building_kind_by_id("croft").unwrap().0);
         let mut app = models_app(f, "art_bench");
         run_ticks(&mut app, 4);
-        let target = {
+        let crofts: Vec<(BuildingId, Tile)> = {
             let sim = app.world().non_send::<SimHandle>();
-            let rules = sim.rules();
             let view = sim.view();
             view.buildings()
-                .find(|b| {
+                .filter(|b| {
                     b.owner == PlayerId(0)
                         && matches!(b.construction, Construction::Complete)
-                        && rules
-                            .building_kind(b.kind.0)
-                            .is_some_and(|k| k.id == "croft")
+                        && b.kind == croft_kind
                 })
                 .map(|b| (b.id, b.tile))
-                .expect("a complete P0 Croft")
+                .collect()
         };
+        assert!(crofts.len() >= 2, "two complete P0 Crofts: {crofts:?}");
+        let destroy = |app: &mut App, id: BuildingId| {
+            app.world_mut()
+                .resource_mut::<crate::sim_driver::PendingCommands>()
+                .push_local(sim::Command::DebugDamage {
+                    target: sim::TargetId::Building(id),
+                    amount: u32::MAX,
+                });
+            run_ticks(app, 4);
+        };
+        let rubble = |app: &mut App| -> Vec<(Rubble, Handle<Mesh>, Transform)> {
+            let mut q = app.world_mut().query::<(&Rubble, &Mesh3d, &Transform)>();
+            q.iter(app.world())
+                .map(|(r, m, t)| (*r, m.0.clone(), *t))
+                .collect()
+        };
+        let target = crofts[0];
         let before = entity_of(&app, target.0);
-        app.world_mut()
-            .resource_mut::<crate::sim_driver::PendingCommands>()
-            .push_local(sim::Command::DebugDamage {
-                target: sim::TargetId::Building(target.0),
-                amount: u32::MAX,
-            });
-        run_ticks(&mut app, 4);
+        let banner = extras_of(&app, target.0)
+            .banner
+            .expect("the Croft carries its banner");
+        destroy(&mut app, target.0);
         assert!(
             app.world().get_entity(before).is_err(),
             "the Croft's entity is gone"
         );
-        let mut q = app.world_mut().query::<(&Rubble, &Mesh3d, &Transform)>();
-        let rubble: Vec<_> = q
-            .iter(app.world())
-            .map(|(r, m, t)| (*r, m.0.clone(), *t))
-            .collect();
-        assert_eq!(rubble.len(), 1);
-        let (r, mesh, t) = &rubble[0];
+        assert!(app.world().get_entity(banner).is_err(), "so is its banner");
+        let found = rubble(&mut app);
+        assert_eq!(found.len(), 1);
+        let (r, mesh, t) = &found[0];
         assert_eq!(*mesh, rubble_mesh);
         assert_eq!(r.tile, (target.1.x, target.1.y));
         assert_eq!(r.size, (2, 2));
         assert_eq!(t.scale, Vec3::splat(2.0));
         let now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
         assert!((r.until - now - 30.0).abs() < 1.0, "rubble.ds 300 is 30 s");
+
+        // It yields: a Croft placed on the footprint before the 30 s are
+        // up removes it.
+        app.world_mut()
+            .resource_mut::<crate::sim_driver::PendingCommands>()
+            .push_local(sim::Command::DebugPlaceBuilding {
+                owner: PlayerId(0),
+                kind: croft_kind,
+                tile: target.1,
+                complete: true,
+            });
+        run_ticks(&mut app, 4);
+        let new = {
+            let sim = app.world().non_send::<SimHandle>();
+            sim.view()
+                .buildings()
+                .find(|b| b.tile == target.1 && b.id != target.0)
+                .map(|b| b.id)
+                .expect("a new Croft on the old footprint")
+        };
+        assert!(
+            app.world()
+                .resource::<BuildingEntities>()
+                .0
+                .contains_key(&new)
+        );
+        assert!(rubble(&mut app).is_empty(), "the new Croft removed it");
+
+        // It expires: the second Croft's rubble stays until 30 s of real
+        // time have passed, then goes.
+        destroy(&mut app, crofts[1].0);
+        let found = rubble(&mut app);
+        assert_eq!(found.len(), 1);
+        let until = found[0].0.until;
+        let now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            until - now - 0.5,
+        )));
+        app.update();
+        assert_eq!(rubble(&mut app).len(), 1, "half a second before its time");
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+        app.update();
+        assert!(rubble(&mut app).is_empty(), "gone once its 30 s are up");
     }
 }

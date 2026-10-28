@@ -57,8 +57,14 @@
 //! and leave the usual move or attack marker at the tile. They are issued
 //! only while the local player is human and the match is not over: these
 //! observers run outside `hud::WorldInputSet`, so they check both
-//! themselves. Moving the camera is a view action and works while
-//! spectating and after the outcome too.
+//! themselves. Moving the camera is a view action, so the press and drag
+//! handlers do not check either and it works while spectating. After the
+//! outcome it does not: the outcome overlay (`outcome::OUTCOME_Z`, a
+//! full-window node with the default `Pickable`) covers the minimap, so a
+//! press there lands on the overlay and never reaches these observers (a
+//! drag started on the minimap before the outcome and held through it
+//! still moves the camera, since `Pointer<Drag>` follows the pressed
+//! entity).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -1105,6 +1111,111 @@ mod tests {
         }
     }
 
+    /// [`MinimapPlugin`] on the game's own schedule: `SimPlugin` steps the
+    /// walkthrough in `FixedUpdate` (one tick per 50 ms update) with a
+    /// Watchtower placed by the scenario stream, and the plugin's
+    /// `sync_territory_layer` (after `SimSystems::Step`, only when a tick
+    /// stepped) and `paint_minimap` (`PostUpdate`) run where the plugin puts
+    /// them. In the very update whose tick gives the tower its land, the
+    /// territory layer is rebuilt once and the image shows every won tile
+    /// in P0's territory colour: the M7 "mirrors borders within one frame"
+    /// clause, without fog. Any update before it leaves the image's
+    /// territory as it was.
+    #[test]
+    fn the_plugin_shows_a_new_border_in_the_update_of_its_tick() {
+        use crate::sim_driver::{ScenarioInput, SimPlugin};
+        use bevy::time::TimeUpdateStrategy;
+        let rules = rules();
+        let (setup, mut stream) = sim::scenarios::economy_walkthrough(&rules);
+        let tower = rules.building_kind_by_id("watchtower").unwrap().0;
+        let place = PlayerCommand::new(
+            LOCAL_PLAYER,
+            9000,
+            Command::DebugPlaceBuilding {
+                owner: LOCAL_PLAYER,
+                kind: sim::BuildingKindId(tower),
+                tile: sim::Tile::new(46, 56),
+                complete: true,
+            },
+        );
+        let at = 10;
+        match stream.binary_search_by_key(&at, |(t, _)| *t) {
+            Ok(i) => stream[i].1.push(place),
+            Err(i) => stream.insert(i, (at, vec![place])),
+        }
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Selection>()
+            .init_resource::<OrderMode>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_plugins(SimPlugin::new(
+                SimHandle::from_setup(setup, rules),
+                Box::new(ScenarioInput::new(stream)),
+            ))
+            .add_plugins(MinimapPlugin);
+        app.world_mut().spawn((HudRoot, Node::default()));
+        app.update();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+        let owners = |app: &App| {
+            app.world()
+                .non_send::<SimHandle>()
+                .view()
+                .territory()
+                .owner_grid()
+                .to_vec()
+        };
+        let mut checked = false;
+        for _ in 0..200 {
+            let (owners_before, image_before) = (owners(&app), image_px(&app));
+            let generation = app.world().resource::<MinimapCanvas>().territory_generation;
+            app.update();
+            let owners_after = owners(&app);
+            let image_after = image_px(&app);
+            let canvas = app.world().resource::<MinimapCanvas>();
+            let won: Vec<usize> = (0..owners_after.len())
+                .filter(|&i| owners_before[i] == 0 && owners_after[i] == 1)
+                .filter(|&i| !(i % 128 == 46 && i / 128 == 56))
+                .collect();
+            if won.is_empty() {
+                continue;
+            }
+            assert!(won.len() >= 8, "{} tiles won", won.len());
+            assert_eq!(
+                canvas.territory_generation,
+                generation + 1,
+                "the layer is rebuilt once, in this update"
+            );
+            for &i in &won {
+                assert_ne!(
+                    image_after[i * 4..i * 4 + 4],
+                    image_before[i * 4..i * 4 + 4],
+                    "tile {i} changes on the image in the update of its tick"
+                );
+                let interior = [i - 1, i + 1, i - 128, i + 128]
+                    .iter()
+                    .all(|&n| owners_after[n] == 1);
+                if interior {
+                    assert_eq!(
+                        canvas.territory[i],
+                        mix(
+                            canvas.terrain[i],
+                            texel(palette::team_color(0)),
+                            palette::MINIMAP_TERRITORY
+                        ),
+                        "tile {i}"
+                    );
+                }
+            }
+            checked = true;
+            break;
+        }
+        assert!(checked, "the tower never won land");
+    }
+
     /// While P0 annexes P1's Seat (`capture_seat`), its ring is amber and
     /// P0's own Seat keeps the HUD text ring.
     #[test]
@@ -1488,7 +1599,10 @@ mod tests {
 
     /// Nothing is issued with no selection, with only another player's
     /// units, while the local slot is a bot (`--spectate`) or after the
-    /// outcome; the camera still moves in each case.
+    /// outcome; the press handler itself still moves the camera in each
+    /// case. (In the app the outcome overlay covers the minimap, so that
+    /// last press never reaches it; this test triggers on the minimap
+    /// entity directly, past picking.)
     #[test]
     fn right_click_with_no_own_units_or_after_match_over_issues_nothing() {
         let sim = walkthrough();
@@ -1532,7 +1646,11 @@ mod tests {
         assert!(right(&mut app).is_empty(), "after the outcome");
         let before = focus(&mut app);
         press(&mut app, minimap, Vec2::new(-0.25, 0.25));
-        assert_ne!(focus(&mut app), before, "the camera still moves");
+        assert_ne!(
+            focus(&mut app),
+            before,
+            "the handler does not gate camera moves on MatchOver"
+        );
     }
 
     /// One repaint per change of tick, camera, selection or territory, and
@@ -1578,23 +1696,50 @@ mod tests {
         );
     }
 
-    /// At 1280 x 800, every text the centred message line or the annexation
-    /// readout can show, at its longest and measured with Inter's advances,
-    /// stays clear of the minimap's frame, which spans their rows.
+    /// The HUD laid out at 1280 x 800 with Inter (`ui_test`: Bevy's own
+    /// text measure and UI layout over the real nodes that
+    /// `economy_hud::spawn_economy_hud`, `markers::spawn_annex_readout` and
+    /// [`spawn_minimap`] spawn): every text the message line or the
+    /// annexation readout can show, at its longest and shaped with its own
+    /// `TextFont`, is laid out clear of the minimap's frame, which spans
+    /// their rows. A change to either line's node (its centring, its
+    /// width, its bottom) or to the frame's is laid out here too.
     #[test]
     fn minimap_overlaps_no_hud_text() {
-        use crate::economy_hud::MESSAGE_GAP_PX;
+        use crate::economy_hud::{MessageLine, spawn_economy_hud};
         use crate::hud::HUD_FONT_PX;
-        use crate::markers::ANNEX_READOUT_GAP_PX;
+        use crate::markers::{AnnexReadout, spawn_annex_readout};
+        use crate::ui_test::{layout_app, rect, settle, single};
         let (w, h) = (1280.0, 800.0);
-        let frame = Rect::new(
+        let mut app = layout_app(UVec2::new(1280, 800));
+        app.world_mut().insert_non_send(walkthrough());
+        app.add_systems(
+            Startup,
+            (
+                spawn_hud,
+                spawn_economy_hud,
+                spawn_annex_readout,
+                spawn_minimap,
+            )
+                .chain(),
+        );
+        settle(&mut app);
+        let frame_entity = single::<MinimapFrame>(&mut app);
+        let frame = rect(&app, frame_entity);
+        let placed = Rect::new(
             MINIMAP_LEFT_PX,
             h - MINIMAP_BOTTOM_PX - MINIMAP_FRAME_PX,
             MINIMAP_LEFT_PX + MINIMAP_FRAME_PX,
             h - MINIMAP_BOTTOM_PX,
         );
+        assert!(
+            (frame.min - placed.min).length() < 0.01 && (frame.max - placed.max).length() < 0.01,
+            "the frame is laid out at {frame:?}, its constants say {placed:?}"
+        );
         assert!(frame.min.x >= crate::camera::EDGE_SCROLL_MARGIN_PX);
         assert!(frame.max.y <= h - BOTTOM_BAR_HEIGHT_PX, "above the bar");
+        let message = single::<MessageLine>(&mut app);
+        let annex = single::<AnnexReadout>(&mut app);
 
         let rules = rules();
         let strings = rules::strings::Strings::load(
@@ -1682,27 +1827,31 @@ mod tests {
             fill(strings.hud("annex.attacking").unwrap()),
             fill(strings.hud("annex.defending").unwrap())
         );
-        for (text, gap) in lines
+        for (entity, text) in lines
             .iter()
-            .map(|l| (l.as_str(), MESSAGE_GAP_PX))
-            .chain([(readout.as_str(), MESSAGE_GAP_PX + ANNEX_READOUT_GAP_PX)])
+            .map(|l| (message, l.as_str()))
+            .chain([(annex, readout.as_str())])
         {
-            let width = crate::fonts::measure::text_width_px(text, HUD_FONT_PX);
-            let bottom = h - BOTTOM_BAR_HEIGHT_PX - gap;
-            let rect = Rect::new(
-                (w - width) / 2.0,
-                bottom - 1.2 * HUD_FONT_PX,
-                (w + width) / 2.0,
-                bottom,
+            app.world_mut().get_mut::<Text>(entity).unwrap().0 = text.to_string();
+            app.update();
+            let laid = rect(&app, entity);
+            // Bevy shaped it: within a few px of the sum of Inter's advances
+            // (kerning narrows a little), not a stale or empty measure.
+            let advances = crate::fonts::measure::text_width_px(text, HUD_FONT_PX);
+            assert!(
+                (laid.width() - advances).abs() < 0.05 * advances + 2.0,
+                "{text:?} laid out {} px wide, its advances sum to {advances}",
+                laid.width()
+            );
+            assert!(laid.max.x < w, "{text:?} fits the window: {laid:?}");
+            assert!(
+                laid.min.y < frame.max.y && laid.max.y > frame.min.y,
+                "the row spans the minimap: {laid:?}"
             );
             assert!(
-                rect.min.y < frame.max.y && rect.max.y > frame.min.y,
-                "the row spans the minimap: {rect:?}"
-            );
-            assert!(
-                rect.min.x > frame.max.x,
-                "{width} px from {:.0} reaches the minimap at {}: {text}",
-                rect.min.x,
+                laid.min.x > frame.max.x,
+                "{text:?} is laid out from x {:.1}, into the minimap's frame (right edge {})",
+                laid.min.x,
                 frame.max.x
             );
         }

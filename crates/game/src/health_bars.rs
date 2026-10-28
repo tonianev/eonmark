@@ -1627,4 +1627,104 @@ mod tests {
             want.back
         );
     }
+
+    /// Art slice 4: a kind that carries the team banner (the Mangonel's
+    /// stands far above its catapult) rides its bar over the higher of its
+    /// model's top and its banner's top, so the cloth, standing between
+    /// the camera and the unit, never covers the bar; without a banner, or
+    /// with a banner lower than the model, the model's top.
+    #[test]
+    fn a_carried_banner_lifts_the_bar_over_it() {
+        use crate::models::{Geometry, ModelKey, ModelLibrary, content_hash, finish_geometry};
+        use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+        let mut rules = rules();
+        let scene = |path: &str, banner_at: Option<rules::Mount>| rules::Visual::Scene {
+            path: path.into(),
+            scale_x100: 100,
+            y_offset_tiles_x100: 0,
+            yaw_deg: 0,
+            x_offset_tiles_x100: 0,
+            z_offset_tiles_x100: 0,
+            nodes: vec![],
+            parts: vec![],
+            team: None,
+            fallback: Some(Box::new(rules::Visual::Primitive(rules::Primitive::Sphere))),
+            banner_at,
+            seat_flag_at: None,
+        };
+        let mount = |y: i32, scale: u32| rules::Mount {
+            offset_x100: (-40, y, 40),
+            scale_x100: scale,
+            yaw_deg: 0,
+        };
+        let banner = scene("m/flag.gltf", None);
+        rules.visuals.banner = Some(banner.clone());
+        let (mut meshes, mut images) = (Assets::<Mesh>::default(), Assets::<Image>::default());
+        let mut lib = ModelLibrary::new(&rules.visuals);
+        let mut ready = |visual: &rules::Visual, top: f32| {
+            let image = Image::new(
+                Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                TextureDimension::D2,
+                vec![200; 4 * 4 * 4],
+                TextureFormat::Rgba8UnormSrgb,
+                bevy::asset::RenderAssetUsages::default(),
+            );
+            let hash = content_hash(&image);
+            let model = finish_geometry(
+                Geometry {
+                    positions: vec![[-0.3, 0.0, -0.3], [0.3, top, 0.3], [0.0, 0.0, 0.3]],
+                    normals: vec![[0.0, 1.0, 0.0]; 3],
+                    uvs: vec![[0.1, 0.1]; 3],
+                    indices: vec![0, 1, 2],
+                    textures: vec![],
+                    base_color: None,
+                },
+                hash,
+                &mut meshes,
+            );
+            lib.insert_ready(ModelKey::of(visual).unwrap(), model, images.add(image));
+        };
+        // A 0.8 m catapult and a 0.28 m flag, as shipped.
+        let catapult = scene("m/catapult.gltf", None);
+        ready(&catapult, 0.8);
+        ready(&banner, 0.28);
+        let kind = unit_kind(&rules, "mangonel");
+        let top = |rules: &Rules, lib: &ModelLibrary, meshes: &mut Assets<Mesh>| {
+            let mut v = UnitVisuals::default();
+            v.mesh_with(kind.0, rules, meshes, Some(lib));
+            unit_top_y(&v, rules, kind)
+        };
+        rules.visuals.units.insert("mangonel".into(), catapult);
+        assert!(
+            (top(&rules, &lib, &mut meshes) - 0.8).abs() < 1e-5,
+            "no banner"
+        );
+        // At scale 700 the banner stands 7 x 0.28 = 1.96 m: the bar rides
+        // over it.
+        rules.visuals.units.insert(
+            "mangonel".into(),
+            scene("m/catapult.gltf", Some(mount(0, 700))),
+        );
+        assert!(
+            (top(&rules, &lib, &mut meshes) - 1.96).abs() < 1e-5,
+            "over the banner: {}",
+            top(&rules, &lib, &mut meshes)
+        );
+        // Mounted 0.5 m up, its top is 0.5 m higher.
+        rules.visuals.units.insert(
+            "mangonel".into(),
+            scene("m/catapult.gltf", Some(mount(50, 700))),
+        );
+        assert!((top(&rules, &lib, &mut meshes) - 2.46).abs() < 1e-5);
+        // A small banner under the model's top leaves the model's top.
+        rules.visuals.units.insert(
+            "mangonel".into(),
+            scene("m/catapult.gltf", Some(mount(0, 100))),
+        );
+        assert!((top(&rules, &lib, &mut meshes) - 0.8).abs() < 1e-5);
+    }
 }

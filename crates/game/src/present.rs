@@ -266,7 +266,8 @@ impl UnitVisuals {
     /// baked in, so the unit's transform stays translation and facing),
     /// else [`body_mesh`] of its look (a Scene's `fallback`, else
     /// [`FALLBACK_VISUAL`]) sized from `radius_tiles_x100`. Also caches the
-    /// look's height (the model's top, or [`look_top_y`]) for
+    /// look's height (the higher of the model's top and the top of the team
+    /// banner the kind carries, or [`look_top_y`]) for
     /// [`UnitVisuals::top_y`]. Cached on first use; the load gate
     /// (`models::models_settled`) makes that first use come after every
     /// model has settled, so no kind caches its fallback while its model
@@ -285,7 +286,28 @@ impl UnitVisuals {
             .visual(kind)
             .and_then(|visual| models.and_then(|lib| lib.model(visual)))
         {
-            self.top_y.insert(kind, model.top_y());
+            // A carried banner counts (the Mangonel's stands far above its
+            // catapult): the bar rides over it, so the cloth between the
+            // camera and the unit never covers the bar.
+            let banner_top = match rules.visual(kind) {
+                Some(Visual::Scene {
+                    banner_at: Some(mount),
+                    ..
+                }) => rules
+                    .visuals
+                    .banner
+                    .as_ref()
+                    .and_then(|b| models.and_then(|lib| lib.model(b)))
+                    .map(|b| {
+                        mount.offset_x100.1 as f32 / 100.0
+                            + b.top_y() * mount.scale_x100 as f32 / 100.0
+                    }),
+                _ => None,
+            };
+            self.top_y.insert(
+                kind,
+                banner_top.map_or(model.top_y(), |t| t.max(model.top_y())),
+            );
             self.meshes.insert(kind, model.mesh.clone());
             self.models.insert(kind, model.clone());
             return model.mesh.clone();
@@ -301,9 +323,10 @@ impl UnitVisuals {
     }
 
     /// Height above the ground of the top of `kind`'s look, in metres, once
-    /// [`UnitVisuals::mesh`] has built it (every kind on screen has). The
-    /// one place anything drawn above a unit takes its height from, so the
-    /// art pass changes only [`look_top_y`].
+    /// [`UnitVisuals::mesh`] has built it (every kind on screen has): the
+    /// model's top, or its carried banner's when that stands higher, since
+    /// art slice 4, else [`look_top_y`] of the fallback look. The one place
+    /// anything drawn above a unit takes its height from.
     pub fn top_y(&self, kind: u16) -> Option<f32> {
         self.top_y.get(&kind).copied()
     }
@@ -1461,7 +1484,8 @@ mod tests {
     /// library's, shared with every model on that texture); the cached
     /// top is the model's. A kind whose model never loaded draws its
     /// fallback look in the plain team colour. The Mangonel carries the
-    /// team banner as a top-level entity that follows it.
+    /// team banner as a top-level entity that follows it as it moves and
+    /// turns, and goes when it dies.
     #[test]
     fn units_of_a_kind_and_team_share_the_model_mesh_and_material() {
         let f = unit_fixture();
@@ -1541,10 +1565,11 @@ mod tests {
             assert_eq!(carries.is_some(), kind == "mangonel", "{kind}");
             let Some(carries) = carries else { continue };
             let banner = carries.0;
+            let id = app.world().get::<UnitRef>(*e).unwrap().0;
             assert!(
-                banners.iter().any(|(b, ub)| *b == banner
-                    && units.iter().any(|(_, _, u)| u == e)
-                    && ub.local.scale.x == 3.0),
+                banners
+                    .iter()
+                    .any(|(b, ub)| *b == banner && ub.unit == id && ub.local.scale.x == 3.0),
                 "its banner names it and the mount"
             );
             assert!(app.world().get::<ChildOf>(banner).is_none());
@@ -1560,10 +1585,55 @@ mod tests {
             let want = unit_tf.mul_transform(crate::buildings::mount_transform(Vec3::ZERO, &mount));
             assert!(
                 (banner_tf.translation - want.translation).length() < 1e-4
+                    && banner_tf.rotation.abs_diff_eq(want.rotation, 1e-5)
                     && banner_tf.scale == want.scale,
                 "{banner_tf:?} vs {want:?}"
             );
         }
+
+        // Past the charge (tick 20) P1's Mangonels turn west and every
+        // engine has moved: each banner still stands at its unit's pose
+        // times the mount, turned with it.
+        run_ticks(&mut app, 30);
+        let carriers: Vec<(Entity, Entity)> = {
+            let mut q = app.world_mut().query::<(Entity, &CarriesBanner)>();
+            q.iter(app.world()).map(|(e, c)| (e, c.0)).collect()
+        };
+        assert_eq!(carriers.len(), mangonels);
+        let mut turned = 0;
+        for (e, banner) in &carriers {
+            let unit_tf = *app.world().get::<Transform>(*e).unwrap();
+            let banner_tf = *app.world().get::<Transform>(*banner).unwrap();
+            let want = unit_tf.mul_transform(crate::buildings::mount_transform(Vec3::ZERO, &mount));
+            assert!(
+                (banner_tf.translation - want.translation).length() < 1e-4
+                    && banner_tf.rotation.abs_diff_eq(want.rotation, 1e-5),
+                "{banner_tf:?} vs {want:?}"
+            );
+            if unit_tf.rotation.angle_between(Quat::IDENTITY) > 1.0 {
+                turned += 1;
+            }
+        }
+        assert!(turned > 0, "some Mangonel faces away from +X");
+
+        // A Mangonel that dies takes its banner with it.
+        let (e, banner) = carriers[0];
+        let id = app.world().get::<UnitRef>(e).unwrap().0;
+        app.world_mut()
+            .resource_mut::<crate::sim_driver::PendingCommands>()
+            .push_local(sim::Command::DebugDamage {
+                target: sim::TargetId::Unit(id),
+                amount: u32::MAX,
+            });
+        run_ticks(&mut app, 4);
+        assert!(
+            !app.world().resource::<UnitEntities>().0.contains_key(&id),
+            "the Mangonel is gone"
+        );
+        assert!(app.world().get_entity(e).is_err());
+        assert!(app.world().get_entity(banner).is_err(), "so is its banner");
+        let mut q = app.world_mut().query::<&UnitBanner>();
+        assert_eq!(q.iter(app.world()).count(), mangonels - 1);
     }
 
     /// The walk bob: civilians, infantry and cavalry carry a [`Gait`],

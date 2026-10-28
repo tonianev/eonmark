@@ -733,13 +733,21 @@ mod tests {
         // 3.0 of 3.5 m² on the unit, 12 of 20 m² on the house.
         assert!(text.contains("team=857‰"), "{text}");
         assert!(text.contains("team=600‰"), "{text}");
-        // The house fills 0.95 of a 2x2 footprint: 1.9 m over 2 m.
-        assert!(
-            text.contains("suggest scale_x100=95 (1.90 m footprint)"),
-            "{text}"
+        // The 2 m house fills FOOTPRINT_FILL of the Croft's footprint side,
+        // read from the rules, so a data-only footprint change does not
+        // fail this test.
+        let croft = rules.buildings.iter().find(|k| k.id == "croft").unwrap();
+        let side = croft.width_tiles.min(croft.height_tiles) as f32 * FOOTPRINT_FILL;
+        let want = format!(
+            "suggest scale_x100={} ({side:.2} m footprint)",
+            (100.0 * side / 2.0).round()
         );
-        // The yeoman's capsule fallback is 3.4 radii tall.
-        assert!(text.contains("(fallback height 1.19 m)"), "{text}");
+        assert!(text.contains(&want), "{want}\n{text}");
+        // The yeoman's capsule fallback is 3.4 of its radii tall.
+        let yeoman = rules.units.iter().find(|k| k.id == "yeoman").unwrap();
+        let height = 3.4 * yeoman.radius_tiles_x100 as f32 / 100.0;
+        let want = format!("(fallback height {height:.2} m)");
+        assert!(text.contains(&want), "{want}\n{text}");
         assert!(text.ends_with("check: ok 4 scene(s)\n"), "{text}");
 
         // Same rig, same size: the silhouette rule fires.

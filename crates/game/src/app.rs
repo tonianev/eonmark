@@ -911,6 +911,24 @@ mod tests {
         let (camera, transform, visible) = framed_camera(framing);
         let (setup, stream, _) = scenarios::by_name("art_bench", &rules).unwrap();
         let mut sim = sim::Sim::new(setup, rules.clone(), Box::new(NoAi));
+        let is_armed = |kind: u16| rules.unit_kind(kind).is_some_and(|k| k.attack.is_some());
+        // Every armed unit of both armies: the start units of armed kinds
+        // (none while the Yeoman is unarmed) and each side's
+        // `ART_BENCH_ARMY` rows of armed kinds, all read from the rules.
+        let start_armed = sim.view().units().filter(|u| is_armed(u.kind.0)).count();
+        let per_side: usize = scenarios::ART_BENCH_ARMY
+            .iter()
+            .filter(|(id, _)| {
+                rules
+                    .units
+                    .iter()
+                    .position(|k| k.id == *id)
+                    .and_then(|i| u16::try_from(i).ok())
+                    .is_some_and(is_armed)
+            })
+            .map(|&(_, n)| usize::from(n))
+            .sum();
+        assert!(per_side > 0, "art_bench fields armed units");
         for t in 0..crate::director::ART_BENCH_SELECT_TICK {
             sim.step(scenarios::commands_at(&stream, t));
         }
@@ -926,15 +944,16 @@ mod tests {
         );
         let mut armed = 0;
         for u in view.units() {
-            if rules
-                .unit_kind(u.kind.0)
-                .is_some_and(|k| k.attack.is_some())
-            {
+            if is_armed(u.kind.0) {
                 armed += 1;
                 on_screen(crate::present::world_from_sim(u.pos, 0.0), "armed unit");
             }
         }
-        assert_eq!(armed, 2 * 174, "every armed unit of both armies");
+        assert_eq!(
+            armed,
+            start_armed + 2 * per_side,
+            "every armed unit of both armies"
+        );
     }
 
     /// `EONMARK_WGPU_DISABLE`: unset or empty keeps Bevy's settings, a

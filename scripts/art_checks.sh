@@ -25,9 +25,11 @@
 #   7. art-battle-60m.png: `--scenario art_bench` in its own framing
 #      (60 m over P0's Town and the 200 vs 200 fight, every P0 unit
 #      selected at tick 40), tick 300, mid-fight. AP4's gate:
-#      scripts/check_draws.sh --fight (draws max < 500 and fight_max <
-#      500); the triangles, fight and minimap lines are printed, and the
-#      minimap's paint p95 must be at most 500 us (AP6).
+#      scripts/check_draws.sh --fight (draws max < 500, and the fight
+#      measured: a non-zero fight_max under 500 and a `frame_stats: fight`
+#      line with fight frames and ticks); the triangles, fight and minimap
+#      lines are printed, and the minimap's paint p95 must be at most
+#      500 us (AP6).
 #   8. art-match-minimap.png: `--spectate --seed 1` (the m5_first_match
 #      setup) fast-forwarded to T/2, with a screenshot 200 ticks later,
 #      where T is the tick `sim-cli verify` of the m5_first_match golden
@@ -41,7 +43,14 @@
 #   size), --draw-stats and --screenshot-at, and must exit 0 with no ERROR
 #   line, save its PNG and print its `frame_stats: draws` line under 500;
 #   steps 5 to 8 also `sim-cli verify` the replay the run recorded.
-#   10. No eonmark (and no Xvfb) process is left.
+#   10. No game and no Xvfb this script started is left: every game run
+#      of steps 5 to 9 passes `--replay-dir <out-dir>`, the dev binary
+#      (eonmark-dev) too, and every Xvfb is xvfb-run's with
+#      `-auth <out-dir>/xvfb.auth`, so `pgrep -f` on those finds exactly
+#      this run's processes. Neither a name match (`pgrep -x eonmark`,
+#      which misses eonmark-dev and flags other sessions' games and
+#      displays) nor `pgrep -f 'target/.*/eonmark'` (which matches this
+#      script's own command line) would.
 #
 # On Linux without a display every game runs under `xvfb-run` on Mesa's
 # lavapipe (1280 x 800 screen). There `art_bench` draws about one frame a
@@ -96,8 +105,13 @@ if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ]; then
     echo "error: no display, and xvfb-run or lavapipe is missing (apt-get install xvfb mesa-vulkan-drivers)" >&2
     exit 1
   fi
-  wrap=(xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd")
+  # Its own auth file, so step 10 can tell this run's Xvfb from others.
+  : >"$out/xvfb.auth"
+  wrap=(xvfb-run -a -f "$out/xvfb.auth" -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd")
 fi
+
+# $1 as an extended regular expression that matches only itself.
+ere_quote() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
 
 # No ERROR line in the log $1.
 no_errors() {
@@ -108,8 +122,8 @@ no_errors() {
 
 # Run the game binary $1 with "${@:4}" into the log $2, saving the PNG $3:
 # exit 0, no ERROR line, the PNG, and the draws line under 500
-# (scripts/check_draws.sh; a non-empty $fight requires its fight_max
-# too). Sets `status` and `log`.
+# (scripts/check_draws.sh; a non-empty $fight adds --fight, which requires
+# that the fight was measured too). Sets `status` and `log`.
 status=0
 log=""
 fight=""
@@ -312,12 +326,24 @@ fi
 
 echo
 echo "==> 10. no game process left"
+games_re="--replay-dir $(ere_quote "$out")( |\$)"
+xvfb_re="-auth $(ere_quote "$out/xvfb.auth")( |\$)"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if pgrep -x eonmark >/dev/null || pgrep -x Xvfb >/dev/null; then sleep 1; else break; fi
+  if pgrep -f -- "$games_re" >/dev/null || pgrep -f -- "$xvfb_re" >/dev/null; then sleep 1; else break; fi
 done
-if pgrep -x eonmark >/dev/null; then bad "eonmark still running:"; pgrep -xl eonmark; else ok "pgrep -x eonmark is empty"; fi
+if left=$(pgrep -f -- "$games_re"); then
+  bad "a game this script started is still running:"
+  ps -o pid=,args= -p "${left//$'\n'/,}" || true
+else
+  ok "no game this script started is running (pgrep -f -- '--replay-dir $out' is empty; eonmark and eonmark-dev alike)"
+fi
 if [ ${#wrap[@]} -gt 0 ]; then
-  if pgrep -x Xvfb >/dev/null; then bad "Xvfb still running:"; pgrep -xl Xvfb; else ok "pgrep -x Xvfb is empty"; fi
+  if left=$(pgrep -f -- "$xvfb_re"); then
+    bad "an Xvfb this script started is still running:"
+    ps -o pid=,args= -p "${left//$'\n'/,}" || true
+  else
+    ok "no Xvfb this script started is running (pgrep -f -- '-auth $out/xvfb.auth' is empty)"
+  fi
 fi
 
 echo

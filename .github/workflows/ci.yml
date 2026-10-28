@@ -351,9 +351,11 @@ jobs:
 
       # Art pass AP4: every render smoke runs with --draw-stats and prints
       # `frame_stats: draws ... max=<n> ...`; fail unless every run's maximum
-      # is under 500 draw calls a frame, and for `art_bench` (and
-      # `enemy_outpost`) its fight-window maximum too (scripts/check_draws.sh;
-      # `mode=none` fails, since the counter does not count it).
+      # is under 500 draw calls a frame (scripts/check_draws.sh; `mode=none`
+      # fails, since the counter does not count it). For `art_bench` (and
+      # `enemy_outpost`) --fight also requires that the fight was measured:
+      # a non-zero `fight_max` and a `frame_stats: fight` line with fight
+      # frames and ticks, so a run whose armies never fought fails.
       - name: Draw-call gate (under 500 a frame)
         run: |
           scripts/check_draws.sh "$RUNNER_TEMP/render-smoke/render_smoke.log"

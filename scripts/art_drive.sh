@@ -29,7 +29,10 @@
 #   Each run must also exit with no ERROR line in its log, and `sim-cli
 #   verify` of the replay it recorded must print OK: the clicks were real
 #   commands through the recorder.
-#   3. No eonmark and no Xvfb process is left.
+#   3. No game and no Xvfb this script started is left: the script keeps
+#      the process id and name of each game and Xvfb it starts and checks
+#      that none of them is still running, so another session's game or
+#      display on the same machine does not fail it.
 #
 # Each run gets its own Xvfb (1280 x 800, a free display picked with
 # -displayfd), runs in background mode (docs/IMPLEMENTER_NOTES.md rule 25:
@@ -75,6 +78,8 @@ say() { echo "    drive: $*"; }
 
 xvfb=""
 game=""
+# "<pid> <name>" of every process this script started, for step 3.
+started=()
 cleanup() {
   if [ -n "$game" ]; then kill "$game" 2>/dev/null || true; fi
   if [ -n "$xvfb" ]; then kill "$xvfb" 2>/dev/null || true; fi
@@ -90,6 +95,7 @@ start_xvfb() {
   rm -f "$dir/display"
   Xvfb -displayfd 3 -screen 0 1280x800x24 3>"$dir/display" >"$dir/xvfb.log" 2>&1 &
   xvfb=$!
+  started+=("$xvfb Xvfb")
   for _ in $(seq 100); do
     [ -s "$dir/display" ] && break
     kill -0 "$xvfb" 2>/dev/null || break
@@ -176,6 +182,7 @@ VK_ICD_FILENAMES="$icd" "$bin" --background --scenario unit_looks --click-check 
   --exit-after-seconds 240 --replay-dir "$d1" --screenshot-at "60:$d1/targets.png" \
   >"$log" 2>&1 &
 game=$!
+started+=("$game $(basename "$bin")")
 if wait_for "$log" '^click_check: (target|FAIL)' >/dev/null; then
   # The targets are printed together in one frame; let the frame finish.
   sleep 1
@@ -215,6 +222,7 @@ say "Xvfb on $DISPLAY"
 VK_ICD_FILENAMES="$icd" "$bin" --background --scenario economy_walkthrough --minimap-check \
   --exit-after-seconds 240 --replay-dir "$d2" >"$log" 2>&1 &
 game=$!
+started+=("$game $(basename "$bin")")
 steps_ok=0
 while :; do
   l=$(wait_for "$log" '^minimap_check: (step 1 |FAIL)') || break
@@ -281,11 +289,28 @@ cleanup
 
 echo
 echo "==> 3. no game process left"
+# The processes of `started` still running under their own name (a
+# process id the system reused for another program does not count; the
+# kernel keeps the first 15 bytes of a name).
+alive() {
+  local entry pid name comm
+  for entry in "${started[@]}"; do
+    pid=${entry%% *}
+    name=${entry#* }
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+    if [ -n "$comm" ] && [ "$comm" = "${name:0:15}" ]; then echo "$pid $name"; fi
+  done
+}
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if pgrep -x eonmark >/dev/null || pgrep -x Xvfb >/dev/null; then sleep 1; else break; fi
+  if [ -n "$(alive)" ]; then sleep 1; else break; fi
 done
-if pgrep -x eonmark >/dev/null; then bad "eonmark still running:"; pgrep -xl eonmark; else ok "pgrep -x eonmark is empty"; fi
-if pgrep -x Xvfb >/dev/null; then bad "Xvfb still running:"; pgrep -xl Xvfb; else ok "pgrep -x Xvfb is empty"; fi
+left=$(alive)
+if [ -n "$left" ]; then
+  bad "still running:"
+  sed 's/^/    /' <<<"$left"
+else
+  ok "none of the ${#started[@]} games and Xvfb servers this script started is running"
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

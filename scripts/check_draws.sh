@@ -10,9 +10,19 @@
 #
 # The line must exist, count at least one frame and name a GPU
 # preprocessing mode other than `none` (GL only, where the counter would
-# miss the indirect draws; never one of our targets). With --fight, a
-# `fight_max=` field is required too: `art_bench` and the `enemy_outpost`
-# pair always print it, so its absence means the fight window never ran.
+# miss the indirect draws; never one of our targets).
+#
+# --fight makes the gate prove that the fight's frames were measured
+# (AP4's heaviest frames: 200 vs 200 with projectiles, bars and lunges).
+# `fight_max` is the largest draw count of a counted frame inside the
+# fight window, so it is never above `max` and `fight_max < 500` alone
+# adds nothing; and the game prints `fight_max=` whenever the scenario has
+# a fight window (`art_bench` and the `enemy_outpost` pair), as 0 when no
+# counted frame fell inside it. So with --fight the field must be there and
+# non-zero (a counted frame always draws at least the HUD), and the run's
+# `frame_stats: fight` line must show fight frames (`frames=` > 0) and the
+# fight's ticks (`ticks=<first>..<last>`, not `none`): the armies fought
+# and the counter saw it.
 # CI's game-linux job runs this over every render smoke's log, and
 # scripts/art_checks.sh over its `art_bench` run.
 #
@@ -64,6 +74,8 @@ number() {
 }
 
 fail=0
+fight_ticks=""
+fight_frames=""
 frames=$(number "$(field frames)")
 max=$(number "$(field max)")
 mode=$(field mode)
@@ -85,16 +97,34 @@ if [ -z "$max" ] || [ "$max" -ge "$budget" ]; then
   echo "check_draws: FAIL max=${max:-missing}, budget < $budget"
   fail=1
 fi
-if [ -n "$fight" ]; then
-  if [ "$fight" -ge "$budget" ]; then
-    echo "check_draws: FAIL fight_max=$fight, budget < $budget"
+if [ -n "$fight" ] && [ "$fight" -ge "$budget" ]; then
+  echo "check_draws: FAIL fight_max=$fight, budget < $budget"
+  fail=1
+fi
+if [ "$need_fight" -eq 1 ]; then
+  if [ -z "$fight_raw" ]; then
+    echo "check_draws: FAIL no fight_max field (not a scenario with a fight window)"
+    fail=1
+  elif [ "$fight" = 0 ]; then
+    echo "check_draws: FAIL fight_max=0: no counted frame fell inside the fight window (the armies never fought, or the counter missed it)"
     fail=1
   fi
-elif [ "$need_fight" -eq 1 ] && [ -z "$fight_raw" ]; then
-  echo "check_draws: FAIL no fight_max field (the fight window never ran)"
-  fail=1
+  fight_line=$(grep '^frame_stats: fight ' "$log" | tail -n 1 || true)
+  if [ -z "$fight_line" ]; then
+    echo "check_draws: FAIL no 'frame_stats: fight' line in $log"
+    fail=1
+  else
+    echo "$fight_line"
+    line=$fight_line
+    fight_frames=$(number "$(field frames)")
+    fight_ticks=$(field ticks)
+    if [ -z "$fight_frames" ] || [ "$fight_frames" -eq 0 ] || [ -z "$fight_ticks" ] || [ "$fight_ticks" = none ]; then
+      echo "check_draws: FAIL the fight line shows no fight (frames=${fight_frames:-missing} ticks=${fight_ticks:-missing})"
+      fail=1
+    fi
+  fi
 fi
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi
-echo "check_draws: ok max=$max${fight:+ fight_max=$fight} < $budget mode=$mode ($log)"
+echo "check_draws: ok max=$max${fight:+ fight_max=$fight} < $budget mode=$mode${fight_ticks:+ fight ticks=$fight_ticks frames=$fight_frames} ($log)"

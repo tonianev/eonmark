@@ -105,8 +105,10 @@ impl Default for Budgets {
     /// The team floors are the plan's (units 200‰, the Wain 80‰, buildings
     /// 100‰); the Seat flag's 300‰ sits under its measured 457‰. The
     /// Mangonel's own floor is 120‰ (owner decision 15 of the art pass,
-    /// 2026-10-28: its banner shrinks to scale 450, about 123‰, so it
-    /// clips less in a packed group; every other unit keeps 200‰).
+    /// 2026-10-28: its banner shrinks to scale 450, about 123‰, "no crowd
+    /// clipping"; centred it still reaches 0.10 m past the 0.5 m radius,
+    /// which `check` notes, and a banner inside the radius would miss the
+    /// floor; every other unit keeps 200‰).
     fn default() -> Self {
         Budgets {
             file_bytes: 2 * 1024 * 1024,

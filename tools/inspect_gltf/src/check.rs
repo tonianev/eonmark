@@ -6,12 +6,13 @@
 //! texture, no cameras, lights, skins or animations, ground contact, team
 //! area against `team_swatches`, the reserved-rect rule and the 1.4x
 //! silhouette rule within a rig group. It prints one `ok` line per Scene
-//! with triangles, bytes, top, size and team share, plus a suggested
-//! `scale_x100` for a building's footprint or a unit's look height.
+//! with triangles, bytes, top, size, team share and the facing it finds
+//! ([`facing`]), plus a suggested `scale_x100` for a building's footprint
+//! or a unit's look height.
 
 use crate::bake::rig_key;
 use crate::image::Rgba;
-use crate::math::{Mat4, Vec3, triangle_area};
+use crate::math::{Mat4, Vec3, cross, sub, triangle_area};
 use crate::model::{Model, bounds};
 use crate::uv::{Cover, Mask, Rect, face_rect};
 use rules::visuals::{DecorAt, Part, Primitive, Visual, Visuals};
@@ -302,6 +303,37 @@ fn place(s: &SceneRef, assets: &Path, budgets: &Budgets) -> Placed {
     placed
 }
 
+/// The horizontal direction a placed model shows the most surface to, and
+/// that direction's share of all horizontally facing surface, in percent:
+/// each triangle's outward normal (from its winding, weighted by its area)
+/// adds its +X, -X, +Z and -Z parts to four separate totals, and the
+/// largest wins (ties in the order +Z, -Z, +X, -X). Separate totals,
+/// because over a closed mesh the signed normals sum to about zero.
+///
+/// It is a hint for the rest-facing rules (`docs/ART_STYLE.md`, import
+/// rules: units face +X after `yaw_deg`, buildings, sites and rubble face
+/// +Z toward the camera, props have no facing): a model whose front is its
+/// largest side reads its front here, a share near 25% means no side
+/// dominates (a symmetric house), and the 40 m screenshots decide. `None`
+/// for a model with no horizontally facing surface.
+pub fn facing(tris: &[([Vec3; 3], [[f32; 2]; 3])]) -> Option<(&'static str, u32)> {
+    const NAMES: [&str; 4] = ["+Z", "-Z", "+X", "-X"];
+    let mut area = [0.0f64; 4];
+    for (p, _) in tris {
+        let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+        area[0] += f64::from(n[2].max(0.0));
+        area[1] += f64::from((-n[2]).max(0.0));
+        area[2] += f64::from(n[0].max(0.0));
+        area[3] += f64::from((-n[0]).max(0.0));
+    }
+    let total: f64 = area.iter().sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let best = (1..4).fold(0, |b, i| if area[i] > area[b] { i } else { b });
+    Some((NAMES[best], (100.0 * area[best] / total).round() as u32))
+}
+
 /// The nominal height of a unit's Primitive or Body look, metres.
 fn look_height(v: &Visual, kind: &UnitKind) -> Option<f32> {
     let r = kind.radius_tiles_x100 as f32 / 100.0;
@@ -562,8 +594,13 @@ pub fn check_visuals(
         }
         let bytes: u64 = placed.files.values().sum();
         let team_desc = team_permille.map_or("-".to_string(), |p| format!("{p}‰"));
+        // Props have no facing (they are turned by the tile hash).
+        let facing_desc = match (usage, facing(&placed.tris)) {
+            (Use::Prop(_), _) | (_, None) => "-".to_string(),
+            (_, Some((dir, share))) => format!("{dir}({share}%)"),
+        };
         let measures = format!(
-            "tris={tris} bytes={bytes} top={:.2} size={:.2}x{:.2}x{:.2} team={team_desc} texture={texture_desc}{suggest}",
+            "tris={tris} bytes={bytes} top={:.2} size={:.2}x{:.2}x{:.2} team={team_desc} facing={facing_desc} texture={texture_desc}{suggest}",
             hi[1], size[0], size[1], size[2]
         );
         if problems.is_empty() {
@@ -827,5 +864,310 @@ mod tests {
             "{}",
             missing.text()
         );
+    }
+
+    /// A one-triangle `<name>.gltf` in `dir` for the import rules: with or
+    /// without `NORMAL` and indices, and one primitive per texture in
+    /// `textures` (files in `dir`), each a triangle on the ground.
+    fn tri_gltf(dir: &Path, name: &str, normals: bool, indexed: bool, textures: &[&str]) {
+        use crate::writer::{Builder, Node};
+        let mut b = Builder::new();
+        let mut prims = Vec::new();
+        for (i, tex) in textures.iter().enumerate() {
+            let x = i as f32 * 0.1;
+            let p = [[x, 0.0, 0.0], [x + 0.2, 0.0, 0.0], [x, 0.3, 0.0]];
+            let n = [[0.0, 0.0, 1.0]; 3];
+            let uv = [[0.15, 0.65]; 3];
+            let t = b.uri_texture(tex);
+            let m = b.material(Some(t));
+            let mut prim = b.prim(
+                &p,
+                normals.then_some(&n[..]),
+                Some(&uv),
+                &[0, 1, 2],
+                Some(m),
+            );
+            if !indexed {
+                prim.indices = None;
+            }
+            prims.push(prim);
+        }
+        let mesh = b.mesh(Some(name), prims);
+        let node = b.node(Node {
+            name: Some(name.to_string()),
+            mesh: Some(mesh),
+            ..Node::default()
+        });
+        b.root(node);
+        let (json, bin) = b.gltf(&format!("{name}.bin")).unwrap();
+        std::fs::write(dir.join(format!("{name}.bin")), bin).unwrap();
+        std::fs::write(dir.join(format!("{name}.gltf")), json).unwrap();
+    }
+
+    /// Copy `<from>.gltf` to `<to>.gltf` (sharing its `.bin`), with `field`
+    /// (a JSON member such as `"cameras": [...]`) added at the top level.
+    fn with_field(dir: &Path, from: &str, to: &str, field: &str) {
+        let json = std::fs::read_to_string(dir.join(format!("{from}.gltf"))).unwrap();
+        let json = json.replacen('{', &format!("{{{field},"), 1);
+        std::fs::write(dir.join(format!("{to}.gltf")), json).unwrap();
+    }
+
+    /// One negative case per rule the first test does not reach: the x/z
+    /// centre for buildings (both axes) against the looser prop tolerance,
+    /// the 256-texel rule and its shipped-atlas exemption, the per-file
+    /// cap, cameras, lights, skins and animations, a primitive that is not
+    /// indexed or has no `NORMAL`, two base textures, a team key that is
+    /// not in `team_swatches`, a swatch rect outside the texture, and the
+    /// silhouette rule comparing only models of one rig.
+    #[test]
+    fn check_flags_centre_texture_file_and_import_rules_and_rig_groups() {
+        let dir = TempDir::new("check-rules");
+        let assets = dir.path().join("assets");
+        let m = assets.join("m");
+        std::fs::create_dir_all(&m).unwrap();
+        box_gltf(&m, "rock", [0.5, 0.4, 0.5], 0.0, false);
+        box_gltf(&m, "unit", [0.5, 1.5, 0.5], 0.0, true);
+        box_gltf(&m, "unit2", [0.5, 1.5, 0.5], 0.0, true);
+        crate::testkit::box_gltf_with(
+            &m,
+            "hex",
+            [2.0, 1.5, 2.0],
+            0.0,
+            false,
+            "hexagons_medieval.png",
+        );
+        std::fs::write(
+            m.join("atlas2.png"),
+            crate::testkit::atlas(true).encode_png().unwrap(),
+        )
+        .unwrap();
+        tri_gltf(&m, "no_normal", false, true, &["atlas.png"]);
+        tri_gltf(&m, "unindexed", true, false, &["atlas.png"]);
+        tri_gltf(&m, "two_tex", true, true, &["atlas.png", "atlas2.png"]);
+        tri_gltf(&m, "tri", true, true, &["atlas.png"]);
+        with_field(
+            &m,
+            "tri",
+            "camera",
+            r#""cameras": [{"type": "perspective", "perspective": {"yfov": 0.8, "znear": 0.1}}]"#,
+        );
+        with_field(
+            &m,
+            "tri",
+            "light",
+            r#""extensionsUsed": ["KHR_lights_punctual"]"#,
+        );
+        std::fs::write(m.join("rig.glb"), crate::testkit::rig_glb("LINEAR", false)).unwrap();
+        let rules = rules::Rules::load(repo_root().join("data")).unwrap();
+        let scene = |path: &str, extra: &str| {
+            format!(
+                r#"Scene(path: "m/{path}", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0{extra})"#
+            )
+        };
+        // A Visuals with `units`, one Scene as the Croft and one as the
+        // only (edge) mountain prop.
+        let ron = |units: &str, croft: &str, prop: &str, rect: &str| {
+            format!(
+                r#"(units: {{ {units} }}, buildings: {{ "croft": {croft} }},
+                   team_swatches: {{ "t": (rects: [{rect}], desaturate_permille: 0) }},
+                   terrain: {{ "mountain": (interior_permille: 1000, edge_permille: 0, jitter_x100: 0, scale_jitter_pct: 0,
+                      looks: [(visual: {prop}, at: Edge, weight: 1)]) }})"#
+            )
+        };
+        let run = |text: String, budgets: &Budgets| {
+            let v: Visuals = ron::from_str(&text).unwrap();
+            check_visuals(&v, &rules.units, &rules.buildings, &assets, budgets).text()
+        };
+        let budgets = Budgets::default();
+        let rock = scene("rock.gltf", "");
+
+        // The x/z centre: the rock with a copy of itself 0.6 m along x (or
+        // z) is centred 0.3 m off. A building fails; a prop, jittered
+        // anyway, passes under its 0.5 m tolerance.
+        for (axis, offset, centre) in [
+            ("x", "(60, 0, 0)", "(0.300, 0.000)"),
+            ("z", "(0, 0, 60)", "(0.000, 0.300)"),
+        ] {
+            let off = scene(
+                "rock.gltf",
+                &format!(r#", parts: [(path: "m/rock.gltf", offset_x100: {offset})]"#),
+            );
+            let text = run(ron("", &off, &off, "(4, 0, 4, 4)"), &budgets);
+            let want = format!(
+                "FAIL buildings[\"croft\"] m/rock.gltf: its x/z centre is {centre} m, more than {CENTRE_TOLERANCE} m"
+            );
+            assert!(text.contains(&want), "{axis}: {want}\n{text}");
+            assert!(
+                text.contains("ok terrain[\"mountain\"].looks[0].visual m/rock.gltf"),
+                "{axis}: {text}"
+            );
+            assert!(text.contains("check: FAIL 1 problem(s)"), "{axis}: {text}");
+        }
+
+        // Textures over the side limit fail unless they are a shipped atlas.
+        let small = Budgets {
+            texture_side: 4,
+            ..Budgets::default()
+        };
+        let text = run(ron("", &rock, &rock, "(4, 0, 4, 4)"), &small);
+        assert!(text.contains("FAIL buildings[\"croft\"] m/rock.gltf: atlas.png is 8x8; the limit is 4 texels a side"), "{text}");
+        let text = run(
+            ron("", &scene("hex.gltf", ""), &rock, "(4, 0, 4, 4)"),
+            &small,
+        );
+        assert!(
+            text.contains("ok buildings[\"croft\"] m/hex.gltf"),
+            "{text}"
+        );
+        assert!(
+            text.contains("hexagons_medieval.png is 8x8, over 4 texels, shipped as is"),
+            "{text}"
+        );
+
+        // A file over the per-file cap.
+        let tiny = Budgets {
+            file_bytes: 16,
+            ..Budgets::default()
+        };
+        let text = run(ron("", &rock, &rock, "(4, 0, 4, 4)"), &tiny);
+        assert!(text.contains("bytes; the limit is 16"), "{text}");
+
+        // Import rules, each on its own model as the Croft.
+        for (file, want) in [
+            ("camera.gltf", "m/camera.gltf has cameras"),
+            ("light.gltf", "m/light.gltf has lights"),
+            ("rig.glb", "m/rig.glb has skins or animations"),
+            (
+                "no_normal.gltf",
+                "m/no_normal.gltf node \"no_normal\" has no NORMAL",
+            ),
+            (
+                "unindexed.gltf",
+                "m/unindexed.gltf node \"unindexed\" is not indexed",
+            ),
+            (
+                "two_tex.gltf",
+                "uses atlas2.png but the model already uses atlas.png; one base texture per model",
+            ),
+        ] {
+            let text = run(ron("", &scene(file, ""), &rock, "(4, 0, 4, 4)"), &budgets);
+            assert!(text.contains(want), "{file}: {want}\n{text}");
+            assert!(text.contains("check: FAIL"), "{file}: {text}");
+        }
+        // The camera and light copies differ from `tri` only by that field.
+        let text = run(
+            ron("", &scene("tri.gltf", ""), &rock, "(4, 0, 4, 4)"),
+            &budgets,
+        );
+        assert!(
+            !text.contains("has cameras") && !text.contains("has lights"),
+            "{text}"
+        );
+
+        // A team key that is not in team_swatches, and a rect outside the
+        // 8x8 texture.
+        let unit = |id: &str, file: &str, team: &str| {
+            format!(
+                r#""{id}": {},"#,
+                scene(
+                    file,
+                    &format!(r#", team: Some("{team}"), fallback: Some(Primitive(Capsule))"#)
+                )
+            )
+        };
+        let text = run(
+            ron(
+                &unit("yeoman", "unit.gltf", "nope"),
+                &rock,
+                &rock,
+                "(4, 0, 4, 4)",
+            ),
+            &budgets,
+        );
+        assert!(
+            text.contains("team \"nope\" is not a key of team_swatches"),
+            "{text}"
+        );
+        let text = run(
+            ron(
+                &unit("yeoman", "unit.gltf", "t"),
+                &rock,
+                &rock,
+                "(4, 0, 8, 4)",
+            ),
+            &budgets,
+        );
+        assert!(
+            text.contains("team_swatches[\"t\"] rect (4, 0, 8, 4) lies outside the 8x8 texture"),
+            "{text}"
+        );
+
+        // Two kinds of the same size on different rigs are never compared;
+        // on one rig they clash.
+        let two = unit("yeoman", "unit.gltf", "t") + &unit("scribe", "unit2.gltf", "t");
+        let text = run(ron(&two, &rock, &rock, "(4, 0, 4, 4)"), &budgets);
+        assert!(!text.contains("less than 1.4x apart"), "{text}");
+        assert!(text.ends_with("check: ok 4 scene(s)\n"), "{text}");
+        let one = unit("yeoman", "unit.gltf", "t") + &unit("scribe", "unit.gltf", "t");
+        let text = run(ron(&one, &rock, &rock, "(4, 0, 4, 4)"), &budgets);
+        assert!(text.contains("less than 1.4x apart"), "{text}");
+    }
+
+    /// `facing` names the side with the most outward surface and its
+    /// share; `check` prints it for every Scene but props, after the yaw.
+    #[test]
+    fn check_prints_the_facing_it_finds() {
+        let dir = TempDir::new("check-facing");
+        // One quad facing +Z (from its winding) and a closed box.
+        crate::testkit::quads_gltf(&dir, "wall", &[[1.5, 5.5]], 0.0);
+        box_gltf(dir.path(), "cube", [1.0, 1.0, 1.0], 0.0, false);
+        let rules = rules::Rules::load(repo_root().join("data")).unwrap();
+        let run = |croft: &str| {
+            let text = format!(
+                r#"(units: {{}}, buildings: {{ "croft": {croft} }},
+                   terrain: {{ "mountain": (interior_permille: 1000, edge_permille: 0, jitter_x100: 0, scale_jitter_pct: 0,
+                      looks: [(visual: Scene(path: "wall.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0), at: Interior, weight: 1)]) }})"#
+            );
+            let v: Visuals = ron::from_str(&text).unwrap();
+            check_visuals(
+                &v,
+                &rules.units,
+                &rules.buildings,
+                dir.path(),
+                &Budgets::default(),
+            )
+            .text()
+        };
+        let wall = |yaw: i32| {
+            format!(
+                r#"Scene(path: "wall.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: {yaw})"#
+            )
+        };
+        for (yaw, want) in [
+            (0, "+Z(100%)"),
+            (90, "+X(100%)"),
+            (180, "-Z(100%)"),
+            (270, "-X(100%)"),
+        ] {
+            let text = run(&wall(yaw));
+            let line = text
+                .lines()
+                .find(|l| l.contains("buildings[\"croft\"]") && l.contains("tris="))
+                .unwrap_or_else(|| panic!("{text}"));
+            assert!(
+                line.contains(&format!(" facing={want} ")),
+                "yaw {yaw}: {line}"
+            );
+            // The prop has no facing.
+            assert!(text.contains("facing=-"), "{text}");
+        }
+        // A cube shows every side alike: the tie goes to +Z at 25%.
+        let text =
+            run(r#"Scene(path: "cube.gltf", scale_x100: 100, y_offset_tiles_x100: 0, yaw_deg: 0)"#);
+        assert!(
+            text.contains("ok buildings[\"croft\"] cube.gltf") && text.contains(" facing=+Z(25%) "),
+            "{text}"
+        );
+        assert_eq!(facing(&[]), None);
     }
 }

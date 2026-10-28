@@ -112,7 +112,20 @@ pub fn quads_gltf(dir: &TempDir, name: &str, texels: &[[f32; 2]], lift: f32) -> 
 /// 5..7 x 1..2 (inside the blue block 4..8 x 0..4) when `team`, else the
 /// green block; top and bottom sample the green block.
 pub fn box_gltf(dir: &Path, name: &str, size: [f32; 3], base_y: f32, team: bool) -> PathBuf {
-    std::fs::write(dir.join("atlas.png"), atlas(false).encode_png().unwrap()).unwrap();
+    box_gltf_with(dir, name, size, base_y, team, "atlas.png")
+}
+
+/// [`box_gltf`] with the test atlas written as `texture` (a file name in
+/// `dir`), so a test can give it a name such as a shipped atlas's.
+pub fn box_gltf_with(
+    dir: &Path,
+    name: &str,
+    size: [f32; 3],
+    base_y: f32,
+    team: bool,
+    texture: &str,
+) -> PathBuf {
+    std::fs::write(dir.join(texture), atlas(false).encode_png().unwrap()).unwrap();
     let [w, h, d] = size;
     let (x0, x1, y0, y1, z0, z1) = (-w / 2.0, w / 2.0, base_y, base_y + h, -d / 2.0, d / 2.0);
     // Each face: four corners and a normal.
@@ -164,7 +177,7 @@ pub fn box_gltf(dir: &Path, name: &str, size: [f32; 3], base_y: f32, team: bool)
         ix.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     let mut b = Builder::new();
-    let tex = b.uri_texture("atlas.png");
+    let tex = b.uri_texture(texture);
     let mat = b.material(Some(tex));
     let prim = b.prim(&p, Some(&n), Some(&t), &ix, Some(mat));
     let mesh = b.mesh(Some(name), vec![prim]);

@@ -10,9 +10,11 @@
 //!   One entity per unit, keyed by `UnitId` and never a child of the unit
 //!   (`docs/IMPLEMENTER_NOTES.md` rule 16), placed every frame at the
 //!   unit's interpolated position, steady (nothing pulses,
-//!   `docs/ART_STYLE.md`). Since the art pass (decision 11) every diamond
-//!   shares one mesh and one unlit material with no shadow, so 200
-//!   bleeding units are one draw call, not 200 retained gizmos. Its
+//!   `docs/ART_STYLE.md`). Since the art pass (its plan's decision 11,
+//!   rings and diamonds as shared meshes) every diamond shares one mesh
+//!   and one unlit material with no shadow, so 200 bleeding units are one
+//!   draw call, not 200 retained gizmos. It lies 5 mm under the selection
+//!   ring's plane ([`ATTRITION_Y`]), so the two never z-fight. Its
 //!   half-diagonal is [`ATTRITION_MARKER_PER_UNIT_RADIUS`] unit radii,
 //!   outside the selection ring, so its corners show around the unit's
 //!   feet.
@@ -61,6 +63,21 @@ use crate::sim_driver::{LOCAL_PLAYER, MatchOver, SimHandle};
 pub const ATTRITION_MARKER_PER_UNIT_RADIUS: f32 = 1.8;
 /// Segments of the attrition marker's annulus: 4 makes it a diamond.
 pub const ATTRITION_MARKER_SIDES: u32 = 4;
+/// Height of the attrition diamond above the ground, metres: 5 mm below
+/// the selection ring's [`RING_Y`], so the ring is drawn on top where
+/// their bands overlap (about ±39° around each diagonal) instead of the
+/// two opaque meshes z-fighting in one plane, and above the debug grid
+/// (`ground::GRID_Y`). 5 mm is far above the depth precision at the
+/// camera's 60 m.
+pub const ATTRITION_Y: f32 = 0.025;
+
+// The flat layers from the ground up: grid lines, attrition diamonds,
+// selection rings, the placement ghost's outline.
+const _: () = assert!(
+    crate::ground::GRID_Y < ATTRITION_Y
+        && ATTRITION_Y < RING_Y
+        && RING_Y < crate::placement::GHOST_OUTLINE_Y
+);
 /// Segments of the supply ring (a 14.5 m circle).
 pub const SUPPLY_RING_RESOLUTION: u32 = 96;
 /// Segments of the annexation track and arc.
@@ -263,9 +280,10 @@ pub fn sync_attrition_markers(
             continue;
         };
         let (pos, _) = interp.sample(t);
-        let transform = Transform::from_translation(Vec3::new(pos.x, RING_Y, pos.z)).with_scale(
-            Vec3::splat(fx_to_f32(unit.radius) * ATTRITION_MARKER_PER_UNIT_RADIUS),
-        );
+        let transform = Transform::from_translation(Vec3::new(pos.x, ATTRITION_Y, pos.z))
+            .with_scale(Vec3::splat(
+                fx_to_f32(unit.radius) * ATTRITION_MARKER_PER_UNIT_RADIUS,
+            ));
         match markers.0.get(&unit.id) {
             Some(marker) => {
                 if let Ok(mut current) = transforms.get_mut(*marker) {
@@ -754,7 +772,10 @@ mod tests {
             (marker_pos.xz() - bowman_pos.xz()).length() < 0.6,
             "{marker_pos} under {bowman_pos}"
         );
-        assert_eq!(marker_pos.y, RING_Y);
+        assert_eq!(
+            marker_pos.y, ATTRITION_Y,
+            "under the selection ring's plane"
+        );
 
         // Select the Wain and a Skirmisher: one ring, the Wain's, of 14.5 m
         // around the centre of its tile.
@@ -983,6 +1004,36 @@ mod tests {
         assert!(ring_material.unlit);
     }
 
+    /// A unit that is selected and bleeding has its ring and its diamond on
+    /// two planes, the ring on top. Their bands overlap for about ±39°
+    /// around each diagonal (the ring's band runs from 1.19 to 1.40 unit
+    /// radii, the diamond's from 1.08 to 1.27 there), and two opaque
+    /// meshes in one plane z-fight there: the amber speckles in the cream
+    /// band and shimmers as the unit moves.
+    #[test]
+    fn a_selected_bleeding_unit_draws_its_ring_above_its_diamond() {
+        use crate::selection::SelectionRing;
+        let mut app = rings_and_diamonds_app();
+        let world = app.world_mut();
+        let mut rings = world.query::<(&SelectionRing, &Transform)>();
+        let ring_y: std::collections::BTreeMap<UnitId, f32> = rings
+            .iter(world)
+            .map(|(r, t)| (r.0, t.translation.y))
+            .collect();
+        let mut diamonds = world.query::<(&AttritionMarker, &Transform)>();
+        let both: Vec<(UnitId, f32, f32)> = diamonds
+            .iter(world)
+            .filter_map(|(d, t)| ring_y.get(&d.0).map(|&ry| (d.0, ry, t.translation.y)))
+            .collect();
+        assert_eq!(both.len(), 3, "the three Bowmen are selected and bleed");
+        for (id, ring, diamond) in both {
+            assert!(
+                ring - diamond >= 0.004 && diamond > 0.0,
+                "{id:?}: ring at y {ring}, diamond at y {diamond}"
+            );
+        }
+    }
+
     /// Rule 16: rings and diamonds are top-level entities keyed by
     /// `UnitId`, never children of the units they mark, and they sit at
     /// the unit's interpolated position on the ground, scaled from its
@@ -1012,7 +1063,8 @@ mod tests {
             let id = ring.or(diamond).expect("keyed by unit");
             let unit = view.unit(id).expect("alive");
             assert_ne!(Some(&entity), entities.get(&id), "not the unit itself");
-            assert_eq!(transform.translation.y, RING_Y);
+            let plane = if ring.is_some() { RING_Y } else { ATTRITION_Y };
+            assert_eq!(transform.translation.y, plane, "{entity}");
             let per_radius = if ring.is_some() {
                 RING_RADIUS_PER_UNIT_RADIUS
             } else {

@@ -29,6 +29,12 @@ pub const GRID_SPACING_TILES: u32 = 8;
 /// Half the ground edge in metres; the camera focus is clamped to this.
 pub const HALF_EXTENT: f32 = GROUND_SIZE_TILES as f32 * TILE_SIZE * 0.5;
 
+/// Height of the debug grid's lines above the ground, metres: above the
+/// ground mesh (y = 0) and below every flat marker
+/// (`markers::ATTRITION_Y`, `selection::RING_Y`), so none of them
+/// z-fight.
+pub const GRID_Y: f32 = 0.02;
+
 /// The key that shows and hides the debug grid.
 pub const GRID_KEY: KeyCode = KeyCode::KeyG;
 
@@ -203,10 +209,10 @@ fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
 fn draw_grid(mut gizmos: Gizmos) {
     let cells = GROUND_SIZE_TILES / GRID_SPACING_TILES;
     let spacing = GRID_SPACING_TILES as f32 * TILE_SIZE;
-    // `grid` draws in the XY plane; rotate it onto XZ and lift it 2 cm to
-    // avoid z-fighting with the ground.
+    // `grid` draws in the XY plane; rotate it onto XZ and lift it to
+    // GRID_Y to avoid z-fighting with the ground.
     gizmos.grid(
-        Isometry3d::new(Vec3::Y * 0.02, Quat::from_rotation_x(-FRAC_PI_2)),
+        Isometry3d::new(Vec3::Y * GRID_Y, Quat::from_rotation_x(-FRAC_PI_2)),
         UVec2::splat(cells),
         Vec2::splat(spacing),
         palette::GRID_LINE,

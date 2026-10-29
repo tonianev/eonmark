@@ -395,4 +395,91 @@ mod tests {
         assert!(table[0].starts_with("| Stat | You (P0) | Easy standard (P1) |"));
         assert_eq!(table.len(), 2 + 11 + 3);
     }
+
+    /// The replay of a human-against-bot match carries the human's
+    /// commands as `Tick` records, and verify steps those ticks through its
+    /// own branch. `match-log` must observe those steps too: the statistics
+    /// it re-derives equal a `MatchStats` fed after every step of the
+    /// recorded run, past first contact and the human's first losses, with
+    /// commands on ticks whose next step is a 20-tick sample.
+    #[test]
+    fn match_log_stats_equal_the_recorded_run_with_human_commands() {
+        let rules = Rules::load(data()).unwrap();
+        let setup = MatchSetup::vs_bot(&rules, 5, "hard", "standard");
+        let (worker, _) = rules::ai::worker_kind(&rules).unwrap();
+        let mut sim = sim::Sim::new(
+            setup.clone(),
+            rules.clone(),
+            ai::controller_for(&setup, &rules).unwrap(),
+        );
+        let p0 = PlayerId(0);
+        let seat = sim::BuildingId(1);
+        let enemy_seat = {
+            let view = sim.view();
+            let tile = view
+                .buildings()
+                .find(|b| b.owner == PlayerId(1))
+                .map(|b| b.tile)
+                .unwrap();
+            view.map().center_of(tile)
+        };
+        let dir = std::env::temp_dir().join(format!("eonmark-match-log-h-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("human_hard.eonreplay");
+        let mut w = sim::ReplayWriter::create(&path, &setup).unwrap();
+        let mut stats = MatchStats::new(&setup, &rules);
+        stats.observe(&sim.view(), &[]);
+        let mut seq = 0u32;
+        let mut command_ticks = Vec::new();
+        for _ in 0..4000 {
+            let t = sim.tick();
+            let mut cmds = Vec::new();
+            if t == 300 {
+                // Two Yeomen walk to the enemy Seat: its shots are first
+                // contact, and they die.
+                cmds.push(sim::Command::Move {
+                    units: vec![sim::UnitId(4), sim::UnitId(5)],
+                    target: enemy_seat,
+                    queue: false,
+                });
+            }
+            if t % 1000 == 19 || t == 0 {
+                cmds.push(sim::Command::Train {
+                    building: seat,
+                    kind: sim::UnitKindId(worker),
+                });
+            }
+            let cmds: Vec<sim::PlayerCommand> = cmds
+                .into_iter()
+                .map(|c| {
+                    seq += 1;
+                    sim::PlayerCommand::new(p0, seq, c)
+                })
+                .collect();
+            if !cmds.is_empty() {
+                command_ticks.push(t);
+            }
+            w.tick(t, &cmds).unwrap();
+            sim.step(&cmds);
+            let events = sim.drain_events();
+            stats.observe(&sim.view(), &events);
+        }
+        w.hash(sim.tick(), sim.hash(), &sim.sub_hashes()).unwrap();
+        w.finish().unwrap();
+        let log = collect(&path, &data()).unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            log.outcome,
+            VerifyOutcome::Ok {
+                final_hash: sim.hash(),
+                ticks: 4000
+            }
+        );
+        assert!(command_ticks.iter().filter(|t| *t % 20 == 19).count() >= 3);
+        assert!(stats.first_contact_tick().is_some(), "contact");
+        assert!(stats.player(p0).units_lost_total() > 0, "the Yeomen fell");
+        assert!(stats.player(p0).units_trained_total() > 0);
+        assert_eq!(log.me(), p0);
+        assert_eq!(log.stats, stats);
+    }
 }

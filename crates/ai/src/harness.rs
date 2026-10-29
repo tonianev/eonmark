@@ -146,17 +146,21 @@ pub struct Observer {
 
 impl Observer {
     /// An observer for `setup` under `rules`: each Standard seat's build
-    /// order (any difficulty, M6) is read from the rules for its
+    /// order (any difficulty, M6, resolved for the level's
+    /// `worker_target_permille`) is read from the rules for its
     /// `bo_done_tick`.
     pub fn new(setup: &MatchSetup, rules: &Rules) -> Observer {
         let order = |p: PlayerId| {
-            setup
+            let seat = setup
                 .ai_seats
                 .iter()
-                .find(|s| s.player == p && is_standard_bot(rules, &s.bot))
-                .and_then(|s| rules.ai.personality(&s.personality))
-                .and_then(|k| rules.ai.build_order(&k.build_order))
-                .cloned()
+                .find(|s| s.player == p && is_standard_bot(rules, &s.bot))?;
+            let level = rules.ai.difficulty(&seat.bot)?;
+            let k = rules.ai.personality(&seat.personality)?;
+            rules
+                .ai
+                .build_order(&k.build_order)
+                .map(|o| rules::ai::resolve_order(o, level))
         };
         Observer {
             sides: [

@@ -167,9 +167,7 @@ impl Arena {
 
     /// A live plan context for `me` at the current tick.
     pub fn ctx(&self, me: PlayerId) -> Ctx<'_> {
-        let view = self.sim.view();
-        let knobs = self.bot(me).knobs();
-        Ctx::new(view, me, knobs, self.bot(me).map())
+        self.bot(me).ctx(self.sim.view(), me)
     }
 
     /// What `me`'s Standard bot would plan now, whatever its cadence, and

@@ -1151,7 +1151,26 @@ mod tests {
         assert!(err(&["--difficulty", "nightmare"]).contains("unknown bot \"nightmare\""));
         assert!(err(&["--personality", "zerg"]).contains("no personality \"zerg\""));
         assert!(err(&["--difficulty", "passive", "--personality", "x"]).contains("takes none"));
-        assert!(err(&["--personality", "random"]).contains("random: true"));
+        // The shipped pool (M6 slice 2: rush, boom and tower) resolves
+        // `random` into the header; an empty pool is an error.
+        let (random, _) = build_match(
+            &launch(&["--seed", "5", "--personality", "random"]),
+            rules.clone(),
+        )
+        .unwrap();
+        let picked = random.setup().ai_seats[0].personality.clone();
+        assert!(
+            ["rush", "boom", "tower"].contains(&picked.as_str()),
+            "{picked}"
+        );
+        let mut empty = rules.clone();
+        for p in &mut empty.ai.personalities {
+            p.random = false;
+        }
+        let e = build_match(&launch(&["--personality", "random"]), empty)
+            .err()
+            .expect("an empty pool is an error");
+        assert!(e.contains("random: true"), "{e}");
     }
 
     /// `--scenario`, `--skip-menu` and `--spectate` start in `Skirmish`.

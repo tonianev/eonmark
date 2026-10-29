@@ -47,7 +47,7 @@ use super::ctx::Ctx;
 use super::economy;
 use super::facts::{Facts, kind_centre, tiles_sq};
 use super::memory::BotMemory;
-use super::sites::{SiteSearch, site_for};
+use super::sites::{SiteSearch, near_town_candidates, search, site_for};
 use rules::{BuildOrder, Placement, Rules, Step, UnitClass};
 use sim::{BuildingId, BuildingKindId, Command, FxVec2, RejectReason, TechId, UnitId, UnitKindId};
 use std::collections::BTreeSet;
@@ -446,7 +446,83 @@ pub fn step(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             }
         }
     }
+    reactive_tower(ctx, mem);
     site_keeper(ctx, mem);
+}
+
+/// The step index the reactive Watchtower's site search remembers its site
+/// under (never a build-order step, so the next plan forgets it).
+pub const REACTIVE_STEP: u16 = u16::MAX;
+
+/// The reactive Watchtower (M6, `reactive_towers`): after a released
+/// defence ([`super::defend`] sets `BotMemory::last_defended`), the bot
+/// places one Watchtower `NearTown` around the defended Town with what
+/// the plan's ledger can pay (it never saves up for it), up to
+/// `reactive_towers` in the match. A Town lost or contested meanwhile, or
+/// no site, drops the request.
+pub fn reactive_tower(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
+    let Some(town) = mem.last_defended else {
+        return;
+    };
+    if u32::from(mem.extra_towers) >= ctx.knobs.reactive_towers
+        || !ctx.facts.towns.contains(&town)
+        || ctx.facts.contested.contains(&town)
+    {
+        mem.last_defended = None;
+        return;
+    }
+    if ctx.commands_left == 0 || ctx.probes_left == 0 {
+        return;
+    }
+    let rules = ctx.view.rules();
+    let Some(k) = rules
+        .buildings
+        .iter()
+        .position(|b| !b.town && b.border_radius_tiles.is_some() && b.attack.is_some())
+    else {
+        mem.last_defended = None;
+        return;
+    };
+    let k = BuildingKindId(u16::try_from(k).expect("validated len"));
+    let Ok(cost) = ctx.view.check_build_kind(ctx.me, k) else {
+        return;
+    };
+    if !ctx.ledger.affords(&cost) {
+        return;
+    }
+    let pool = builder_pool(ctx, mem);
+    let candidates = near_town_candidates(ctx, k, town);
+    match search(
+        ctx,
+        mem,
+        REACTIVE_STEP,
+        k,
+        Placement::NearTown,
+        &pool,
+        candidates,
+    ) {
+        SiteSearch::Found { builder, tile } => {
+            if ctx.ledger.try_spend(&cost) {
+                ctx.claim(builder);
+                if ctx.push(Command::Build {
+                    unit: builder,
+                    kind: k,
+                    tile,
+                }) {
+                    ctx.planned.push((
+                        i32::from(tile.x),
+                        i32::from(tile.y),
+                        i32::from(tile.x),
+                        i32::from(tile.y),
+                    ));
+                    mem.extra_towers = mem.extra_towers.saturating_add(1);
+                    mem.last_defended = None;
+                }
+            }
+        }
+        SiteSearch::NoSite => mem.last_defended = None,
+        SiteSearch::NoBuilder | SiteSearch::OutOfProbes => {}
+    }
 }
 
 /// What an `Advance` saving up for `cost` holds back: each resource at the

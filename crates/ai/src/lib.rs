@@ -261,9 +261,14 @@ pub fn describe(view: &SimView<'_>, player: PlayerId) -> String {
         return format!("{} {}: unknown personality", seat.bot, seat.personality);
     };
     let knobs = rules::ai::resolve(personality, level);
-    let Some(order) = rules.ai.build_order(&knobs.build_order) else {
+    let Some(order) = rules
+        .ai
+        .build_order(&knobs.build_order)
+        .map(|o| rules::ai::resolve_order(o, level))
+    else {
         return format!("{} {}: unknown build order", seat.bot, seat.personality);
     };
+    let order = &order;
     let stats = standard::stats(view.ai_memory(player));
     let raid = level.first_raid.map_or_else(
         || "none".to_string(),
@@ -579,6 +584,18 @@ mod tests {
     #[test]
     fn resolve_personality_draws_from_the_random_pool() {
         let mut r = rules();
+        // The shipped pool (slice 2): rush, boom and tower, never the
+        // Balanced `standard`, an explicit choice.
+        let shipped: Vec<String> = (0..60)
+            .map(|seed| resolve_personality(&r, seed, PlayerId(1)).unwrap())
+            .collect();
+        for id in ["rush", "boom", "tower"] {
+            assert!(shipped.iter().any(|p| p == id), "{id} is drawn");
+        }
+        assert!(!shipped.iter().any(|p| p == "standard"));
+        for p in &mut r.ai.personalities {
+            p.random = false;
+        }
         let err = resolve_personality(&r, 1, PlayerId(1)).unwrap_err();
         assert!(err.contains("random: true"), "{err}");
         let mut extra = |id: &str| {

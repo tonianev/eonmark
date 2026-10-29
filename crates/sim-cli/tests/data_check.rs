@@ -81,7 +81,7 @@ fn repo_data_passes_with_three_ages_eight_kinds_and_twelve_techs() {
     // M5b: the bot data under data/ai; M6: its three difficulty levels.
     assert!(
         stdout.contains(
-            " factions=1 personalities=1 build_orders=1 difficulties=3 maps=plains_1v1 strings=en"
+            " factions=1 personalities=4 build_orders=4 difficulties=3 maps=plains_1v1 strings=en"
         ),
         "{stdout}"
     );

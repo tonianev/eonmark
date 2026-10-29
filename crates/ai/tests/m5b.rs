@@ -35,10 +35,12 @@ impl AiController for Ticks {
     }
 }
 
-/// The Standard bot plans every 10 ticks, P0 on ticks 0, 10, ... and P1
-/// on ticks 5, 15, ...: commands come only from plan ticks, both seats
-/// act from their first plan (a Yeoman, builders, gatherers), and a plan
-/// of the arena starts from the documented context.
+/// The Standard bot plans every 10 ticks, the two seats 5 ticks apart
+/// (M6: at seed 1, an odd seed, P1 on ticks 0, 10, ... and P0 on ticks 5,
+/// 15, ...; the order alternates with the seed's parity): commands come
+/// only from plan ticks, both seats act from their first plan (a Yeoman,
+/// builders, gatherers), and a plan of the arena starts from the
+/// documented context.
 #[test]
 fn standard_keeps_its_cadence() {
     let r = common::rules();
@@ -50,7 +52,7 @@ fn standard_keeps_its_cadence() {
             phase(PlayerId(0), every, &setup),
             phase(PlayerId(1), every, &setup)
         ),
-        (0, 5)
+        (5, 0)
     );
     let calls = Arc::new(Mutex::new(Vec::new()));
     let inner = ai::controller_for(&setup, &r).unwrap();
@@ -1231,7 +1233,16 @@ fn bot_takes_seat() {
         }
     }
     let launched_at = launched_at.expect("a launch");
-    assert!(launched_at <= 20, "launched at {launched_at}");
+    // M6: the first wave waits up to `noise_first_wave_ds` more, by the
+    // bot's noise (`waves::first_wave_extra`), then launches at once.
+    let k = r.ai.personality("standard").unwrap();
+    let extra_ds = sim::ai_noise(1, P1, ai::standard::ctx::salt::FIRST_WAVE)
+        % (u64::from(k.noise_first_wave_ds) + 1);
+    let extra = r.ticks_from_ds(u32::try_from(extra_ds).unwrap());
+    assert!(
+        launched_at <= 20 + extra,
+        "launched at {launched_at} (first-wave wait {extra})"
+    );
     let result = a.sim.result().expect("decided before 4000");
     assert_eq!(
         (result.outcome, result.reason),

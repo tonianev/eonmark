@@ -1,5 +1,5 @@
-//! Counter-weighted composition (M6, slice 2's pure module; `army::produce`
-//! reads it from slice 2 on).
+//! Counter-weighted composition (M6): `army::produce` weights the
+//! personality's mix with it on every plan that trains.
 //!
 //! The bot weights its personality's `army_mix` by what the enemy shows.
 //! With `s_e` the visible enemy armed share of kind `e` in per mille and

@@ -7,7 +7,11 @@
   // SIM_VERSION 18's disclosed bot bonus (step 6d'): every fixture is
   // re-recorded for its header; only m5_first_match's .hash moves (its two
   // Standard seats receive the bonus from tick 4100).
-  rules_version: 26,
+  // 27: M6 slice 2 bot behaviours (influence maps, retreat, raids, the
+  // deadline raid, counters, seat_last, defence and noise; crates/ai under
+  // SIM_VERSION 18) and the rush, boom and tower personalities: every
+  // fixture is re-recorded for its header; only m5_first_match's .hash moves.
+  rules_version: 27,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

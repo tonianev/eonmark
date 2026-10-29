@@ -569,9 +569,22 @@ mod tests {
     #[test]
     fn random_resolves_into_the_header_or_is_a_usage_error() {
         let rules = Rules::load(data()).unwrap();
-        let err = setups(&args("--seeds 1 --personality-b random"), &rules).unwrap_err();
+        // The shipped pool (M6 slice 2): rush, boom and tower.
+        let s = setups(&args("--seeds 1..12 --personality-b random"), &rules).unwrap();
+        let shipped: Vec<&str> = s
+            .iter()
+            .map(|x| x.ai_seats[1].personality.as_str())
+            .collect();
+        for id in ["rush", "boom", "tower"] {
+            assert!(shipped.contains(&id), "{shipped:?}");
+        }
+        let mut empty = rules.clone();
+        for p in &mut empty.ai.personalities {
+            p.random = false;
+        }
+        let err = setups(&args("--seeds 1 --personality-b random"), &empty).unwrap_err();
         assert!(err.contains("random: true"), "{err}");
-        let mut pooled = rules.clone();
+        let mut pooled = empty.clone();
         for id in ["p", "q"] {
             let mut p = rules.ai.personality("standard").unwrap().clone();
             p.id = id.to_string();

@@ -16,4 +16,5 @@
   wave_interval_permille: 1000,
   all_in_after_ds: None,                            // None keeps the personality's
   first_raid: Some((by_ds: 9000, prep_ds: 1500, min_armed: 6, max_armed: 12)),
+  worker_target_permille: 1000,
 )

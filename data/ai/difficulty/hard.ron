@@ -16,4 +16,5 @@
   wave_interval_permille: 900,
   all_in_after_ds: None,
   first_raid: Some((by_ds: 6000, prep_ds: 1500, min_armed: 6, max_armed: 10)),
+  worker_target_permille: 1000,
 )

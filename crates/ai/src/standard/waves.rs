@@ -58,11 +58,12 @@
 //! assault order (a wave that ends before its assault issues none).
 
 use super::army::home_armed;
-use super::ctx::{Ctx, goal_or_post, on_station};
+use super::ctx::{Ctx, goal_or_post, jitter, on_station, salt};
 use super::defend::{all_in, launch_blocked, recall_wave};
-use super::facts::{kind_centre, kind_centre_tile, tiles_sq};
-use super::memory::{BotMemory, Wave, WavePhase};
-use rules::{Rules, UnitClass};
+use super::facts::{kind_centre, kind_centre_tile, tiles_sq, visible_enemies};
+use super::influence::isqrt;
+use super::memory::{BotMemory, Wave, WaveKind, WavePhase};
+use rules::{Rules, UnitClass, WainRule, WaveMode};
 use sim::{Building, BuildingId, Command, Fx, FxVec2, Intent, TargetId, Tile, UnitId, UnitKindId};
 use std::collections::BTreeSet;
 
@@ -192,21 +193,111 @@ pub fn home_guard(ctx: &Ctx<'_>) -> usize {
     usize::from(used >= cap)
 }
 
-/// The wave's target: the complete enemy Town nearest the rally, ties to
-/// the lowest id (the one function influence maps replace in M6).
-pub fn choose_target(ctx: &mut Ctx<'_>) -> Option<BuildingId> {
+/// Whole tiles between two points (the integer square root of the
+/// squared distance).
+pub fn dist_tiles(a: FxVec2, b: FxVec2) -> i64 {
+    let d = u64::try_from(a.dist_sq_i64(b).max(0) >> 32).unwrap_or(u64::MAX);
+    i64::try_from(isqrt(d)).unwrap_or(i64::MAX)
+}
+
+/// Whether Town `b` is its owner's Seat.
+fn is_seat(b: &Building) -> bool {
+    b.town_state.is_some_and(|t| t.seat)
+}
+
+/// The siege target score of the enemy Town `b` (lower is better, M6):
+/// `dist_tiles x 1000 + target_strength_weight x isqrt(units + shooters)`,
+/// the distance from the rally and the enemy units' and shooters'
+/// strength over `influence_radius_cells` around the Town's cell.
+pub fn target_score(ctx: &mut Ctx<'_>, b: BuildingId) -> Option<i64> {
     let rally = ctx.rally();
-    let rules = ctx.view.rules();
     let view = ctx.view;
-    ctx.facts
-        .enemy_towns
-        .iter()
-        .filter_map(|id| {
-            let b = view.building(*id)?;
-            Some((kind_centre(rules, b.kind, b.tile).dist_sq_i64(rally), *id))
-        })
-        .min()
-        .map(|(_, id)| id)
+    let rules = view.rules();
+    let t = view.building(b)?;
+    let centre = kind_centre(rules, t.kind, t.tile);
+    let r = ctx.knobs.influence_radius_cells;
+    let weight = i64::from(ctx.knobs.target_strength_weight);
+    let inf = ctx.influence();
+    let cell = inf.cell_at(centre);
+    let strength = inf
+        .strength(&inf.enemy_units, cell, r)
+        .saturating_add(inf.strength(&inf.enemy_shooters, cell, r));
+    let root = i64::try_from(isqrt(u64::try_from(strength.max(0)).unwrap_or(0))).unwrap_or(0);
+    Some(
+        dist_tiles(centre, rally)
+            .saturating_mul(1000)
+            .saturating_add(weight.saturating_mul(root)),
+    )
+}
+
+/// The wave's target (M6): among the complete enemy Towns, the best
+/// [`target_score`], ties to the lowest id. With `seat_last` the enemy
+/// Seat is skipped while the enemy holds another complete Town that no
+/// annexation timer runs on. When the runner-up scores within
+/// `noise_mix_permille` of the best, the bot's noise (salted with the
+/// launch count) picks between the two.
+pub fn choose_target(ctx: &mut Ctx<'_>, launches: u16) -> Option<BuildingId> {
+    let view = ctx.view;
+    let towns: Vec<BuildingId> = ctx.facts.enemy_towns.clone();
+    let seat_last = ctx.knobs.seat_last
+        && towns.iter().any(|t| {
+            view.building(*t).is_some_and(|b| !is_seat(b)) && view.annexation(*t).is_none()
+        });
+    let mut scored: Vec<(i64, BuildingId)> = Vec::new();
+    for t in towns {
+        if seat_last && view.building(t).is_some_and(is_seat) {
+            continue;
+        }
+        if let Some(s) = target_score(ctx, t) {
+            scored.push((s, t));
+        }
+    }
+    scored.sort();
+    let best = *scored.first()?;
+    if let Some(second) = scored.get(1).copied() {
+        let band = best
+            .0
+            .max(0)
+            .saturating_mul(i64::from(ctx.knobs.noise_mix_permille))
+            / 1000;
+        if second.0.saturating_sub(best.0) <= band
+            && ctx.noise(salt::TARGET + u64::from(launches)) % 2 == 1
+        {
+            return Some(second.1);
+        }
+    }
+    Some(best.1)
+}
+
+/// Whether a siege wave needs a Supply Wain now (M6, the personality's
+/// Wain rule): always for `Always`; for `IfEnemyHarrying` once an enemy
+/// has a Harrying level (attrition only exists then).
+pub fn wain_needed(ctx: &Ctx<'_>) -> bool {
+    match ctx.knobs.wain_rule {
+        WainRule::Always => true,
+        WainRule::IfEnemyHarrying => ctx.facts.enemy.harrying > 0,
+    }
+}
+
+/// The extra wait of the first wave (M6): up to `noise_first_wave_ds`,
+/// from the bot's noise, in ticks.
+pub fn first_wave_extra(ctx: &Ctx<'_>) -> u32 {
+    let max = ctx.knobs.noise_first_wave_ds;
+    if max == 0 {
+        return 0;
+    }
+    let ds = ctx.noise(salt::FIRST_WAVE) % (u64::from(max) + 1);
+    ctx.ticks(u32::try_from(ds).expect("at most MAX_AI_DS"))
+}
+
+/// The wait after a launch (M6): `every_ds` in ticks jittered by up to
+/// `noise_wave_interval_permille` with the noise of launch `n`.
+pub fn interval_after(ctx: &Ctx<'_>, every_ds: u32, n: u16) -> u32 {
+    jitter(
+        ctx.ticks(every_ds),
+        ctx.noise(salt::WAVE_INTERVAL + u64::from(n)),
+        ctx.knobs.noise_wave_interval_permille,
+    )
 }
 
 /// The stage point for a wave of `n` units against `target`: walking the
@@ -318,18 +409,36 @@ pub fn launch_due(ctx: &Ctx<'_>, mem: &BotMemory) -> bool {
     {
         return false;
     }
+    let all_in = all_in(ctx);
+    // M6: the personality's tech gate (never during the all-in, so a lost
+    // Watchtower cannot hold the waves back for ever).
+    if !all_in
+        && let Some(tech) = &ctx.knobs.wave_requires_tech
+        && ctx
+            .view
+            .rules()
+            .tech_by_id(tech)
+            .is_none_or(|(t, _)| !ctx.view.researched(ctx.me).contains(&sim::TechId(t)))
+    {
+        return false;
+    }
     let not_before = mem
         .next_wave_at
         .max(ctx.ticks(ctx.knobs.first_wave_not_before_ds));
-    all_in(ctx) || ctx.tick() >= not_before
+    all_in || ctx.tick() >= not_before
 }
 
-/// Launch a wave when every condition holds (see the module docs).
+/// Launch a wave when every condition holds (see the module docs): the
+/// difficulty's deadline raid first (M6), then a raid while a
+/// `RaidUntilSiege` personality has no siege assembled, else a siege wave.
 fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     let tick = ctx.tick();
     let rules = ctx.view.rules();
     let all_in = all_in(ctx);
-    if launch_blocked(ctx, mem) || ctx.commands_left < 2 || !launch_due(ctx, mem) {
+    if launch_blocked(ctx, mem) || ctx.commands_left < 2 {
+        return;
+    }
+    if deadline_raid(ctx, mem) || !launch_due(ctx, mem) {
         return;
     }
     let home = home_armed(ctx, mem);
@@ -347,20 +456,41 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         })
         .collect();
     let keep = home_guard(ctx);
+    let siege = |u: &UnitId| view.unit(*u).is_some_and(|x| is_siege(rules, x.kind));
+    let sieges = assembled.iter().filter(|u| siege(u)).count();
+    let sieges = u32::try_from(sieges).unwrap_or(u32::MAX);
+    // M6: a raiding personality raids while it cannot field a siege wave.
+    if !all_in
+        && ctx.knobs.wave_mode == WaveMode::RaidUntilSiege
+        && sieges < ctx.knobs.min_siege.max(1)
+    {
+        let raiders: Vec<UnitId> = assembled.iter().copied().filter(|u| !siege(u)).collect();
+        let n = raiders.len().saturating_sub(keep);
+        if u32::try_from(n).unwrap_or(u32::MAX) >= ctx.knobs.raid_min_armed {
+            let max = usize::try_from(ctx.knobs.raid_max_armed).unwrap_or(usize::MAX);
+            let mut units = raiders;
+            units.truncate(n.min(max));
+            if let Some((target, point)) = raid_target(ctx, mem.raids) {
+                let every = ctx.knobs.raid_every_ds;
+                launch_raid(ctx, mem, units, target, point, every);
+            }
+        }
+        return;
+    }
     let (need, min_siege) = if all_in {
         (1, 0)
     } else {
-        (
-            size(ctx, home.len().saturating_sub(keep)),
-            ctx.knobs.min_siege,
-        )
+        // M6: an upward-only noise bonus per launch, within the cap.
+        let bonus = ctx.noise(salt::WAVE_UNITS + u64::from(mem.waves_launched))
+            % (u64::from(ctx.knobs.noise_wave_units) + 1);
+        let bonus = u32::try_from(bonus).expect("at most MAX_WAVE_UNITS");
+        let need = size(ctx, home.len().saturating_sub(keep))
+            .saturating_add(bonus)
+            .min(ctx.knobs.max_wave_units.max(1));
+        (need, ctx.knobs.min_siege)
     };
-    let siege = |u: &UnitId| view.unit(*u).is_some_and(|x| is_siege(rules, x.kind));
-    let sieges = assembled.iter().filter(|u| siege(u)).count();
     let going = assembled.len().saturating_sub(keep);
-    if u32::try_from(going).unwrap_or(u32::MAX) < need
-        || u32::try_from(sieges).unwrap_or(u32::MAX) < min_siege
-    {
+    if u32::try_from(going).unwrap_or(u32::MAX) < need || sieges < min_siege {
         return;
     }
     let wain = ctx
@@ -369,10 +499,18 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         .iter()
         .copied()
         .find(|w| !ctx.is_claimed(*w));
-    if wain.is_none() && !all_in {
+    if wain.is_none() && !all_in && wain_needed(ctx) {
         return;
     }
-    let Some(target) = choose_target(ctx) else {
+    // M6: the first wave waits a little longer, once, by the bot's noise.
+    if !all_in && mem.waves_launched == 0 && mem.next_wave_at == 0 {
+        let extra = first_wave_extra(ctx);
+        if extra > 0 {
+            mem.next_wave_at = tick.saturating_add(extra);
+            return;
+        }
+    }
+    let Some(target) = choose_target(ctx, mem.waves_launched) else {
         return;
     };
     let mut roster = assembled;
@@ -395,6 +533,7 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             queue: false,
         });
     }
+    let launched_units = u16::try_from(roster.len()).unwrap_or(u16::MAX);
     mem.wave = Some(Wave {
         units: roster,
         wain,
@@ -403,16 +542,194 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         phase: WavePhase::Stage,
         launched_at: tick,
         phase_at: tick,
+        kind: WaveKind::Siege,
+        launched_units,
+        last_contact_at: tick,
     });
     mem.waves_launched = mem.waves_launched.saturating_add(1);
-    mem.next_wave_at = tick.saturating_add(ctx.ticks(ctx.knobs.wave_interval_ds));
+    mem.next_wave_at = tick.saturating_add(interval_after(
+        ctx,
+        ctx.knobs.wave_interval_ds,
+        mem.waves_launched,
+    ));
+}
+
+/// The difficulty's deadline raid (M6): once the tick reaches the first
+/// raid's `by_ds` with no wave launched yet, and at least `min_armed`
+/// non-siege armed units are home (anywhere, not only at the rally), up to
+/// `max_armed` of them (by id, the home guard kept) raid at once. It
+/// bypasses the age, tech, not-before, siege and Wain gates and does not
+/// stage. Returns whether it launched.
+fn deadline_raid(ctx: &mut Ctx<'_>, mem: &mut BotMemory) -> bool {
+    let Some(raid) = ctx.first_raid else {
+        return false;
+    };
+    if mem.raid_used || mem.waves_launched > 0 || ctx.tick() < ctx.ticks(raid.by_ds) {
+        return false;
+    }
+    let view = ctx.view;
+    let rules = view.rules();
+    let keep = home_guard(ctx);
+    let mut units: Vec<UnitId> = home_armed(ctx, mem)
+        .into_iter()
+        .filter(|u| view.unit(*u).is_some_and(|x| !is_siege(rules, x.kind)))
+        .collect();
+    let n = units.len().saturating_sub(keep);
+    if u32::try_from(n).unwrap_or(u32::MAX) < raid.min_armed {
+        return false;
+    }
+    units.truncate(n.min(usize::try_from(raid.max_armed).unwrap_or(usize::MAX)));
+    let Some((target, point)) = raid_target(ctx, mem.raids) else {
+        return false;
+    };
+    let every = ctx.knobs.raid_every_ds;
+    launch_raid(ctx, mem, units, target, point, every);
+    mem.raid_used = true;
+    true
+}
+
+/// Launch a raid of `units` (sorted) at `point` (raiding `target`): one
+/// `AttackMove` straight there, no Wain, no stage; the next launch waits
+/// `every_ds` (jittered).
+fn launch_raid(
+    ctx: &mut Ctx<'_>,
+    mem: &mut BotMemory,
+    mut units: Vec<UnitId>,
+    target: BuildingId,
+    point: Tile,
+    every_ds: u32,
+) {
+    let tick = ctx.tick();
+    units.sort();
+    let goal = ctx.view.map().center_of(point);
+    for u in &units {
+        ctx.claim(*u);
+    }
+    ctx.order(units.clone(), |units| Command::AttackMove {
+        units,
+        target: goal,
+    });
+    let launched_units = u16::try_from(units.len()).unwrap_or(u16::MAX);
+    mem.wave = Some(Wave {
+        units,
+        wain: None,
+        target,
+        stage: point,
+        phase: WavePhase::Assault,
+        launched_at: tick,
+        phase_at: tick,
+        kind: WaveKind::Raid,
+        launched_units,
+        last_contact_at: tick,
+    });
+    mem.waves_launched = mem.waves_launched.saturating_add(1);
+    mem.raids = mem.raids.saturating_add(1);
+    mem.next_wave_at = mem.next_wave_at.max(tick.saturating_add(interval_after(
+        ctx,
+        every_ds,
+        mem.waves_launched,
+    )));
+}
+
+/// The raid's target and point (M6): the enemy complete building with
+/// workers on it (`Facts::enemy`'s worked buildings) whose centre lies
+/// more than `stage_margin_tiles` beyond every enemy shooter's range, with
+/// the best score `raid_worker_weight x workers - isqrt(enemy unit
+/// strength near it) - dist_tiles x raid_distance_permille / 1000` (the
+/// distance from the rally), ties to the lowest id, the bot's noise
+/// picking between the top two; its point is the building's centre tile.
+/// When none qualifies (Passive has only its shooting Seat), the
+/// fallback is the passable enemy-owned tile nearest the rally beyond
+/// every shooter's reach plus the margin (ties to the mirror-aware tile
+/// index), raiding the enemy Town nearest it.
+pub fn raid_target(ctx: &mut Ctx<'_>, n: u16) -> Option<(BuildingId, Tile)> {
+    let rally = ctx.rally();
+    let view = ctx.view;
+    let rules = view.rules();
+    let map = view.map();
+    let shooters = shooters(ctx);
+    let margin = ctx.knobs.stage_margin_tiles;
+    let r = ctx.knobs.influence_radius_cells;
+    let weight = i64::from(ctx.knobs.raid_worker_weight);
+    let per_tile = i64::from(ctx.knobs.raid_distance_permille);
+    let worked = ctx.facts.enemy.worked.clone();
+    let mut scored: Vec<(i64, BuildingId, Tile)> = Vec::new();
+    for (b, workers) in worked {
+        let Some(bb) = view.building(b) else {
+            continue;
+        };
+        let centre = kind_centre(rules, bb.kind, bb.tile);
+        if !out_of_reach(&shooters, centre, margin) {
+            continue;
+        }
+        let inf = ctx.influence();
+        let near = inf.strength(&inf.enemy_units, inf.cell_at(centre), r);
+        let near = i64::try_from(isqrt(u64::try_from(near.max(0)).unwrap_or(0))).unwrap_or(0);
+        let score = weight
+            .saturating_mul(i64::from(workers))
+            .saturating_sub(near)
+            .saturating_sub(dist_tiles(centre, rally).saturating_mul(per_tile) / 1000);
+        scored.push((
+            score.saturating_neg(),
+            b,
+            kind_centre_tile(rules, bb.kind, bb.tile),
+        ));
+    }
+    scored.sort();
+    if let Some(best) = scored.first().copied() {
+        let pick = match scored.get(1) {
+            Some(second) if ctx.noise(salt::TARGET + (1 << 20) + u64::from(n)) % 2 == 1 => *second,
+            _ => best,
+        };
+        return Some((pick.1, pick.2));
+    }
+    let territory = view.territory();
+    let me = ctx.me;
+    let rally_tile = map.tile_of(rally);
+    let mut best: Option<(i64, u32, Tile)> = None;
+    for y in 0..map.height() {
+        for x in 0..map.width() {
+            let t = Tile::new(x, y);
+            if territory.owner_at(t).is_none_or(|p| p == me) || !map.passable(t) {
+                continue;
+            }
+            let dx = i64::from(x) - i64::from(rally_tile.x);
+            let dy = i64::from(y) - i64::from(rally_tile.y);
+            let key = (dx * dx + dy * dy, ctx.map.tie_index(t, 1, 1), t);
+            if best.is_some_and(|b| (b.0, b.1) <= (key.0, key.1)) {
+                continue;
+            }
+            if out_of_reach(&shooters, map.center_of(t), margin) {
+                best = Some(key);
+            }
+        }
+    }
+    let point = best?.2;
+    let at = map.center_of(point);
+    let target = ctx
+        .facts
+        .enemy_towns
+        .iter()
+        .filter_map(|t| {
+            let b = view.building(*t)?;
+            Some((kind_centre(rules, b.kind, b.tile).dist_sq_i64(at), *t))
+        })
+        .min()?
+        .1;
+    Some((target, point))
 }
 
 /// End the wave: its units come home ([`recall_wave`]). Waits for a plan
-/// with room for the two commands, so no unit is left behind.
+/// with room for the two commands, so no unit is left behind. A wave that
+/// ends with fewer than `recall_below_units` armed units counts as wiped
+/// (M6).
 fn end(ctx: &mut Ctx<'_>, mem: &mut BotMemory, wave: Wave) {
+    let wiped = u32::try_from(wave.units.len()).unwrap_or(u32::MAX) < ctx.knobs.recall_below_units;
     mem.wave = Some(wave);
     if ctx.commands_left >= 2 {
+        if wiped {
+            mem.wiped = mem.wiped.saturating_add(1);
+        }
         recall_wave(ctx, mem);
     }
 }
@@ -430,6 +747,10 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     wave.units.retain(mine);
     if wave.wain.is_some_and(|w| !mine(&w)) {
         wave.wain = None;
+    }
+    if wave.kind == WaveKind::Raid {
+        run_raid(ctx, mem, wave);
+        return;
     }
     let all_in = all_in(ctx);
     if all_in {
@@ -456,7 +777,7 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             end(ctx, mem, wave);
             return;
         }
-        let Some(next) = choose_target(ctx) else {
+        let Some(next) = choose_target(ctx, mem.waves_launched) else {
             end(ctx, mem, wave);
             return;
         };
@@ -502,6 +823,60 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             }
         }
     }
+    mem.wave = Some(wave);
+}
+
+/// Run the active raid (M6). Its contact timer is refreshed while any
+/// enemy unit stands within `raid_idle_tiles` of one of its units; it
+/// ends (its units come home) with fewer than `recall_below_units` armed
+/// units, after `raid_idle_ds` with no contact, or `raid_max_ds` after the
+/// launch. When its target is gone (destroyed, or no longer the enemy's)
+/// it takes a new one while at least `continue_min_units` remain, and
+/// ends otherwise. Units off station attack-move to the raid point again.
+fn run_raid(ctx: &mut Ctx<'_>, mem: &mut BotMemory, mut wave: Wave) {
+    let view = ctx.view;
+    let me = ctx.me;
+    let tick = ctx.tick();
+    let reach = tiles_sq(ctx.knobs.raid_idle_tiles);
+    let contact = wave
+        .units
+        .iter()
+        .filter_map(|u| view.unit(*u))
+        .any(|u| visible_enemies(&view, me).any(|e| e.pos.dist_sq_i64(u.pos) <= reach));
+    if contact {
+        wave.last_contact_at = tick;
+    }
+    let armed = u32::try_from(wave.units.len()).unwrap_or(u32::MAX);
+    if armed < ctx.knobs.recall_below_units
+        || tick.saturating_sub(wave.last_contact_at) >= ctx.ticks(ctx.knobs.raid_idle_ds)
+        || tick.saturating_sub(wave.launched_at) >= ctx.ticks(ctx.knobs.raid_max_ds)
+    {
+        end(ctx, mem, wave);
+        return;
+    }
+    let gone = view.building(wave.target).is_none_or(|b| b.owner == me);
+    if gone {
+        if armed < ctx.knobs.continue_min_units {
+            end(ctx, mem, wave);
+            return;
+        }
+        let Some((target, point)) = raid_target(ctx, mem.raids) else {
+            end(ctx, mem, wave);
+            return;
+        };
+        wave.target = target;
+        wave.stage = point;
+    }
+    let goal = ctx.view.map().center_of(wave.stage);
+    let tol = station(ctx, wave.units.len());
+    let moves = off_station(ctx, &wave.units, goal, tol);
+    for u in &moves {
+        ctx.claim(*u);
+    }
+    ctx.order(moves, |units| Command::AttackMove {
+        units,
+        target: goal,
+    });
     mem.wave = Some(wave);
 }
 
@@ -839,14 +1214,17 @@ fn hold(ctx: &mut Ctx<'_>, wave: &Wave) {
 mod tests {
     use super::*;
     use crate::standard::defend;
+    use crate::standard::{Ctx, ctx::jitter};
     use crate::testkit::{Arena, P0, P1, place, spawn, standard_vs_passive};
     use rules::Personality;
+    use sim::MatchSetup;
 
     /// P0's rally in these arenas: the rally seed (36,64) is passable own
     /// land.
     const RALLY: (i32, i32) = (36, 64);
 
     fn wave(units: Vec<UnitId>, wain: Option<UnitId>, target: BuildingId, stage: Tile) -> Wave {
+        let launched_units = u16::try_from(units.len()).unwrap();
         Wave {
             units,
             wain,
@@ -855,6 +1233,9 @@ mod tests {
             phase: WavePhase::Stage,
             launched_at: 0,
             phase_at: 0,
+            kind: WaveKind::Siege,
+            launched_units,
+            last_contact_at: 0,
         }
     }
 
@@ -890,12 +1271,14 @@ mod tests {
     #[test]
     fn launch_needs_age_size_siege_wain_and_timer() {
         let r = crate::testkit::rules();
+        // M6: noise off (the M5b timing; noise has its own tests).
+        let quiet_k = quiet(&r, |_| {});
         let a = Arena::frozen(standard_vs_passive(&r), at_rally(&r, true, 7, 1, 1));
         let mut armed = a.units_of(P0, "skirmisher");
         armed.extend(a.units_of(P0, "mangonel"));
         armed.sort();
         let wain = a.units_of(P0, "supply_wain")[0];
-        let mut ctx = a.ctx(P0);
+        let mut ctx = Ctx::new(a.sim.view(), P0, &quiet_k, a.map(P0));
         assert_eq!(size(&ctx, 8), 8, "the table's first row");
         let mut mem = BotMemory::default();
         step(&mut ctx, &mut mem);
@@ -938,13 +1321,13 @@ mod tests {
             ("no Wain", at_rally(&r, true, 7, 1, 0)),
         ] {
             let a = Arena::frozen(standard_vs_passive(&r), setup);
-            let mut ctx = a.ctx(P0);
+            let mut ctx = Ctx::new(a.sim.view(), P0, &quiet_k, a.map(P0));
             let mut mem = BotMemory::default();
             step(&mut ctx, &mut mem);
             assert!(mem.wave.is_none(), "{why}");
             assert!(ctx.into_commands().is_empty(), "{why}");
         }
-        let mut ctx = a.ctx(P0);
+        let mut ctx = Ctx::new(a.sim.view(), P0, &quiet_k, a.map(P0));
         let mut mem = BotMemory {
             next_wave_at: a.sim.tick() + 1,
             ..BotMemory::default()
@@ -961,7 +1344,7 @@ mod tests {
             ]
             .concat(),
         );
-        let mut ctx = far.ctx(P0);
+        let mut ctx = Ctx::new(far.sim.view(), P0, &quiet_k, far.map(P0));
         let mut mem = BotMemory::default();
         step(&mut ctx, &mut mem);
         assert!(mem.wave.is_none(), "not assembled");
@@ -973,12 +1356,14 @@ mod tests {
     #[test]
     fn size_respects_free_pop() {
         let r = crate::testkit::rules();
+        // M6: noise off (the M5b timing; noise has its own tests).
+        let quiet_k = quiet(&r, |_| {});
         let (x, y) = RALLY;
         let a = Arena::frozen(
             standard_vs_passive(&r),
             vec![spawn(&r, P0, "skirmisher", x, y, 5)],
         );
-        let ctx = a.ctx(P0);
+        let ctx = Ctx::new(a.sim.view(), P0, &quiet_k, a.map(P0));
         assert_eq!(ctx.facts.pop, (10, 25));
         assert_eq!((size(&ctx, 5), home_guard(&ctx)), (8, 0));
         // A full pop: 5 + 13 Yeomen, 2 Skirmishers, a Mangonel and a Wain.
@@ -990,7 +1375,7 @@ mod tests {
             ]
             .concat(),
         );
-        let mut ctx = full.ctx(P0);
+        let mut ctx = Ctx::new(full.sim.view(), P0, &quiet_k, full.map(P0));
         assert_eq!(ctx.facts.pop, (25, 25));
         assert_eq!((size(&ctx, 3), size(&ctx, 0)), (3, 1));
         assert_eq!(home_guard(&ctx), 1);
@@ -1329,10 +1714,12 @@ mod tests {
 
     /// Once the target is the bot's, a wave of at least
     /// `continue_min_units` armed units retargets to the enemy Town nearest
-    /// the rally with a fresh stage point; a smaller one comes home.
+    /// the rally with a fresh stage point; a smaller one comes home. (M6:
+    /// without `seat_last` and noise, which have their own tests.)
     #[test]
     fn retargets_after_capture() {
         let r = crate::testkit::rules();
+        let quiet_k = quiet(&r, |k| k.seat_last = false);
         for (n, goes_on) in [(4, true), (3, false)] {
             let a = Arena::frozen(
                 standard_vs_passive(&r),
@@ -1349,7 +1736,7 @@ mod tests {
                 wave: Some(w),
                 ..BotMemory::default()
             };
-            let mut ctx = a.ctx(P0);
+            let mut ctx = Ctx::new(a.sim.view(), P0, &quiet_k, a.map(P0));
             let rally = ctx.rally();
             let next = a.seat(P1);
             let stage = stage_point(&mut ctx, next, n as usize + 1);
@@ -1557,5 +1944,560 @@ mod tests {
         assert_eq!(dist_sq_to_rect(FxVec2::from_ints(11, 11), r), 0);
         assert_eq!(dist_sq_to_rect(FxVec2::from_ints(16, 11), r), tiles_sq(3));
         assert_eq!((spread(1), spread(9), spread(24)), (1, 2, 3));
+    }
+
+    // ---- M6 ----
+
+    /// The `standard` knobs with every noise knob off (the M5b timing).
+    fn quiet(r: &Rules, edit: impl FnOnce(&mut Personality)) -> Personality {
+        knobs(r, |k| {
+            k.noise_wave_interval_permille = 0;
+            k.noise_wave_units = 0;
+            k.noise_first_wave_ds = 0;
+            k.noise_mix_permille = 0;
+            k.noise_site_top_k = 1;
+            edit(k);
+        })
+    }
+
+    /// A raid of `units` at `point` against `target`, launched at
+    /// `launched_at`, last in contact at `contact`.
+    fn raid(
+        units: Vec<UnitId>,
+        target: BuildingId,
+        point: Tile,
+        launched_at: u32,
+        contact: u32,
+    ) -> Wave {
+        let launched_units = u16::try_from(units.len()).unwrap();
+        Wave {
+            units,
+            wain: None,
+            target,
+            stage: point,
+            phase: WavePhase::Assault,
+            launched_at,
+            phase_at: launched_at,
+            kind: WaveKind::Raid,
+            launched_units,
+            last_contact_at: contact,
+        }
+    }
+
+    /// P1's gathering buildings, each worked by the units sent to it.
+    fn worked_p1(cmds: Vec<Command>, jobs: &[(&str, &str, u16)]) -> Arena {
+        let r = crate::testkit::rules();
+        let mut a = Arena::frozen(standard_vs_passive(&r), cmds);
+        let scribes = a.units_of(P1, "scribe");
+        let yeomen = a.units_of(P1, "yeoman");
+        let (mut s, mut y) = (scribes.into_iter(), yeomen.into_iter());
+        let mut orders = Vec::new();
+        for (kind, worker, n) in jobs {
+            let node = *a
+                .buildings_of(P1, kind)
+                .iter()
+                .find(|b| {
+                    !orders
+                        .iter()
+                        .any(|c| matches!(c, Command::Gather { node, .. } if node == *b))
+                })
+                .expect("a node of the kind");
+            let units: Vec<UnitId> = (0..*n)
+                .filter_map(|_| {
+                    if *worker == "scribe" {
+                        s.next()
+                    } else {
+                        y.next()
+                    }
+                })
+                .collect();
+            orders.push(Command::Gather { units, node });
+        }
+        a.issue(P1, orders);
+        a
+    }
+
+    /// M6: the raid goes for the worked enemy building outside every
+    /// shooter's reach (plus the stage margin) with the best score; a
+    /// building inside the reach of the Seat or a Watchtower is never
+    /// picked however many work it, and between the top two the bot's
+    /// noise picks.
+    #[test]
+    fn raid_targets_the_most_worked_building_outside_tower_reach() {
+        let r = crate::testkit::rules();
+        let base = vec![
+            // A: out of every reach, three Scribes.
+            place(&r, P1, "scriptorium", 86, 57),
+            // B: beside the Seat, three Scribes.
+            place(&r, P1, "scriptorium", 96, 61),
+            // C: a Croft under a Watchtower.
+            place(&r, P1, "croft", 90, 74),
+            place(&r, P1, "watchtower", 92, 77),
+            spawn(&r, P1, "scribe", 92, 58, 6),
+        ];
+        let a = worked_p1(
+            base.clone(),
+            &[
+                ("scriptorium", "scribe", 3),
+                ("scriptorium", "scribe", 3),
+                ("croft", "yeoman", 1),
+            ],
+        );
+        let scriptoria = a.buildings_of(P1, "scriptorium");
+        let croft = a.buildings_of(P1, "croft")[0];
+        let mut ctx = a.ctx(P0);
+        let worked: Vec<BuildingId> = ctx.facts.enemy.worked.iter().map(|(b, _)| *b).collect();
+        assert_eq!(worked.len(), 3, "{:?}", ctx.facts.enemy.worked);
+        let (target, point) = raid_target(&mut ctx, 0).expect("a target");
+        assert_eq!(target, scriptoria[0], "the one out of reach");
+        let view = a.sim.view();
+        let b = view.building(target).unwrap();
+        assert_eq!(point, kind_centre_tile(&r, b.kind, b.tile));
+        assert!(target != scriptoria[1] && target != croft);
+
+        // A second Croft out of reach with one Yeoman: the noise picks
+        // between the two, the Scriptorium (three workers) scoring best.
+        let mut more = base;
+        more.push(place(&r, P1, "croft", 86, 64));
+        let a = worked_p1(
+            more,
+            &[
+                ("scriptorium", "scribe", 3),
+                ("scriptorium", "scribe", 3),
+                ("croft", "yeoman", 1),
+                ("croft", "yeoman", 1),
+            ],
+        );
+        let crofts = a.buildings_of(P1, "croft");
+        let scriptorium = a.buildings_of(P1, "scriptorium")[0];
+        let mut ctx = a.ctx(P0);
+        let second = ctx.noise(salt::TARGET + (1 << 20)) % 2 == 1;
+        let (target, _) = raid_target(&mut ctx, 0).unwrap();
+        assert_eq!(target, if second { crofts[1] } else { scriptorium });
+    }
+
+    /// M6: against Passive (only its shooting Seat, nothing worked) the
+    /// raid's point is the passable tile of P1's land nearest the rally
+    /// that lies beyond every shooter's reach plus the margin.
+    #[test]
+    fn raid_falls_back_to_the_nearest_enemy_tile_against_passive() {
+        let r = crate::testkit::rules();
+        let a = Arena::frozen(standard_vs_passive(&r), Vec::new());
+        let mut ctx = a.ctx(P0);
+        assert!(ctx.facts.enemy.worked.is_empty());
+        let (target, point) = raid_target(&mut ctx, 0).expect("a fallback");
+        assert_eq!(target, a.seat(P1));
+        let view = a.sim.view();
+        let map = view.map();
+        let territory = view.territory();
+        assert_eq!(territory.owner_at(point), Some(P1));
+        assert!(map.passable(point));
+        let shooters = shooters(&ctx);
+        let margin = ctx.knobs.stage_margin_tiles;
+        assert!(out_of_reach(&shooters, map.center_of(point), margin));
+        let rally = map.tile_of(ctx.rally());
+        let d = |t: Tile| {
+            let (dx, dy) = (
+                i64::from(t.x) - i64::from(rally.x),
+                i64::from(t.y) - i64::from(rally.y),
+            );
+            dx * dx + dy * dy
+        };
+        for y in 0..map.height() {
+            for x in 0..map.width() {
+                let t = Tile::new(x, y);
+                if d(t) < d(point) && territory.owner_at(t) == Some(P1) && map.passable(t) {
+                    assert!(
+                        !out_of_reach(&shooters, map.center_of(t), margin),
+                        "{t:?} is nearer and out of reach"
+                    );
+                }
+            }
+        }
+        // It is on P1's side of the map, short of the Seat's reach.
+        assert!(point.x > 64 && point.x < 100, "{point:?}");
+    }
+
+    /// M6: a raid comes home after `raid_idle_ds` with no enemy near, or
+    /// `raid_max_ds` after the launch; an enemy near keeps it going; when
+    /// its target is gone it takes a new one while `continue_min_units`
+    /// remain and comes home otherwise.
+    #[test]
+    fn raid_ends_when_idle_gone_or_old() {
+        let r = crate::testkit::rules();
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                spawn(&r, P0, "skirmisher", 70, 40, 6),
+                place(&r, P1, "croft", 90, 74),
+            ],
+        );
+        a.run(2500);
+        let tick = a.sim.tick();
+        let units = a.units_of(P0, "skirmisher");
+        let seat = a.seat(P1);
+        let point = Tile::new(70, 40);
+        let k = quiet(&r, |_| {});
+        let idle = k.raid_idle_ds * 2;
+        let run_one = |a: &Arena, w: Wave| -> (BotMemory, Vec<Command>) {
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            let mut mem = BotMemory {
+                wave: Some(w),
+                ..BotMemory::default()
+            };
+            step(&mut ctx, &mut mem);
+            (mem, ctx.into_commands())
+        };
+        // Idle: launched a moment ago, no contact for long.
+        let (mem, cmds) = run_one(&a, raid(units.clone(), seat, point, tick - 10, tick - idle));
+        assert!(mem.wave.is_none(), "idle");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::AttackMove { units: u, .. } if *u == units)),
+            "{cmds:?}"
+        );
+        // Old: in contact, but launched past raid_max_ds.
+        let (mem, _) = run_one(&a, raid(units.clone(), seat, point, 0, tick));
+        assert!(mem.wave.is_none(), "old");
+        // A recent, fresh raid goes on.
+        let (mem, _) = run_one(&a, raid(units.clone(), seat, point, tick - 10, tick - 10));
+        assert!(mem.wave.is_some(), "fresh");
+        // Contact refreshes the timer.
+        let mut near = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                spawn(&r, P0, "skirmisher", 70, 40, 6),
+                // Out of the Skirmishers' acquire range (6), inside the
+                // raid's contact radius (10).
+                spawn(&r, P1, "yeoman", 78, 40, 1),
+            ],
+        );
+        near.run(2500);
+        let tick = near.sim.tick();
+        let (mem, _) = run_one(
+            &near,
+            raid(
+                near.units_of(P0, "skirmisher"),
+                near.seat(P1),
+                point,
+                tick - 10,
+                tick - idle,
+            ),
+        );
+        assert_eq!(mem.wave.map(|w| w.last_contact_at), Some(tick), "contact");
+        // Target gone: six left retarget, three come home.
+        let croft = a.buildings_of(P1, "croft")[0];
+        a.issue(
+            P0,
+            vec![Command::DebugDamage {
+                target: TargetId::Building(croft),
+                amount: u32::MAX,
+            }],
+        );
+        assert!(a.sim.view().building(croft).is_none(), "destroyed");
+        let tick = a.sim.tick();
+        let (mem, _) = run_one(&a, raid(units.clone(), croft, point, tick - 10, tick - 10));
+        let w = mem.wave.expect("retargeted");
+        assert_ne!(w.target, croft);
+        let (mem, _) = run_one(
+            &a,
+            raid(units[..3].to_vec(), croft, point, tick - 10, tick - 10),
+        );
+        assert!(mem.wave.is_none(), "too few to go on");
+    }
+
+    /// M6: under `IfEnemyHarrying` a siege wave needs no Wain until the
+    /// enemy has a Harrying level; then it does.
+    #[test]
+    fn wain_needed_only_after_enemy_harrying() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |k| k.wain_rule = rules::WainRule::IfEnemyHarrying);
+        let a = Arena::frozen(standard_vs_passive(&r), at_rally(&r, true, 7, 1, 0));
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert!(!wain_needed(&ctx));
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        let w = mem.wave.expect("a siege wave without a Wain");
+        assert_eq!((w.kind, w.wain), (WaveKind::Siege, None));
+        let mut a = Arena::frozen(standard_vs_passive(&r), at_rally(&r, true, 7, 1, 0));
+        a.issue(P0, vec![crate::testkit::research(&r, P1, "harrying_1")]);
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert!(wain_needed(&ctx), "Harrying I");
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        assert!(mem.wave.is_none(), "now it waits for a Wain");
+    }
+
+    /// M6: the `standard` personality keeps the M5b Wain rule: no Wain, no
+    /// wave, whatever the enemy has researched.
+    #[test]
+    fn standard_still_needs_a_wain() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |_| {});
+        assert_eq!(k.wain_rule, rules::WainRule::Always);
+        let a = Arena::frozen(standard_vs_passive(&r), at_rally(&r, true, 7, 1, 0));
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert!(wain_needed(&ctx));
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        assert!(mem.wave.is_none());
+    }
+
+    /// M6: Hard's deadline raid launches once its tick is reached with no
+    /// wave out yet: without Masonry, without siege or a Wain, from units
+    /// away from the rally, at most `max_armed` of them, with one
+    /// `AttackMove` straight onto the enemy's land (no stage); not with
+    /// fewer than `min_armed`, not twice.
+    #[test]
+    fn hard_deadline_raid_launches_by_12000_without_masonry_and_does_not_stage() {
+        let r = crate::testkit::rules();
+        let hard = r.ai.difficulty("hard").unwrap();
+        let first = hard.first_raid.expect("Hard has a deadline raid");
+        assert_eq!(r.ticks_from_ds(first.by_ds), 12_000);
+        let k = quiet(&r, |_| {});
+        let raid_now = rules::FirstRaid { by_ds: 0, ..first };
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![spawn(&r, P0, "skirmisher", 30, 50, 12)],
+        );
+        let units = a.units_of(P0, "skirmisher");
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        ctx.first_raid = Some(raid_now);
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        let w = mem.wave.clone().expect("the deadline raid");
+        let max = usize::try_from(first.max_armed).unwrap();
+        assert_eq!(w.units, units[..max].to_vec());
+        assert_eq!(
+            (w.kind, w.phase, w.wain),
+            (WaveKind::Raid, WavePhase::Assault, None)
+        );
+        assert!(mem.raid_used && mem.raids == 1 && mem.waves_launched == 1);
+        let view = a.sim.view();
+        assert_eq!(
+            view.territory().owner_at(w.stage),
+            Some(P1),
+            "onto P1's land"
+        );
+        assert_eq!(
+            ctx.into_commands(),
+            [Command::AttackMove {
+                units: units[..max].to_vec(),
+                target: view.map().center_of(w.stage)
+            }],
+            "one order, no stage"
+        );
+        // Before the tick, short of min_armed, or once used: nothing.
+        let few = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![spawn(
+                &r,
+                P0,
+                "skirmisher",
+                30,
+                50,
+                u16::try_from(first.min_armed - 1).unwrap(),
+            )],
+        );
+        let mut ctx = Ctx::new(few.sim.view(), P0, &k, few.map(P0));
+        ctx.first_raid = Some(raid_now);
+        let mut m = BotMemory::default();
+        step(&mut ctx, &mut m);
+        assert!(m.wave.is_none(), "short of min_armed");
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        ctx.first_raid = Some(first);
+        let mut m = BotMemory::default();
+        step(&mut ctx, &mut m);
+        assert!(m.wave.is_none(), "before 12000");
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        ctx.first_raid = Some(raid_now);
+        let mut m = BotMemory {
+            raid_used: true,
+            ..BotMemory::default()
+        };
+        step(&mut ctx, &mut m);
+        assert!(m.wave.is_none(), "once only");
+    }
+
+    /// M6: Easy plays its personality with the Masonry gate and every wave
+    /// at the largest size, capped at 14.
+    #[test]
+    fn easy_waits_for_masonry_and_sends_largest_capped_waves() {
+        let r = crate::testkit::rules();
+        let mut setup = MatchSetup::bots(&r, 1, ("easy", "standard"), ("passive", ""));
+        setup.debug_commands = true;
+        let a = Arena::frozen(setup.clone(), at_rally(&r, false, 20, 1, 1));
+        let ctx = a.ctx(P0);
+        let easy = r.ai.difficulty("easy").unwrap();
+        let cap = easy.max_wave_units.unwrap();
+        assert_eq!(ctx.knobs.max_wave_units, cap);
+        assert!(ctx.knobs.wave_sizes.iter().all(|w| w.armed == cap));
+        assert_eq!(size(&ctx, 40), cap, "the largest row, capped, from tick 0");
+        assert_eq!(ctx.knobs.wave_requires_age.as_deref(), Some("masonry"));
+        let mut mem = BotMemory {
+            waves_launched: 1,
+            ..BotMemory::default()
+        };
+        let mut ctx = a.ctx(P0);
+        step(&mut ctx, &mut mem);
+        assert!(mem.wave.is_none(), "no Masonry");
+        let a = Arena::frozen(setup.clone(), at_rally(&r, true, 20, 1, 1));
+        let mut ctx = a.ctx(P0);
+        let mut mem = BotMemory {
+            waves_launched: 1,
+            ..BotMemory::default()
+        };
+        step(&mut ctx, &mut mem);
+        let w = mem.wave.expect("a wave");
+        assert_eq!(w.units.len(), usize::try_from(cap).unwrap(), "capped");
+        let short = u16::try_from(cap - 2).unwrap();
+        let a = Arena::frozen(setup, at_rally(&r, true, short, 1, 1));
+        let mut ctx = a.ctx(P0);
+        let mut mem = BotMemory {
+            waves_launched: 1,
+            ..BotMemory::default()
+        };
+        step(&mut ctx, &mut mem);
+        assert!(mem.wave.is_none(), "{} armed of {cap}", cap - 1);
+    }
+
+    /// M6: with `seat_last` the wave skips the enemy Seat while the enemy
+    /// holds another complete Town that no annexation runs on, even when
+    /// the Seat scores better; without it the best score wins.
+    #[test]
+    fn seat_last_skips_the_seat_while_another_town_stands() {
+        let r = crate::testkit::rules();
+        // A second P1 Town to the south-east: farther from P0's rally
+        // than the Seat.
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![place(&r, P1, "town", 104, 84)],
+        );
+        let seat = a.seat(P1);
+        let other = a
+            .buildings_of(P1, "town")
+            .into_iter()
+            .find(|b| *b != seat)
+            .unwrap();
+        let k = quiet(&r, |_| {});
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert!(target_score(&mut ctx, seat) < target_score(&mut ctx, other));
+        assert_eq!(choose_target(&mut ctx, 0), Some(other));
+        let free = quiet(&r, |k| k.seat_last = false);
+        let mut ctx = Ctx::new(a.sim.view(), P0, &free, a.map(P0));
+        assert_eq!(choose_target(&mut ctx, 0), Some(seat));
+        // Only the Seat left: it is the target.
+        let alone = Arena::frozen(standard_vs_passive(&r), Vec::new());
+        let mut ctx = Ctx::new(alone.sim.view(), P0, &k, alone.map(P0));
+        assert_eq!(choose_target(&mut ctx, 0), Some(alone.seat(P1)));
+    }
+
+    /// M6: the target score adds the enemy's strength at a Town: an
+    /// army parked at the nearer Town sends the wave to the other.
+    #[test]
+    fn influence_scored_target_avoids_a_defended_town() {
+        let r = crate::testkit::rules();
+        let a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                place(&r, P1, "town", 104, 84),
+                spawn(&r, P1, "shieldbearer", 98, 64, 30),
+            ],
+        );
+        let seat = a.seat(P1);
+        let other = a
+            .buildings_of(P1, "town")
+            .into_iter()
+            .find(|b| *b != seat)
+            .unwrap();
+        let k = quiet(&r, |k| {
+            k.seat_last = false;
+            k.target_strength_weight = 1000;
+        });
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert_eq!(choose_target(&mut ctx, 0), Some(other));
+        let blind = quiet(&r, |k| {
+            k.seat_last = false;
+            k.target_strength_weight = 0;
+        });
+        let mut ctx = Ctx::new(a.sim.view(), P0, &blind, a.map(P0));
+        let nearest = [seat, other]
+            .into_iter()
+            .min_by_key(|t| target_score(&mut ctx, *t))
+            .unwrap();
+        assert_eq!(choose_target(&mut ctx, 0), Some(nearest));
+    }
+
+    /// M6: `jitter` stays within `permille` either way, the noise is the
+    /// same at every tick for one seed and salt, and differs by seed.
+    #[test]
+    fn noise_jitter_is_bounded_stable_across_plans_and_differs_by_seed() {
+        for noise in [0u64, 1, 150, 300, 301, 12_345, u64::MAX] {
+            let v = jitter(1000, noise, 150);
+            assert!((850..=1150).contains(&v), "{noise}: {v}");
+        }
+        assert_eq!(jitter(1000, 7, 0), 1000);
+        assert_eq!(jitter(0, 7, 150), 0);
+        let r = crate::testkit::rules();
+        let at = |seed: u64, ticks: u32| {
+            let mut s = MatchSetup::bots(&r, seed, ("standard", "standard"), ("passive", ""));
+            s.debug_commands = true;
+            let mut a = Arena::frozen(s, Vec::new());
+            a.run(ticks);
+            let ctx = a.ctx(P0);
+            (
+                ctx.noise(salt::WAVE_INTERVAL),
+                interval_after(&ctx, 1800, 0),
+                first_wave_extra(&ctx),
+            )
+        };
+        assert_eq!(at(3, 0), at(3, 777), "tick-free");
+        let values: std::collections::BTreeSet<_> = (1..=6).map(|s| at(s, 0)).collect();
+        assert!(values.len() >= 5, "seeds differ: {values:?}");
+        let k = r.ai.personality("standard").unwrap();
+        for (_, interval, extra) in values {
+            let base = r.ticks_from_ds(1800);
+            let span = base * k.noise_wave_interval_permille / 1000;
+            assert!(
+                (base - span..=base + span).contains(&interval),
+                "{interval}"
+            );
+            assert!(extra <= r.ticks_from_ds(k.noise_first_wave_ds));
+        }
+    }
+
+    /// M6: the wave-size noise only ever adds: across seeds no wave
+    /// launches below the table's size, and every one launches with the
+    /// size plus `noise_wave_units` at the rally.
+    #[test]
+    fn wave_size_noise_never_lowers_a_wave() {
+        let r = crate::testkit::rules();
+        let k = r.ai.personality("standard").unwrap();
+        let bonus = u16::try_from(k.noise_wave_units).unwrap();
+        assert!(bonus > 0);
+        let mut launched_at_size = 0;
+        for seed in 1..=6 {
+            // With the Mangonel: 7 armed (below the size of 8), 8 + the
+            // largest bonus (always), and exactly 8 (only with no bonus).
+            for (skirm, must) in [(6u16, false), (7 + bonus, true), (7, false)] {
+                let mut s = MatchSetup::bots(&r, seed, ("standard", "standard"), ("passive", ""));
+                s.debug_commands = true;
+                let a = Arena::frozen(s, at_rally(&r, true, skirm, 1, 1));
+                let mut ctx = a.ctx(P0);
+                let mut mem = BotMemory {
+                    waves_launched: 1,
+                    ..BotMemory::default()
+                };
+                step(&mut ctx, &mut mem);
+                if skirm == 6 {
+                    assert!(mem.wave.is_none(), "seed {seed}: below the size");
+                } else if must {
+                    assert!(mem.wave.is_some(), "seed {seed}: size plus the bonus");
+                } else {
+                    launched_at_size += usize::from(mem.wave.is_some());
+                }
+            }
+        }
+        assert!(launched_at_size < 6, "the bonus holds some waves back");
     }
 }

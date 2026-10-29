@@ -1,12 +1,15 @@
-//! Influence maps (M6, slice 2's pure module): per-plan integer grids of
-//! army strength, computed in `crates/ai` from the view and never stored.
+//! Influence maps (M6): per-plan integer grids of army strength, computed
+//! in `crates/ai` from the view and never stored.
 //!
-//! The M6 plan settles where the maps live (docs/design/ai.md, "Influence
-//! maps"): not as an unhashed sim cache refreshed every 10 ticks (which a
-//! restore between two refreshes could not reproduce) but as bot state of
-//! one plan, rebuilt from the view whenever a plan asks for them. So they
-//! are not hashed, need no restore, and a bot rebuilt mid-match reads the
-//! same grids.
+//! M6 settles where the maps live (docs/design/ai.md, "Influence maps and
+//! counter-weighted composition"; docs/DETERMINISM.md): not as an unhashed
+//! sim cache refreshed every 10 ticks (which a restore between two
+//! refreshes could not reproduce) but as bot state of one plan, built from
+//! the view the first time a plan asks for them (`Ctx::influence`). So
+//! they are not hashed, need no restore, and a bot rebuilt mid-match reads
+//! the same grids. Retreat, the siege target score and the raid target
+//! read them; enemy units come through `facts::visible_enemies`, the seam
+//! M7's fog filters.
 //!
 //! The map is cut into `cell` x `cell`-tile cells (`ceil(map / cell)` per
 //! side, 32 x 32 on `plains_1v1` at 4 tiles). Each [`Grid`] holds, per
@@ -170,7 +173,9 @@ impl Influence {
             enemy_shooters: Grid::new(cells),
         };
         let armed = armed_kinds(rules);
-        for u in view.units() {
+        // Own units, then the enemy's through the fog seam.
+        let own = view.units().filter(|u| u.owner == me);
+        for u in own.chain(super::facts::visible_enemies(view, me)) {
             if !armed.get(usize::from(u.kind.0)).copied().unwrap_or(false) {
                 continue;
             }

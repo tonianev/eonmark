@@ -19,13 +19,20 @@
 //! 5. [`waves`]: launch, stage, assault, ring hold, continue, recall,
 //!    all-in;
 //! 6. [`army::rally_upkeep`]: trainers rallied to the army's rally point.
+//!
+//! M6 slice 2 adds two pure modules that no rule calls yet:
+//! [`influence`] (per-plan strength grids from the view, never stored)
+//! and [`compose`] (the counter-weighted army mix). Slice 2's behaviour
+//! wires them into retreat, targets and `army::produce`.
 
 pub mod army;
 pub mod build_order;
+pub mod compose;
 pub mod ctx;
 pub mod defend;
 pub mod economy;
 pub mod facts;
+pub mod influence;
 pub mod memory;
 pub mod sites;
 pub mod waves;

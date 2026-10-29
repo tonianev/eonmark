@@ -2396,6 +2396,49 @@ mod tests {
         assert_eq!(choose_target(&mut ctx, 0), Some(alone.seat(P1)));
     }
 
+    /// M6: `seat_last` skips the Seat only while another enemy Town is
+    /// uncontested: once the bot's own annexation timer runs on the only
+    /// other Town (0 HP, P0's Skirmishers on its ring, no P1 defender), the
+    /// Seat is a target again and, scoring better, is the one chosen.
+    #[test]
+    fn seat_last_takes_the_seat_when_the_other_town_is_contested() {
+        let r = crate::testkit::rules();
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![place(&r, P1, "town", 104, 84)],
+        );
+        let seat = a.seat(P1);
+        let other = a
+            .buildings_of(P1, "town")
+            .into_iter()
+            .find(|b| *b != seat)
+            .unwrap();
+        let k = quiet(&r, |_| {});
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        assert_eq!(choose_target(&mut ctx, 0), Some(other), "uncontested");
+        a.issue(
+            P0,
+            vec![
+                Command::DebugDamage {
+                    target: TargetId::Building(other),
+                    amount: 5000,
+                },
+                spawn(&r, P0, "skirmisher", 103, 86, 2),
+            ],
+        );
+        a.run(5);
+        let view = a.sim.view();
+        assert_eq!(view.annexation(other).map(|x| x.attacker), Some(P0));
+        assert_eq!(view.building(other).map(|b| b.owner), Some(P1));
+        let mut ctx = Ctx::new(view, P0, &k, a.map(P0));
+        assert!(
+            ctx.facts.enemy_towns.contains(&other),
+            "still an enemy Town"
+        );
+        assert!(target_score(&mut ctx, seat) < target_score(&mut ctx, other));
+        assert_eq!(choose_target(&mut ctx, 0), Some(seat), "contested");
+    }
+
     /// M6: the target score adds the enemy's strength at a Town: an
     /// army parked at the nearer Town sends the wave to the other.
     #[test]

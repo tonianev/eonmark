@@ -158,10 +158,11 @@ fn m6_memory_stays_under_1_kib() {
     }
 }
 
-/// Hidden state in the M6 behaviours: a rush-against-standard match
-/// restored into a fresh `Sim` with fresh bots from the header, once
-/// while a raid is out and once just after a retreat, matches the
-/// uninterrupted run, every sub-hash, every tick, for the next 2000 ticks.
+/// Hidden state in the M6 behaviours: a rush-against-tower match (seed 2,
+/// where the rush seat raids and both seats retreat) restored into a fresh
+/// `Sim` with fresh bots from the header, once while a raid is out and
+/// once just after a retreat, matches the uninterrupted run, every
+/// sub-hash, every tick, for the next 2000 ticks.
 #[test]
 #[ignore = "long: games to about 20000 ticks; CI runs --ignored m6_"]
 fn m6_restore_during_a_raid_idle_and_after_a_retreat_matches_uninterrupted() {
@@ -174,7 +175,7 @@ fn m6_restore_during_a_raid_idle_and_after_a_retreat_matches_uninterrupted() {
         .map(|(what, pick)| {
             Box::new(move || {
                 let r = common::rules();
-                let setup = MatchSetup::bots(&r, 2, ("standard", "rush"), ("standard", "standard"));
+                let setup = MatchSetup::bots(&r, 2, ("standard", "rush"), ("standard", "tower"));
                 let fresh = || {
                     Sim::new(
                         setup.clone(),

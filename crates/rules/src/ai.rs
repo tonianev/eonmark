@@ -1691,7 +1691,7 @@ mod tests {
         assert_eq!(p.recall_wave, RecallWave::WhileStaging);
         assert_eq!(p.wave_requires_age.as_deref(), Some("masonry"));
         let order = rules.ai.build_order("standard").unwrap();
-        assert_eq!(order.steps.len(), 37);
+        assert_eq!(order.steps.len(), 38);
         assert_eq!(
             order.steps[0],
             Step::Workers {
@@ -1990,7 +1990,7 @@ mod tests {
             (
                 "age",
                 &[(BO, "Advance(age: \"masonry\")", "Advance(age: \"bronze\")")],
-                &["steps[18].age", "age id"],
+                &["steps[19].age", "age id"],
             ),
             (
                 "wait",
@@ -2050,12 +2050,12 @@ mod tests {
                     (BO, "Advance(age: \"masonry\"),", "Wait(until_ds: 0),"),
                     (BO, "Advance(age: \"charter\"),", "Wait(until_ds: 0),"),
                 ],
-                &["steps[19].kind", "\"engine_yard\"", "masonry", "optional"],
+                &["steps[21].kind", "\"engine_yard\"", "masonry", "optional"],
             ),
             (
                 "advance-techs",
                 &[(BO, "Research(tech: \"trade_1\"),", "Wait(until_ds: 0),")],
-                &["steps[18].age", "needs 2 techs", "research 1"],
+                &["steps[19].age", "needs 2 techs", "research 1"],
             ),
             (
                 "trainer",
@@ -2089,7 +2089,7 @@ mod tests {
                     "Research(tech: \"letters_1\")",
                     "Research(tech: \"letters_2\")",
                 )],
-                &["steps[27].tech", "needs \"letters_1\" first"],
+                &["steps[29].tech", "needs \"letters_1\" first"],
             ),
             (
                 "per-town",
@@ -2098,12 +2098,12 @@ mod tests {
                     "Build(kind: \"croft\", count: 8, at: NearTown, optional: true)",
                     "Build(kind: \"croft\", count: 8, at: NearTown)",
                 )],
-                &["steps[25].count", "max_per_town"],
+                &["steps[27].count", "max_per_town"],
             ),
             (
                 "ages-go-up",
                 &[(BO, "Advance(age: \"charter\")", "Advance(age: \"masonry\")")],
-                &["steps[30].age", "must go up"],
+                &["steps[32].age", "must go up"],
             ),
             // Personalities.
             (
@@ -2499,12 +2499,19 @@ mod tests {
             // M6: a trainer of an armed kind before the first Advance.
             (
                 "armed-trainer",
-                &[(
-                    BO,
-                    "Build(kind: \"muster_hall\", count: 1, at: NearTown)",
-                    "Build(kind: \"muster_hall\", count: 1, at: NearTown, optional: true)",
-                )],
-                &["standard.ron", "steps[18].age", "trainer of an armed kind"],
+                &[
+                    (
+                        BO,
+                        "Build(kind: \"muster_hall\", count: 1, at: NearTown)",
+                        "Build(kind: \"muster_hall\", count: 1, at: NearTown, optional: true)",
+                    ),
+                    (
+                        BO,
+                        "Build(kind: \"muster_hall\", count: 2, at: NearTown)",
+                        "Build(kind: \"muster_hall\", count: 2, at: NearTown, optional: true)",
+                    ),
+                ],
+                &["standard.ron", "steps[19].age", "trainer of an armed kind"],
             ),
             // M6: difficulty levels.
             (

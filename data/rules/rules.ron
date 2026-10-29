@@ -11,7 +11,11 @@
   // deadline raid, counters, seat_last, defence and noise; crates/ai under
   // SIM_VERSION 18) and the rush, boom and tower personalities: every
   // fixture is re-recorded for its header; only m5_first_match's .hash moves.
-  rules_version: 27,
+  // 28: M6 slice 2 tuning: Standard's build order takes a 2nd Muster Hall
+  // after arms_1 and a 3rd after Masonry (income becomes army), and Easy
+  // gets its disclosed 850 per mille Yeomen handicap; only m5_first_match's
+  // .hash moves.
+  rules_version: 28,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

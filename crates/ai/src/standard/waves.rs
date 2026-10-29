@@ -53,9 +53,12 @@
 //! grows with the group: a group order gives each unit its own tile of a
 //! spiral around the point, and around a Town the spiral starts on its
 //! ring. A unit on an explicit `Attack` whose target still exists is left
-//! alone. The wave issues `AttackMove` into enemy land only at the assault
-//! (and the all-in's joiners then), so the first such tick is some wave's
-//! assault order (a wave that ends before its assault issues none).
+//! alone. A siege wave issues `AttackMove` into enemy land only at the
+//! assault (and the all-in's joiners then); a raid and the difficulty's
+//! deadline raid (M6) issue one `AttackMove` straight to their target at
+//! launch, with no stage. So the first such tick (the harness's
+//! `first_attack_tick`) is some siege wave's assault order or a raid's
+//! launch (a siege wave that ends before its assault issues none).
 
 use super::army::home_armed;
 use super::ctx::{Ctx, goal_or_post, jitter, on_station, salt};

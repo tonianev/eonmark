@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fun_gate.sh: ROADMAP M6 acceptance 1 over a `sim-cli play-bots` CSV
 # (docs/design/ai.md, "The M6 fun gate"), with the owner's readings of
-# 2026-10-28 (owner decision 1):
+# 2026-10-28 (M6 owner decision 1):
 #
 #   a winner        winner is a or b (territory-tiebreak wins count); a
 #                   draw or a panic fails

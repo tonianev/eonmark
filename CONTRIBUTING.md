@@ -118,7 +118,7 @@ $ git status --short
 
 Only `economy_second_town` changes its final hash: it is the only fixture with a worked Croft. A test that hard-codes a number the data controls fails this walkthrough; read the value from `Rules` instead.
 
-Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, and since M5b (`rules_version` 21) it counts the bot data under `data/ai/` (`personalities`, `build_orders`, and from M6 `difficulties`), which is in `rules_hash` too, and since the art pass it ends with the `visuals.ron` counts and the number of glTF files its Scenes name (`visuals=units:8 buildings:8 terrain:<n> models=<n>`; each file must exist under `assets/`, `--no-assets` skips that check), so with the repository at `rules_version` 26 and the bump to 27 of step 2, step 3 now prints a line of the form `OK rules_version=27 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 difficulties=3 maps=plains_1v1 strings=en visuals=units:8 buildings:8 terrain:3 models=36` (before the bump it prints `rules_version=26`; `models` counts the distinct glTF files, 36 since art slice 4). An edit under `data/ai/` takes the same path: bump `rules_version`, `just rerecord`, run the tests.
+Since M4a's rules data (`rules_version` 13) the `OK` line also counts the ages, techs and factions, since M3b it names the checked UI strings, since M5a's rules data (`rules_version` 18) `techs` counts the techs that count toward an age and `side_techs` the Watchtower's Harrying I and II, and since M5b (`rules_version` 21) it counts the bot data under `data/ai/` (`personalities`, `build_orders`, and from M6 `difficulties`), which is in `rules_hash` too, and since the art pass it ends with the `visuals.ron` counts and the number of glTF files its Scenes name (`visuals=units:8 buildings:8 terrain:<n> models=<n>`; each file must exist under `assets/`, `--no-assets` skips that check), so with the repository at `rules_version` 28 and the bump to 29 of step 2, step 3 now prints a line of the form `OK rules_version=29 rules_hash=0x<16 hex> resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=4 build_orders=4 difficulties=3 maps=plains_1v1 strings=en visuals=units:8 buildings:8 terrain:3 models=36` (before the bump it prints `rules_version=28`; `models` counts the distinct glTF files, 36 since art slice 4). An edit under `data/ai/` takes the same path: bump `rules_version`, `just rerecord`, run the tests.
 
 ### A build order or personality (`data/ai/`)
 
@@ -183,7 +183,12 @@ just rerecord
 cargo test -p ai && cargo test -p sim
 # 6. Check the ordering (Standard beats Easy, Hard beats Standard) and the
 #    flip, and read each side's bonus_* and income_* columns: the bonus share
-#    stays at most 200 per mille for Standard and 300 for Hard.
+#    is bonus_x / (bonus_x + income_x) (income_x excludes the bonus), pooled
+#    over the run, at most 200 per mille for Standard over the Standard
+#    mirror (the run the ceiling is defined on) and 300 for Hard against
+#    Standard; report the largest single seat too (M6 owner decision 2 does
+#    not say whether the ceiling is pooled or per match: docs/design/ai.md).
+cargo run -p sim-cli --release -- play-bots --a standard --b standard --seeds 1..20 --jobs 4 > s_s.csv
 cargo run -p sim-cli --release -- play-bots --a easy --b standard --seeds 1..20 --jobs 4 > e_s.csv
 scripts/check_ordering.sh e_s.csv b 15
 cargo run -p sim-cli --release -- play-bots --a standard --b hard --seeds 1..20 --jobs 4 > s_h.csv

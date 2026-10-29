@@ -274,7 +274,7 @@ alone sizes the cheat: a shorter interval is a larger cheat.
 | `wave_interval_permille` | Scales `wave_interval_ds`, rounded to nearest | 250 to 4000 |
 | `all_in_after_ds` | Replaces the personality's all-in time | `None`, or 0 to 72000 |
 | `first_raid` | `Some((by_ds, prep_ds, min_armed, max_armed))`: the deadline raid. If no wave has gone out by `by_ds`, a raid of up to `max_armed` home armed units (at least `min_armed`) goes at once, past every gate; from `by_ds - prep_ds` the bot trains raiders toward `min_armed` even before its military latch | `1 <= min_armed <= max_armed <= 64`, `prep_ds < by_ds`, `by_ds` below `match_cap_ds` |
-| `worker_target_permille` | Scales every `Workers` count of the build order, rounded up, at least 1 (`rules::ai::resolve_order`): the lever of owner decision 2's disclosed Easy handicap (850 is 15% fewer Yeomen); 1000 is none | 500 to 1000 |
+| `worker_target_permille` | Scales every `Workers` count of the build order, rounded up, at least 1 (`rules::ai::resolve_order`): the lever of M6 owner decision 2's disclosed Easy handicap (850 is 15% fewer Yeomen); 1000 is none | 500 to 1000 |
 
 `rules::ai::resolve(personality, difficulty)` applies the wave knobs once, a
 pure function of the two rows (so a bot rebuilt mid-match plays the same

@@ -2,7 +2,7 @@
 // bundle every 30 s from 3:00 (the first one at 3:30), sends waves only after
 // the Masonry Age and only at its largest wave size (at most 14 armed units),
 // 1.5 times as far apart, and goes all-in from minute 40. No early raid.
-// Its disclosed handicap (owner decision 2's fallback, since ROADMAP M6
+// Its disclosed handicap (M6 owner decision 2's fallback, since ROADMAP M6
 // line 2 does not pass under the bonus ceiling): 15% fewer Yeomen.
 // Disclosed on New Game and on the game-over screen; never rubber-banded.
 // Schema: crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,

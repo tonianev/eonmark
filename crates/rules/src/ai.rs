@@ -172,7 +172,7 @@ pub struct Difficulty {
     pub first_raid: Option<FirstRaid>,
     /// Scales every `Workers` count of the bot's build order (rounded up,
     /// at least 1), `MIN_WORKER_TARGET_PERMILLE..=1000`: the disclosed
-    /// economic handicap owner decision 2 allows for Easy alone (850: 15%
+    /// economic handicap M6 owner decision 2 allows for Easy alone (850: 15%
     /// fewer Yeomen); 1000 at the other levels.
     pub worker_target_permille: u32,
 }
@@ -1833,7 +1833,7 @@ mod tests {
         assert_eq!(same, q);
     }
 
-    /// M6: Easy's disclosed handicap (owner decision 2's fallback,
+    /// M6: Easy's disclosed handicap (M6 owner decision 2's fallback,
     /// `worker_target_permille` 850) scales every `Workers` count of the
     /// shipped Standard build order, rounded up (15% fewer Yeomen), and
     /// leaves the splits and every other step alone; at 1000 (Standard and

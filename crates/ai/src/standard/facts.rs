@@ -368,3 +368,36 @@ impl Facts {
         self.buildings.get(&kind).copied().unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The fog seam (M6 plan 2b.6, docs/design/fog.md): no rule of the
+    /// Standard bot iterates every unit except through [`super::visible_enemies`].
+    /// The only other `units()` reads are the seam itself, the own-unit
+    /// passes of `Facts::gather` and of the influence maps, and
+    /// `Ctx::occupied`, a placement-legality read (the sim's `SiteOccupied`
+    /// counts any player's unit) that fog.md lists for M7 to classify. A
+    /// new read of every unit elsewhere would see through M7's fog.
+    #[test]
+    fn enemy_units_are_read_only_through_the_seam() {
+        let needle = concat!(".", "units()");
+        let files: [(&str, &str, usize); 13] = [
+            ("army.rs", include_str!("army.rs"), 0),
+            ("build_order.rs", include_str!("build_order.rs"), 0),
+            ("compose.rs", include_str!("compose.rs"), 0),
+            ("ctx.rs", include_str!("ctx.rs"), 1),
+            ("defend.rs", include_str!("defend.rs"), 0),
+            ("economy.rs", include_str!("economy.rs"), 0),
+            ("facts.rs", include_str!("facts.rs"), 2),
+            ("influence.rs", include_str!("influence.rs"), 1),
+            ("memory.rs", include_str!("memory.rs"), 0),
+            ("mod.rs", include_str!("mod.rs"), 0),
+            ("retreat.rs", include_str!("retreat.rs"), 0),
+            ("sites.rs", include_str!("sites.rs"), 0),
+            ("waves.rs", include_str!("waves.rs"), 0),
+        ];
+        for (name, src, want) in files {
+            assert_eq!(src.matches(needle).count(), want, "{name}: units() reads");
+        }
+    }
+}

@@ -45,7 +45,7 @@
 
 use super::ctx::Ctx;
 use super::economy;
-use super::facts::{Facts, kind_centre, tiles_sq};
+use super::facts::{Facts, kind_centre, tiles_sq, visible_enemies};
 use super::memory::BotMemory;
 use super::sites::{SiteSearch, near_town_candidates, search, site_for};
 use rules::{BuildOrder, Placement, Rules, Step, UnitClass};
@@ -569,13 +569,13 @@ pub fn site_danger_tiles(ctx: &Ctx<'_>) -> u32 {
 }
 
 /// Whether another player's armed unit (non-civilian, with an attack)
-/// stands within [`site_danger_tiles`] of `centre`.
+/// stands within [`site_danger_tiles`] of `centre`. It reads the enemy
+/// through [`visible_enemies`], the fog seam.
 pub fn enemy_military_near(ctx: &Ctx<'_>, centre: FxVec2) -> bool {
     let rules = ctx.view.rules();
     let r2 = tiles_sq(site_danger_tiles(ctx));
-    ctx.view.units().any(|u| {
-        u.owner != ctx.me
-            && u.pos.dist_sq_i64(centre) <= r2
+    visible_enemies(&ctx.view, ctx.me).any(|u| {
+        u.pos.dist_sq_i64(centre) <= r2
             && rules
                 .unit_kind(u.kind.0)
                 .is_some_and(|k| k.class != UnitClass::Civilian && k.attack.is_some())

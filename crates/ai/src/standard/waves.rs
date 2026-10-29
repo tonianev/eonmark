@@ -1129,11 +1129,11 @@ fn hold(ctx: &mut Ctx<'_>, wave: &Wave) {
             return;
         }
     }
-    // Defenders: every enemy non-civilian unit near the Town's centre.
+    // Defenders: every enemy non-civilian unit near the Town's centre, read
+    // through the fog seam.
     let reach = tiles_sq(rules.annexation_defender_radius_tiles.saturating_add(2));
-    let defenders: Vec<UnitId> = view
-        .units()
-        .filter(|x| x.owner != ctx.me && x.pos.dist_sq_i64(centre) <= reach)
+    let defenders: Vec<UnitId> = visible_enemies(&view, ctx.me)
+        .filter(|x| x.pos.dist_sq_i64(centre) <= reach)
         .filter(|x| {
             rules
                 .unit_kind(x.kind.0)

@@ -695,6 +695,8 @@ mod tests {
             kind: crate::standard::memory::WaveKind::Siege,
             launched_units,
             last_contact_at: 0,
+            target_hp: 0,
+            progress_at: 0,
         }
     }
 

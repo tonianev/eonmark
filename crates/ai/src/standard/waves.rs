@@ -64,7 +64,7 @@ use super::army::home_armed;
 use super::ctx::{Ctx, goal_or_post, jitter, on_station, salt};
 use super::defend::{all_in, launch_blocked, recall_wave};
 use super::facts::{kind_centre, kind_centre_tile, tiles_sq, visible_enemies};
-use super::influence::isqrt;
+use super::influence::{dps_x10, isqrt};
 use super::memory::{BotMemory, Wave, WaveKind, WavePhase};
 use rules::{Rules, UnitClass, WainRule, WaveMode};
 use sim::{Building, BuildingId, Command, Fx, FxVec2, Intent, TargetId, Tile, UnitId, UnitKindId};
@@ -189,11 +189,83 @@ pub fn size(ctx: &Ctx<'_>, home: usize) -> u32 {
         .max(1)
 }
 
-/// Home armed units a launch or the all-in leaves at home: one while the
-/// pop is full (nothing could replace it), else none.
+/// Home armed units a launch, a reinforcement or the all-in leaves at home:
+/// one while the pop is full (nothing could replace it), plus (M6 owner
+/// decision 12) the level's `pressure.home_guard_units`.
 pub fn home_guard(ctx: &Ctx<'_>) -> usize {
     let (used, cap) = ctx.facts.pop;
     usize::from(used >= cap)
+        .saturating_add(usize::try_from(ctx.pressure.home_guard_units).unwrap_or(usize::MAX))
+}
+
+/// Whether the siege wave `wave` is committed (M6 owner decision 12): the
+/// level's `pressure.commit_ds` is set and the wave's target Town was seen
+/// losing hit points within that long. A committed wave neither retreats
+/// ([`super::retreat`]) nor ends on `wave_max_ds`.
+pub fn committed(ctx: &Ctx<'_>, wave: &Wave) -> bool {
+    let commit = ctx.pressure.commit_ds;
+    commit > 0
+        && wave.kind == WaveKind::Siege
+        && wave.progress_at > 0
+        && ctx.tick().saturating_sub(wave.progress_at) < ctx.ticks(commit)
+}
+
+/// The home armed units that may join the active wave as one group (M6
+/// owner decision 12, `pressure.reinforce_min_units`): those within
+/// `assemble_radius_tiles` of the rally, by id, less the home guard
+/// ([`home_guard`]), at most `room`; none unless at least
+/// `reinforce_min_units` (and at least one) qualify.
+pub fn rally_group(ctx: &mut Ctx<'_>, mem: &BotMemory, room: usize) -> Vec<UnitId> {
+    let min = usize::try_from(ctx.pressure.reinforce_min_units.max(1)).unwrap_or(usize::MAX);
+    let rally = ctx.rally();
+    let r2 = tiles_sq(ctx.knobs.assemble_radius_tiles);
+    let view = ctx.view;
+    let mut at_rally: Vec<UnitId> = home_armed(ctx, mem)
+        .into_iter()
+        .filter(|u| {
+            view.unit(*u)
+                .is_some_and(|x| x.pos.dist_sq_i64(rally) <= r2)
+        })
+        .collect();
+    let n = at_rally.len().saturating_sub(home_guard(ctx)).min(room);
+    if n < min {
+        return Vec::new();
+    }
+    at_rally.truncate(n);
+    at_rally
+}
+
+/// Send a group from the rally to the active siege wave while it assaults
+/// or holds its target (M6 owner decision 12): [`rally_group`] joins the
+/// roster (and its launch count, the retreat rule's loss base) and
+/// attack-moves to the target Town. Never while the defend latch blocks
+/// launches.
+fn reinforce(ctx: &mut Ctx<'_>, mem: &BotMemory, wave: &mut Wave) {
+    if ctx.pressure.reinforce_min_units == 0 || ctx.commands_left == 0 || launch_blocked(ctx, mem) {
+        return;
+    }
+    let max = usize::try_from(ctx.knobs.max_wave_units).unwrap_or(usize::MAX);
+    let room = max.saturating_sub(wave.units.len());
+    let joiners = rally_group(ctx, mem, room);
+    if joiners.is_empty() {
+        return;
+    }
+    let view = ctx.view;
+    let Some(b) = view.building(wave.target) else {
+        return;
+    };
+    let centre = kind_centre(view.rules(), b.kind, b.tile);
+    for u in &joiners {
+        ctx.claim(*u);
+    }
+    ctx.order(joiners.clone(), |units| Command::AttackMove {
+        units,
+        target: centre,
+    });
+    let n = u16::try_from(joiners.len()).unwrap_or(u16::MAX);
+    wave.launched_units = wave.launched_units.saturating_add(n);
+    wave.units.extend(joiners);
+    wave.units.sort();
 }
 
 /// Whole tiles between two points (the integer square root of the
@@ -448,11 +520,14 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     let rally = ctx.rally();
     let r2 = tiles_sq(ctx.knobs.assemble_radius_tiles);
     let view = ctx.view;
+    // M6 owner decision 12: with `reinforce_min_units` the all-in launches
+    // a group from the rally, not every home unit wherever it stands.
+    let anywhere = all_in && ctx.pressure.reinforce_min_units == 0;
     let assembled: Vec<UnitId> = home
         .iter()
         .copied()
         .filter(|u| {
-            all_in
+            anywhere
                 || view
                     .unit(*u)
                     .is_some_and(|x| x.pos.dist_sq_i64(rally) <= r2)
@@ -481,7 +556,7 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         return;
     }
     let (need, min_siege) = if all_in {
-        (1, 0)
+        (ctx.pressure.reinforce_min_units.max(1), 0)
     } else {
         // M6: an upward-only noise bonus per launch, within the cap.
         let bonus = ctx.noise(salt::WAVE_UNITS + u64::from(mem.waves_launched))
@@ -513,13 +588,23 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
             return;
         }
     }
-    let Some(target) = choose_target(ctx, mem.waves_launched) else {
-        return;
-    };
     let mut roster = assembled;
     roster.sort_by_key(|u| (!siege(u), *u));
     roster.truncate(going.min(usize::try_from(ctx.knobs.max_wave_units).unwrap_or(usize::MAX)));
     roster.sort();
+    // M6 owner decision 12: a level with `launch_ratio_permille` waits
+    // until the wave outweighs the enemy army at home.
+    let ratio = ctx.pressure.launch_ratio_permille;
+    if !all_in
+        && ratio > 0
+        && i128::from(army_strength(ctx, &roster)) * 1000
+            < i128::from(enemy_home_strength(ctx)) * i128::from(ratio)
+    {
+        return;
+    }
+    let Some(target) = choose_target(ctx, mem.waves_launched) else {
+        return;
+    };
     let stage = stage_point(ctx, target, roster.len() + usize::from(wain.is_some()));
     let s = ctx.view.map().center_of(stage);
     for u in roster.iter().chain(wain.iter()) {
@@ -548,6 +633,8 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         kind: WaveKind::Siege,
         launched_units,
         last_contact_at: tick,
+        target_hp: ctx.view.building_hp(target).map_or(0, |(hp, _)| hp),
+        progress_at: 0,
     });
     mem.waves_launched = mem.waves_launched.saturating_add(1);
     mem.next_wave_at = tick.saturating_add(interval_after(
@@ -555,6 +642,51 @@ fn launch(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         ctx.knobs.wave_interval_ds,
         mem.waves_launched,
     ));
+}
+
+/// The Lanchester strength of `units` (M6 owner decision 12): `sum(hp) x
+/// sum(dps_x10)` of the living armed ones, with their owner's resolved
+/// stats ([`super::influence`]'s measure).
+pub fn army_strength(ctx: &mut Ctx<'_>, units: &[UnitId]) -> i64 {
+    let view = ctx.view;
+    let rules = view.rules();
+    let (mut hp, mut dps) = (0i64, 0i64);
+    for id in units {
+        let Some(u) = view.unit(*id) else { continue };
+        let Some(cooldown) = rules
+            .unit_kind(u.kind.0)
+            .and_then(|k| k.attack.as_ref())
+            .map(|a| a.cooldown_ds)
+        else {
+            continue;
+        };
+        let s = ctx.unit_stats(u.owner, u.kind);
+        hp = hp.saturating_add(i64::from(s.max_hp.saturating_sub(u.damage_taken).max(0)));
+        dps = dps.saturating_add(i64::from(
+            s.attack.map_or(0, |a| dps_x10(a.damage, cooldown)),
+        ));
+    }
+    hp.saturating_mul(dps)
+}
+
+/// The Lanchester strength of the visible enemy armed units (no Supply
+/// Wain) standing on their owner's own land: the army a wave would meet
+/// at home (M6 owner decision 12, `pressure.launch_ratio_permille`).
+pub fn enemy_home_strength(ctx: &mut Ctx<'_>) -> i64 {
+    let view = ctx.view;
+    let rules = view.rules();
+    let map = view.map();
+    let territory = view.territory();
+    let home: Vec<UnitId> = visible_enemies(&view, ctx.me)
+        .filter(|u| {
+            rules
+                .unit_kind(u.kind.0)
+                .is_some_and(|k| k.class != UnitClass::Civilian && !k.supplies)
+                && territory.owner_at(map.tile_of(u.pos)) == Some(u.owner)
+        })
+        .map(|u| u.id)
+        .collect();
+    army_strength(ctx, &home)
 }
 
 /// The difficulty's deadline raid (M6): once the tick reaches the first
@@ -624,6 +756,8 @@ fn launch_raid(
         kind: WaveKind::Raid,
         launched_units,
         last_contact_at: tick,
+        target_hp: 0,
+        progress_at: 0,
     });
     mem.waves_launched = mem.waves_launched.saturating_add(1);
     mem.raids = mem.raids.saturating_add(1);
@@ -759,9 +893,15 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     if all_in {
         let max = usize::try_from(ctx.knobs.max_wave_units).unwrap_or(usize::MAX);
         let room = max.saturating_sub(wave.units.len());
-        let home = home_armed(ctx, mem);
-        let free = home.len().saturating_sub(home_guard(ctx));
-        let joiners: Vec<UnitId> = home.into_iter().take(room.min(free)).collect();
+        // M6 owner decision 12: with `reinforce_min_units` the joiners go
+        // as a group from the rally, not one by one as they are trained.
+        let joiners: Vec<UnitId> = if ctx.pressure.reinforce_min_units > 0 {
+            rally_group(ctx, mem, room)
+        } else {
+            let home = home_armed(ctx, mem);
+            let free = home.len().saturating_sub(home_guard(ctx));
+            home.into_iter().take(room.min(free)).collect()
+        };
         wave.units.extend(joiners);
         wave.units.sort();
     }
@@ -789,6 +929,8 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
         wave.phase = WavePhase::Stage;
         wave.launched_at = tick;
         wave.phase_at = tick;
+        wave.target_hp = view.building_hp(next).map_or(0, |(hp, _)| hp);
+        wave.progress_at = 0;
         stage_upkeep(ctx, &wave);
         mem.wave = Some(wave);
         return;
@@ -796,17 +938,29 @@ fn run(ctx: &mut Ctx<'_>, mem: &mut BotMemory) {
     let annexing = view
         .annexation(wave.target)
         .is_some_and(|a| a.attacker == me);
+    // M6 owner decision 12: the commit rule's progress (the target losing
+    // hit points since the last plan).
+    if let Some((hp, _)) = view.building_hp(wave.target) {
+        if hp < wave.target_hp {
+            wave.progress_at = tick;
+        }
+        wave.target_hp = hp;
+    }
     let over = if all_in {
         wave.units.is_empty()
     } else {
         annexers == 0
             || armed < ctx.knobs.recall_below_units
             || (tick.saturating_sub(wave.launched_at) >= ctx.ticks(ctx.knobs.wave_max_ds)
-                && !annexing)
+                && !annexing
+                && !committed(ctx, &wave))
     };
     if over {
         end(ctx, mem, wave);
         return;
+    }
+    if !all_in && matches!(wave.phase, WavePhase::Assault | WavePhase::Hold) {
+        reinforce(ctx, mem, &mut wave);
     }
     match wave.phase {
         WavePhase::Stage => {
@@ -965,15 +1119,42 @@ fn stage_upkeep(ctx: &mut Ctx<'_>, wave: &Wave) {
     keep_wain(ctx, wave, s, tol);
 }
 
+/// Whether an assault ordered at `since` holds at the Wain point W (M6
+/// owner decision 12, `pressure.lure_ds`): within `lure_ds` of `since`,
+/// while a visible enemy armed unit (not a Supply Wain) stands within
+/// `siege_focus_tiles` of the target's centre. The wave waits out of every
+/// enemy shooter's reach, so the defenders that come out to it fight
+/// without the Town's and Watchtowers' fire.
+fn luring(ctx: &Ctx<'_>, since: u32, centre: FxVec2) -> bool {
+    let lure = ctx.pressure.lure_ds;
+    if lure == 0 || ctx.tick().saturating_sub(since) >= ctx.ticks(lure) {
+        return false;
+    }
+    let r2 = tiles_sq(ctx.knobs.siege_focus_tiles);
+    let rules = ctx.view.rules();
+    visible_enemies(&ctx.view, ctx.me).any(|e| {
+        e.pos.dist_sq_i64(centre) <= r2
+            && rules
+                .unit_kind(e.kind.0)
+                .is_some_and(|k| k.class != UnitClass::Civilian && !k.supplies)
+    })
+}
+
 /// The assault's first plan: every armed unit attack-moves to the target
-/// Town (siege as its own group) and the Wain moves to W.
+/// Town (siege as its own group), or (M6, [`luring`]) to the Wain point W,
+/// and the Wain moves to W.
 fn start_assault(ctx: &mut Ctx<'_>, wave: &mut Wave) {
     let view = ctx.view;
     let rules = view.rules();
     let Some(b) = view.building(wave.target) else {
         return;
     };
-    let centre = kind_centre(rules, b.kind, b.tile);
+    let w = wain_point(ctx, wave.target, wave.stage);
+    let centre = if luring(ctx, ctx.tick(), kind_centre(rules, b.kind, b.tile)) {
+        w
+    } else {
+        kind_centre(rules, b.kind, b.tile)
+    };
     let (siege, other): (Vec<UnitId>, Vec<UnitId>) = wave
         .units
         .iter()
@@ -991,7 +1172,6 @@ fn start_assault(ctx: &mut Ctx<'_>, wave: &mut Wave) {
         units,
         target: centre,
     });
-    let w = wain_point(ctx, wave.target, wave.stage);
     if let Some(wain) = wave.wain
         && !ctx.is_claimed(wain)
     {
@@ -1015,12 +1195,16 @@ fn assault_upkeep(ctx: &mut Ctx<'_>, wave: &Wave) {
         return;
     };
     let centre = kind_centre(rules, b.kind, b.tile);
+    let w = wain_point(ctx, wave.target, wave.stage);
+    // M6 owner decision 12: while luring, the wave holds at W.
+    let lure = luring(ctx, wave.phase_at, centre);
     let focus_r2 = tiles_sq(ctx.knobs.siege_focus_tiles);
     let goal = TargetId::Building(wave.target);
     let focus: Vec<UnitId> = wave
         .units
         .iter()
         .copied()
+        .filter(|_| !lure)
         .filter(|u| !ctx.is_claimed(*u))
         .filter(|u| {
             view.unit(*u).is_some_and(|x| {
@@ -1043,17 +1227,59 @@ fn assault_upkeep(ctx: &mut Ctx<'_>, wave: &Wave) {
             target: goal,
         });
     }
-    let tol = town_station(ctx, wave);
-    let moves = off_station(ctx, &wave.units, centre, tol);
+    let (to, tol) = if lure {
+        (w, station(ctx, wave.units.len()))
+    } else {
+        (centre, town_station(ctx, wave))
+    };
+    hold_vanguard(ctx, wave, to);
+    let moves = off_station(ctx, &wave.units, to, tol);
     for u in &moves {
         ctx.claim(*u);
     }
-    ctx.order(moves, |units| Command::AttackMove {
-        units,
-        target: centre,
-    });
-    let w = wain_point(ctx, wave.target, wave.stage);
+    ctx.order(moves, |units| Command::AttackMove { units, target: to });
     keep_wain(ctx, wave, w, ctx.knobs.wain_leash_tiles);
+}
+
+/// Keep the assaulting wave together (M6 owner decision 12,
+/// `pressure.cohesion_tiles`): the unclaimed armed units more than
+/// `cohesion_tiles` nearer `goal` than the wave's rear quarter (the unit
+/// three quarters of the way down the roster sorted by distance) are claimed
+/// and, while they still have an order, stopped (a stopped unit guards
+/// where it stands and fights what comes into reach), until the rest close
+/// up.
+fn hold_vanguard(ctx: &mut Ctx<'_>, wave: &Wave, goal: FxVec2) {
+    let gap = ctx.pressure.cohesion_tiles;
+    if gap == 0 || wave.units.len() < 2 {
+        return;
+    }
+    let view = ctx.view;
+    let mut dist: Vec<(i64, UnitId)> = wave
+        .units
+        .iter()
+        .filter_map(|u| Some((dist_tiles(view.unit(*u)?.pos, goal), *u)))
+        .collect();
+    if dist.len() < 2 {
+        return;
+    }
+    dist.sort();
+    // The rear quarter's front: three quarters of the wave are at least
+    // this near the goal.
+    let rear = dist[(dist.len() * 3 / 4).min(dist.len() - 1)].0;
+    let ahead: Vec<UnitId> = dist
+        .iter()
+        .filter(|(d, u)| d.saturating_add(i64::from(gap)) < rear && !ctx.is_claimed(*u))
+        .map(|(_, u)| *u)
+        .collect();
+    let mut stop = Vec::new();
+    for u in ahead {
+        ctx.claim(u);
+        if view.unit(u).is_some_and(|x| x.order.is_some()) && !attacking(ctx, u) {
+            stop.push(u);
+        }
+    }
+    stop.sort();
+    ctx.order(stop, |units| Command::Stop { units });
 }
 
 /// The ring hold while the target is at 0 HP and still the enemy's: ring
@@ -1239,6 +1465,8 @@ mod tests {
             kind: WaveKind::Siege,
             launched_units,
             last_contact_at: 0,
+            target_hp: 0,
+            progress_at: 0,
         }
     }
 
@@ -1963,6 +2191,7 @@ mod tests {
             k.noise_first_wave_ds = 0;
             k.noise_mix_permille = 0;
             k.noise_site_top_k = 1;
+            k.noise_border_top_k = 0;
             edit(k);
         })
     }
@@ -1988,6 +2217,8 @@ mod tests {
             kind: WaveKind::Raid,
             launched_units,
             last_contact_at: contact,
+            target_hp: 0,
+            progress_at: 0,
         }
     }
 
@@ -2549,5 +2780,339 @@ mod tests {
             }
         }
         assert!(launched_at_size < 6, "the bonus holds some waves back");
+    }
+
+    /// The level pressure `edit` makes of [`rules::Pressure::OFF`] (M6
+    /// owner decision 12).
+    fn pressed(edit: impl FnOnce(&mut rules::Pressure)) -> rules::Pressure {
+        let mut p = rules::Pressure::OFF;
+        edit(&mut p);
+        p
+    }
+
+    /// M6 owner decision 12: while a siege wave assaults, home armed units
+    /// at the rally join it as one group once at least
+    /// `reinforce_min_units` stand there beyond the home guard. The group
+    /// joins the roster and its launch count (the retreat rule's loss base)
+    /// and attack-moves to the target; a smaller group, and any group while
+    /// the defend latch blocks launches, stays home.
+    #[test]
+    fn reinforcements_join_an_assault_in_groups_from_the_rally() {
+        let r = crate::testkit::rules();
+        let (x, y) = RALLY;
+        let k = quiet(&r, |_| {});
+        for (at_rally, guard, latched, joins) in [
+            (6u16, 0u32, false, 6usize),
+            (5, 0, false, 0),
+            (6, 1, false, 0),
+            (8, 2, false, 6),
+            (6, 0, true, 0),
+        ] {
+            let why = format!("{at_rally} at the rally, guard {guard}, latched {latched}");
+            let a = Arena::frozen(
+                standard_vs_passive(&r),
+                vec![
+                    Command::DebugAdvanceAge { owner: P0 },
+                    spawn(&r, P0, "skirmisher", 90, 64, 4),
+                    spawn(&r, P0, "bowman", x, y, at_rally),
+                ],
+            );
+            let out = a.units_of(P0, "skirmisher");
+            let home = a.units_of(P0, "bowman");
+            let target = a.seat(P1);
+            let tick = a.sim.tick();
+            let mut w = wave(out.clone(), None, target, Tile::new(72, 64));
+            w.phase = WavePhase::Assault;
+            w.phase_at = tick;
+            let mut mem = BotMemory {
+                wave: Some(w),
+                defend: latched.then_some(crate::standard::memory::Defend {
+                    town: a.seat(P0),
+                    last_threat: tick,
+                    since: tick,
+                }),
+                ..BotMemory::default()
+            };
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressed(|p| {
+                p.reinforce_min_units = 6;
+                p.home_guard_units = guard;
+            });
+            step(&mut ctx, &mut mem);
+            let w = mem.wave.clone().expect("the wave goes on");
+            let mut want = out.clone();
+            want.extend(home[..joins].iter().copied());
+            want.sort();
+            assert_eq!(w.units, want, "{why}");
+            assert_eq!(usize::from(w.launched_units), out.len() + joins, "{why}");
+            let view = a.sim.view();
+            let b = view.building(target).unwrap();
+            let centre = kind_centre(&r, b.kind, b.tile);
+            let cmds = ctx.into_commands();
+            let sent = cmds.iter().any(|c| {
+                matches!(c, Command::AttackMove { units, target }
+                    if *target == centre && home.iter().any(|h| units.contains(h)))
+            });
+            assert_eq!(sent, joins > 0, "{why}: {cmds:?}");
+        }
+    }
+
+    /// M6 owner decision 12: a siege wave whose target was seen losing hit
+    /// points within `commit_ds` is committed: it neither ends on
+    /// `wave_max_ds` nor retreats. With no recent progress, or with the rule
+    /// off, it times out as before.
+    #[test]
+    fn a_committed_siege_neither_times_out_nor_retreats() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |k| {
+            k.wave_max_ds = 1;
+            k.retreat_commit_ds = 0;
+        });
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "skirmisher", 62, 64, 4),
+                spawn(&r, P1, "skirmisher", 64, 64, 12),
+            ],
+        );
+        a.run(10);
+        let units = a.units_of(P0, "skirmisher");
+        let target = a.seat(P1);
+        let tick = a.sim.tick();
+        let hp = a.sim.view().building_hp(target).unwrap().0;
+        // A 3 ds (6-tick) commit window.
+        let commit = pressed(|p| p.commit_ds = 3);
+        let window = r.ticks_from_ds(3);
+        // (pressure, target hp last seen, last progress) -> stays out.
+        for (pressure, seen, progress_at, stays) in [
+            (commit, hp + 50, 0, true),
+            (commit, hp, tick - window + 1, true),
+            (commit, hp, 0, false),
+            (commit, hp, tick - window, false),
+            (rules::Pressure::OFF, hp + 50, tick, false),
+        ] {
+            let why = format!(
+                "seen {seen} progress {progress_at} commit {}",
+                pressure.commit_ds
+            );
+            let mut w = wave(units.clone(), None, target, Tile::new(72, 64));
+            w.phase = WavePhase::Assault;
+            w.launched_units = 8;
+            w.target_hp = seen;
+            w.progress_at = progress_at;
+            let mut mem = BotMemory {
+                wave: Some(w),
+                ..BotMemory::default()
+            };
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressure;
+            // The retreat rule sees the memory before this plan's progress.
+            if progress_at > 0 && stays {
+                assert!(
+                    crate::standard::retreat::assess(&mut ctx, &mem).is_none(),
+                    "{why}: committed, no retreat"
+                );
+            }
+            step(&mut ctx, &mut mem);
+            assert_eq!(mem.wave.is_some(), stays, "{why}");
+        }
+        // The same losing wave with no progress is one the rule would call
+        // home: outnumbered three to one and down half.
+        let mut w = wave(units.clone(), None, target, Tile::new(72, 64));
+        w.phase = WavePhase::Assault;
+        w.launched_units = 8;
+        let mem = BotMemory {
+            wave: Some(w),
+            ..BotMemory::default()
+        };
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        ctx.pressure = commit;
+        let assessed = crate::standard::retreat::assess(&mut ctx, &mem).expect("assessed");
+        assert!(crate::standard::retreat::losing(&ctx, &assessed));
+    }
+
+    /// M6 owner decision 12: for `lure_ds` after its assault order a siege
+    /// wave holds at its Wain point W, out of every shooter's reach, while
+    /// enemy armed units stand within `siege_focus_tiles` of the target; with
+    /// none there, or once `lure_ds` has passed, it goes for the Town.
+    #[test]
+    fn a_lure_holds_at_the_wain_point_while_defenders_stand_near() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |_| {});
+        for (defenders, since_lure, to_w) in
+            [(3u16, false, true), (0, false, false), (3, true, false)]
+        {
+            let why = format!("{defenders} defenders, lure over {since_lure}");
+            let mut setup = vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "skirmisher", 76, 64, 6),
+            ];
+            if defenders > 0 {
+                setup.push(spawn(&r, P1, "skirmisher", 100, 60, defenders));
+            }
+            let mut a = Arena::frozen(standard_vs_passive(&r), setup);
+            a.run(r.ticks_from_ds(600) + 1);
+            let units = a.units_of(P0, "skirmisher");
+            let target = a.seat(P1);
+            let tick = a.sim.tick();
+            let mut w = wave(units.clone(), None, target, Tile::new(72, 64));
+            w.phase = WavePhase::Assault;
+            w.phase_at = if since_lure { 0 } else { tick };
+            let mut mem = BotMemory {
+                wave: Some(w.clone()),
+                ..BotMemory::default()
+            };
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressed(|p| p.lure_ds = 600);
+            let point = wain_point(&ctx, target, w.stage);
+            step(&mut ctx, &mut mem);
+            let view = a.sim.view();
+            let b = view.building(target).unwrap();
+            let centre = kind_centre(&r, b.kind, b.tile);
+            let want = if to_w { point } else { centre };
+            let cmds = ctx.into_commands();
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::AttackMove { units: u, target: t }
+                    if *t == want && u.contains(&units[0]))),
+                "{why}: {cmds:?}"
+            );
+            assert_ne!(point, centre);
+        }
+    }
+
+    /// M6 owner decision 12: with `cohesion_tiles`, the assaulting units more
+    /// than that many tiles nearer the goal than the wave's rear quarter
+    /// stop (a stopped unit guards and fights where it stands) and get no
+    /// order toward the goal; the rest attack-move on.
+    #[test]
+    fn cohesion_stops_the_units_ahead_of_the_rear_quarter() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |_| {});
+        let mut a = Arena::frozen(
+            standard_vs_passive(&r),
+            vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "skirmisher", 60, 64, 6),
+                spawn(&r, P0, "bowman", 78, 64, 2),
+            ],
+        );
+        let rear = a.units_of(P0, "skirmisher");
+        let ahead = a.units_of(P0, "bowman");
+        // The two ahead are walking somewhere (only a unit with an order
+        // needs a Stop).
+        a.issue(
+            P0,
+            vec![Command::Move {
+                units: ahead.clone(),
+                target: a.sim.view().map().center_of(Tile::new(80, 70)),
+                queue: false,
+            }],
+        );
+        let target = a.seat(P1);
+        let mut units = rear.clone();
+        units.extend(ahead.iter().copied());
+        units.sort();
+        for (cohesion, stops) in [(4u32, true), (0, false), (40, false)] {
+            let mut w = wave(units.clone(), None, target, Tile::new(56, 64));
+            w.phase = WavePhase::Assault;
+            w.phase_at = a.sim.tick();
+            let mut mem = BotMemory {
+                wave: Some(w),
+                ..BotMemory::default()
+            };
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressed(|p| p.cohesion_tiles = cohesion);
+            step(&mut ctx, &mut mem);
+            let cmds = ctx.into_commands();
+            let stopped = cmds
+                .iter()
+                .any(|c| matches!(c, Command::Stop { units } if *units == ahead));
+            assert_eq!(stopped, stops, "cohesion {cohesion}: {cmds:?}");
+            let ahead_sent = cmds.iter().any(|c| {
+                matches!(c, Command::AttackMove { units, .. } if ahead.iter().any(|u| units.contains(u)))
+            });
+            assert_eq!(ahead_sent, !stops, "cohesion {cohesion}: {cmds:?}");
+            assert!(
+                cmds.iter().any(
+                    |c| matches!(c, Command::AttackMove { units, .. } if units.contains(&rear[0]))
+                ),
+                "cohesion {cohesion}: the rear goes on"
+            );
+        }
+    }
+
+    /// M6 owner decision 12: with `launch_ratio_permille` a siege wave
+    /// launches only when the Lanchester strength of the units it would take
+    /// reaches that share of the enemy armed units on their own land; an
+    /// enemy army away from home does not count.
+    #[test]
+    fn a_launch_waits_until_the_wave_outweighs_the_army_at_home() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |_| {});
+        for (enemy, at, ratio, launches) in [
+            (20u16, (100, 58), 1000u32, false),
+            (2, (100, 58), 1000, true),
+            (20, (100, 58), 0, true),
+            (20, (56, 40), 1000, true),
+        ] {
+            let why = format!("{enemy} enemies at {at:?}, ratio {ratio}");
+            let mut setup = at_rally(&r, true, 7, 1, 1);
+            setup.push(spawn(&r, P1, "skirmisher", at.0, at.1, enemy));
+            let a = Arena::frozen(standard_vs_passive(&r), setup);
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressed(|p| p.launch_ratio_permille = ratio);
+            let mut mem = BotMemory::default();
+            step(&mut ctx, &mut mem);
+            assert_eq!(mem.wave.is_some(), launches, "{why}");
+        }
+    }
+
+    /// M6 owner decision 12: `home_guard_units` stay home at a launch (the
+    /// highest ids, siege kept first in the roster), and with
+    /// `reinforce_min_units` the all-in launches and joins in groups from
+    /// the rally instead of one unit at a time from anywhere.
+    #[test]
+    fn the_home_guard_stays_and_the_all_in_goes_in_groups() {
+        let r = crate::testkit::rules();
+        let (x, y) = RALLY;
+        let k = quiet(&r, |_| {});
+        let a = Arena::frozen(standard_vs_passive(&r), at_rally(&r, true, 10, 1, 1));
+        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+        ctx.pressure = pressed(|p| p.home_guard_units = 2);
+        let mut mem = BotMemory::default();
+        step(&mut ctx, &mut mem);
+        let w = mem.wave.expect("a wave launches");
+        let skirm = a.units_of(P0, "skirmisher");
+        assert_eq!(w.units.len(), 9, "11 armed, 2 stay");
+        assert!(!w.units.contains(&skirm[9]) && !w.units.contains(&skirm[8]));
+        assert!(w.units.contains(&a.units_of(P0, "mangonel")[0]));
+
+        let all_in = quiet(&r, |k| k.all_in_after_ds = 0);
+        let group = pressed(|p| p.reinforce_min_units = 3);
+        for (near, far, launches) in [(0u16, 1u16, false), (2, 4, false), (3, 0, true)] {
+            let why = format!("{near} at the rally, {far} away");
+            let mut setup = vec![Command::DebugAdvanceAge { owner: P0 }];
+            if near > 0 {
+                setup.push(spawn(&r, P0, "skirmisher", x, y, near));
+            }
+            if far > 0 {
+                setup.push(spawn(&r, P0, "bowman", x - 14, y, far));
+            }
+            let a = Arena::frozen(standard_vs_passive(&r), setup);
+            let mut ctx = Ctx::new(a.sim.view(), P0, &all_in, a.map(P0));
+            ctx.pressure = group;
+            let mut mem = BotMemory::default();
+            step(&mut ctx, &mut mem);
+            assert_eq!(mem.wave.is_some(), launches, "{why}");
+            if launches {
+                assert_eq!(
+                    mem.wave.unwrap().units,
+                    a.units_of(P0, "skirmisher"),
+                    "{why}"
+                );
+            }
+        }
     }
 }

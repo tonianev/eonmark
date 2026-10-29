@@ -92,6 +92,13 @@ pub struct Wave {
     /// The last tick an enemy unit stood within `raid_idle_tiles` of one
     /// of the wave's units (a raid's idle timer).
     pub last_contact_at: u32,
+    // M6 retune (appended).
+    /// The target Town's hit points at the last plan (a siege wave's
+    /// commit rule, `Pressure::commit_ds`).
+    pub target_hp: i32,
+    /// The last tick the target Town was seen losing hit points (0: not
+    /// yet).
+    pub progress_at: u32,
 }
 
 /// The phases of a wave.
@@ -194,6 +201,8 @@ mod tests {
                 kind: WaveKind::Raid,
                 launched_units: 2,
                 last_contact_at: 13_500,
+                target_hp: 1_400,
+                progress_at: 13_550,
             }),
             next_wave_at: 16_600,
             waves_launched: 1,
@@ -245,6 +254,8 @@ mod tests {
                 kind: WaveKind::Siege,
                 launched_units: 40,
                 last_contact_at: 54_000,
+                target_hp: 2_000,
+                progress_at: 54_000,
             }),
             ..BotMemory::default()
         };

@@ -4,7 +4,7 @@
 use super::facts::Facts;
 use super::influence::{Influence, StatsCache};
 use super::sites::MapAnalysis;
-use rules::{BuildOrder, FirstRaid, Personality};
+use rules::{BuildOrder, FirstRaid, Personality, Pressure};
 use sim::{
     BuildingKindId, Command, FxVec2, PlayerId, RejectReason, SimView, Tile, Unit, UnitId,
     UnitKindId, UnitStats,
@@ -148,6 +148,9 @@ pub struct Ctx<'a> {
     /// The difficulty's deadline raid (M6), set by the bot after
     /// [`Ctx::new`] (`None`: no deadline raid).
     pub first_raid: Option<FirstRaid>,
+    /// How the difficulty presses its sieges (M6 owner decision 12), set
+    /// by the bot after [`Ctx::new`] ([`Pressure::OFF`]: none).
+    pub pressure: Pressure,
     /// Unit stats per `(owner, kind)`, resolved once per plan (M6).
     pub stats: StatsCache,
     /// Whether this plan built the influence maps (bench counter).
@@ -193,6 +196,7 @@ impl<'a> Ctx<'a> {
             commands_left: knobs.max_commands_per_think,
             planned: Vec::new(),
             first_raid: None,
+            pressure: Pressure::OFF,
             stats: StatsCache::new(),
             influence_built: false,
             out: Vec::new(),

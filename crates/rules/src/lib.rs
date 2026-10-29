@@ -49,8 +49,8 @@ use std::path::{Path, PathBuf};
 
 pub use ages::{Age, Ages, Unlocks};
 pub use ai::{
-    AiRules, BuildOrder, Difficulty, FirstRaid, MixEntry, Personality, Placement, RecallWave, Step,
-    WainRule, WaveAgeGate, WaveMode, WaveSize,
+    AiRules, BuildOrder, Difficulty, FirstRaid, MixEntry, Personality, Placement, Pressure,
+    RecallWave, Step, WainRule, WaveAgeGate, WaveMode, WaveSize,
 };
 pub use attack::{Attack, Prefer};
 pub use buildings::{BuildingKind, Buildings, GatherSpec, Slots};

@@ -17,4 +17,14 @@
   all_in_after_ds: None,                            // None keeps the personality's
   first_raid: Some((by_ds: 9000, prep_ds: 1500, min_armed: 6, max_armed: 12)),
   worker_target_permille: 1000,
+  pressure: (
+    reinforce_min_units: 0,
+    commit_ds: 0,
+    retreat_ratio_permille: 1000,
+    retreat_cooldown_permille: 1000,
+    home_guard_units: 0,
+    lure_ds: 0,
+    cohesion_tiles: 0,
+    launch_ratio_permille: 0,
+  ),
 )

@@ -51,7 +51,7 @@ pub use facts::Facts;
 pub use memory::{BotMemory, BotStats, WaveKind, stats};
 pub use sites::MapAnalysis;
 
-use rules::{BuildOrder, Difficulty, FirstRaid, Personality, Rules};
+use rules::{BuildOrder, Difficulty, FirstRaid, Personality, Pressure, Rules};
 use sim::{AiController, AiMemory, Command, MatchSetup, PlayerId, SimView};
 
 /// The Standard bot of one seat. Its only state besides the hashed memory
@@ -66,6 +66,7 @@ pub struct StandardBot {
     knobs: Personality,
     order: BuildOrder,
     first_raid: Option<FirstRaid>,
+    pressure: Pressure,
     map: MapAnalysis,
 }
 
@@ -103,6 +104,7 @@ impl StandardBot {
             knobs,
             order,
             first_raid: difficulty.first_raid,
+            pressure: difficulty.pressure,
         }
     }
 
@@ -132,12 +134,18 @@ impl StandardBot {
         self.first_raid
     }
 
+    /// How the difficulty presses its sieges (M6 owner decision 12).
+    pub fn pressure(&self) -> Pressure {
+        self.pressure
+    }
+
     /// A fresh plan context for `me` over `view` with the bot's knobs, map
-    /// analysis and (M6) resolved build order and first raid.
+    /// analysis and (M6) resolved build order, first raid and pressure.
     pub fn ctx<'a>(&'a self, view: SimView<'a>, me: PlayerId) -> Ctx<'a> {
         let mut ctx = Ctx::new(view, me, &self.knobs, &self.map);
         ctx.order = &self.order;
         ctx.first_raid = self.first_raid;
+        ctx.pressure = self.pressure;
         ctx
     }
 

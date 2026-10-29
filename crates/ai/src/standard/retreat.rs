@@ -27,6 +27,7 @@ use super::ctx::Ctx;
 use super::defend::all_in;
 use super::influence::dps_x10;
 use super::memory::{BotMemory, WaveKind, WavePhase};
+use super::waves::committed;
 use sim::{Command, Fx, FxVec2, UnitId};
 
 /// The verdict of [`assess`] on the active wave.
@@ -52,6 +53,11 @@ pub fn assess(ctx: &mut Ctx<'_>, mem: &BotMemory) -> Option<Assessment> {
     if wave.phase == WavePhase::Assault
         && tick.saturating_sub(wave.phase_at) < ctx.ticks(ctx.knobs.retreat_commit_ds)
     {
+        return None;
+    }
+    // M6 owner decision 12: a siege committed to a target that is losing
+    // hit points stays.
+    if committed(ctx, wave) {
         return None;
     }
     if wave.kind == WaveKind::Siege
@@ -170,6 +176,8 @@ mod tests {
             kind: WaveKind::Siege,
             launched_units: launched,
             last_contact_at: 0,
+            target_hp: 0,
+            progress_at: 0,
         }
     }
 

@@ -20,4 +20,14 @@
   all_in_after_ds: Some(24000),                     // 40:00
   first_raid: None,
   worker_target_permille: 850,                      // every Workers count x 0.85, rounded up
+  pressure: (
+    reinforce_min_units: 0,
+    commit_ds: 0,
+    retreat_ratio_permille: 1000,
+    retreat_cooldown_permille: 1000,
+    home_guard_units: 0,
+    lure_ds: 0,
+    cohesion_tiles: 0,
+    launch_ratio_permille: 0,
+  ),
 )

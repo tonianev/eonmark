@@ -132,13 +132,79 @@ pub struct FirstRaid {
     pub max_armed: u32,
 }
 
+/// How a difficulty presses its sieges (M6 owner decision 12, 2026-10-29):
+/// the behaviour the ROADMAP names for each level (Easy defensive; Standard
+/// and Hard keep a siege going until a Town falls). [`Pressure::OFF`] is
+/// the slice-2 bot: no reinforcement, no commit, the personality's retreat
+/// and no extra home guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pressure {
+    /// While a siege wave assaults or holds its target, home armed units
+    /// assembled at the rally join it once at least this many are there
+    /// (beyond the home guard), and during the all-in the joiners and the
+    /// launch go in such groups from the rally instead of one by one; 0:
+    /// never (`0..=MAX_WAVE_UNITS`).
+    pub reinforce_min_units: u32,
+    /// A siege wave whose target Town lost hit points within this long
+    /// neither retreats nor ends on `wave_max_ds`; 0: off
+    /// (`0..=MAX_AI_DS`).
+    pub commit_ds: u32,
+    /// Scales the personality's `retreat_ratio_permille` (0: the level
+    /// never retreats; 1000 keeps it), `0..=MAX_DIFFICULTY_PERMILLE`.
+    pub retreat_ratio_permille: u32,
+    /// Scales the personality's `retreat_cooldown_ds`,
+    /// `MIN_DIFFICULTY_PERMILLE..=MAX_DIFFICULTY_PERMILLE`.
+    pub retreat_cooldown_permille: u32,
+    /// Armed units every launch, reinforcement and all-in joiner leaves at
+    /// home (`0..=MAX_WAVE_UNITS`), besides the one a full pop keeps.
+    pub home_guard_units: u32,
+    /// For up to this long after its assault order a siege wave holds at
+    /// its Wain point (out of every enemy shooter's reach) while enemy
+    /// armed units stand within `siege_focus_tiles` of its target, so the
+    /// defenders come out to it and the fight is not under the Town's and
+    /// Watchtowers' fire; 0: off (`0..=MAX_AI_DS`).
+    pub lure_ds: u32,
+    /// While a siege wave assaults, its armed units more than this many
+    /// tiles nearer the goal than its rear quarter stop and wait, so
+    /// the wave arrives together instead of fast units first; 0: off
+    /// (`0..=MAX_AI_TILES`).
+    pub cohesion_tiles: u32,
+    /// A siege wave (not the all-in, not a raid) launches only when the
+    /// Lanchester strength (`sum(hp) x sum(dps)`) of the units it would
+    /// take times 1000 reaches this times the strength of the enemy armed
+    /// units standing on the enemy's own land; 0: off
+    /// (`0..=MAX_AI_RATIO_PERMILLE`).
+    pub launch_ratio_permille: u32,
+}
+
+impl Pressure {
+    /// No pressure behaviour: the bot as slice 2 built it.
+    pub const OFF: Pressure = Pressure {
+        reinforce_min_units: 0,
+        commit_ds: 0,
+        retreat_ratio_permille: 1000,
+        retreat_cooldown_permille: 1000,
+        home_guard_units: 0,
+        lure_ds: 0,
+        cohesion_tiles: 0,
+        launch_ratio_permille: 0,
+    };
+}
+
+impl Default for Pressure {
+    fn default() -> Pressure {
+        Pressure::OFF
+    }
+}
+
 /// One difficulty level, `data/ai/difficulty/<id>.ron` (M6). Difficulty is
 /// a disclosed cheat plus wave timing: the sim pays a bot seat whose
 /// `AiSeat.bot` names the level the same `income` bundle every
-/// `income_interval_ds`, from `income_from_ds` on (step 6d'), and
-/// [`resolve`] scales the personality's wave knobs. Retreat, counters,
-/// influence and noise are personality knobs, equal at every level (the bot
-/// does not play better on Hard).
+/// `income_interval_ds`, from `income_from_ds` on (step 6d'), [`resolve`]
+/// scales the personality's wave and retreat knobs, and (M6 owner decision
+/// 12) its [`Pressure`] sets how hard the level presses a siege. Counters,
+/// influence and noise are personality knobs, equal at every level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Difficulty {
@@ -175,6 +241,8 @@ pub struct Difficulty {
     /// economic handicap M6 owner decision 2 allows for Easy alone (850: 15%
     /// fewer Yeomen); 1000 at the other levels.
     pub worker_target_permille: u32,
+    /// How the level presses its sieges (M6 owner decision 12).
+    pub pressure: Pressure,
 }
 
 impl Difficulty {
@@ -213,7 +281,13 @@ impl Difficulty {
 ///   `d.all_in_after_ds` when set, and `min_siege`, `raid_max_armed` and
 ///   `raid_min_armed` at most the cap.
 ///
-/// Nothing else changes: retreat, counters, influence and noise are the
+/// - (M6 owner decision 12) `retreat_ratio_permille` and
+///   `retreat_cooldown_ds` are scaled by the level's
+///   `pressure.retreat_ratio_permille` and `retreat_cooldown_permille`,
+///   rounded to nearest (half up), at most `MAX_AI_RATIO_PERMILLE` and
+///   `MAX_AI_DS`.
+///
+/// Nothing else changes: counters, influence and noise are the
 /// personality's at every level.
 pub fn resolve(p: &Personality, d: &Difficulty) -> Personality {
     let mut out = p.clone();
@@ -250,6 +324,20 @@ pub fn resolve(p: &Personality, d: &Difficulty) -> Personality {
     out.min_siege = out.min_siege.min(cap);
     out.raid_max_armed = out.raid_max_armed.min(cap);
     out.raid_min_armed = out.raid_min_armed.min(out.raid_max_armed);
+    let scale = |v: u32, permille: u32, max: u32| -> u32 {
+        let scaled = (u64::from(v) * u64::from(permille) + 500) / 1000;
+        u32::try_from(scaled).unwrap_or(max).min(max)
+    };
+    out.retreat_ratio_permille = scale(
+        p.retreat_ratio_permille,
+        d.pressure.retreat_ratio_permille,
+        MAX_AI_RATIO_PERMILLE,
+    );
+    out.retreat_cooldown_ds = scale(
+        p.retreat_cooldown_ds,
+        d.pressure.retreat_cooldown_permille,
+        MAX_AI_DS,
+    );
     out
 }
 
@@ -637,9 +725,15 @@ pub struct Personality {
     pub noise_first_wave_ds: u32,
     /// Each army-mix weight is jittered by up to this share, per mille.
     pub noise_mix_permille: u32,
-    /// `Expansion` and `BorderEdge` sites are picked among the first this
-    /// many candidates that pass the cheap tests (1: always the best).
+    /// `Expansion` sites (and, unless `noise_border_top_k` is set,
+    /// `BorderEdge` ones) are picked among the first this many candidates
+    /// that pass the cheap tests (1: always the best).
     pub noise_site_top_k: u32,
+    /// M6 owner decision 12: `BorderEdge` sites (the border Watchtowers) are
+    /// picked among the first this many candidates that pass the cheap
+    /// tests, each seat by its own noise, so the two seats of a mirrored map
+    /// rarely end with mirror-image borders; 0 uses `noise_site_top_k`.
+    pub noise_border_top_k: u32,
 }
 
 impl Personality {
@@ -822,6 +916,51 @@ fn check_difficulty(path: &Path, d: &Difficulty, rules: &Rules) -> Check {
         d.worker_target_permille,
         MIN_WORKER_TARGET_PERMILLE,
         1000,
+    )?;
+    let pr = &d.pressure;
+    in_range(
+        path,
+        "pressure.reinforce_min_units",
+        pr.reinforce_min_units,
+        0,
+        MAX_WAVE_UNITS,
+    )?;
+    in_range(path, "pressure.commit_ds", pr.commit_ds, 0, MAX_AI_DS)?;
+    in_range(
+        path,
+        "pressure.retreat_ratio_permille",
+        pr.retreat_ratio_permille,
+        0,
+        MAX_DIFFICULTY_PERMILLE,
+    )?;
+    in_range(
+        path,
+        "pressure.retreat_cooldown_permille",
+        pr.retreat_cooldown_permille,
+        MIN_DIFFICULTY_PERMILLE,
+        MAX_DIFFICULTY_PERMILLE,
+    )?;
+    in_range(
+        path,
+        "pressure.home_guard_units",
+        pr.home_guard_units,
+        0,
+        MAX_WAVE_UNITS,
+    )?;
+    in_range(path, "pressure.lure_ds", pr.lure_ds, 0, MAX_AI_DS)?;
+    in_range(
+        path,
+        "pressure.cohesion_tiles",
+        pr.cohesion_tiles,
+        0,
+        MAX_AI_TILES,
+    )?;
+    in_range(
+        path,
+        "pressure.launch_ratio_permille",
+        pr.launch_ratio_permille,
+        0,
+        MAX_AI_RATIO_PERMILLE,
     )?;
     if let Some(ds) = d.all_in_after_ds {
         in_range(path, "all_in_after_ds", ds, 0, MAX_AI_DS)?;
@@ -1601,6 +1740,13 @@ fn check_m6_knobs(
         1,
         MAX_SITE_TOP_K,
     )?;
+    in_range(
+        path,
+        &f("noise_border_top_k"),
+        p.noise_border_top_k,
+        0,
+        MAX_SITE_TOP_K,
+    )?;
     Ok(())
 }
 
@@ -1880,6 +2026,41 @@ mod tests {
         let mut floor = level("easy").clone();
         floor.worker_target_permille = MIN_WORKER_TARGET_PERMILLE;
         assert_eq!(counts(&resolve_order(&one, &floor)), [1]);
+    }
+
+    /// M6 owner decision 12: a level's pressure scales the personality's
+    /// retreat ratio and cooldown (rounded to nearest, half up; 0 never
+    /// retreats) and touches no other knob.
+    #[test]
+    fn pressure_scales_the_retreat_knobs_only() {
+        let rules = Rules::load(data_dir()).unwrap();
+        let p = rules.ai.personality("standard").unwrap();
+        let mut d = rules.ai.difficulty("standard").unwrap().clone();
+        d.wave_age_gate = WaveAgeGate::Personality;
+        d.largest_wave_only = false;
+        d.max_wave_units = None;
+        d.wave_size_permille = 1000;
+        d.wave_interval_permille = 1000;
+        d.all_in_after_ds = None;
+        d.pressure = Pressure::OFF;
+        assert_eq!(&resolve(p, &d), p, "no pressure: the personality itself");
+        d.pressure.retreat_ratio_permille = 500;
+        d.pressure.retreat_cooldown_permille = 333;
+        let r = resolve(p, &d);
+        assert_eq!(
+            r.retreat_ratio_permille,
+            (p.retreat_ratio_permille * 500 + 500) / 1000
+        );
+        assert_eq!(
+            r.retreat_cooldown_ds,
+            (p.retreat_cooldown_ds * 333 + 500) / 1000
+        );
+        let mut same = r.clone();
+        same.retreat_ratio_permille = p.retreat_ratio_permille;
+        same.retreat_cooldown_ds = p.retreat_cooldown_ds;
+        assert_eq!(&same, p, "nothing else moves");
+        d.pressure.retreat_ratio_permille = 0;
+        assert_eq!(resolve(p, &d).retreat_ratio_permille, 0, "never retreats");
     }
 
     /// M6: `passive` is reserved for the bot that never acts, a `standard`
@@ -2527,6 +2708,11 @@ mod tests {
                 &["personalities[0].noise_site_top_k", "1..=8"],
             ),
             (
+                "p-border-k",
+                &[(PE, "noise_border_top_k: ", "noise_border_top_k: 9, //")],
+                &["personalities[0].noise_border_top_k", "0..=8"],
+            ),
+            (
                 "p-mode",
                 &[(PE, "wave_mode: Siege,", "wave_mode: Sometimes,")],
                 &["personalities.ron", "Sometimes"],
@@ -2544,6 +2730,64 @@ mod tests {
                     "worker_target_permille: 1",
                 )],
                 &["easy.ron", "worker_target_permille", "500..=1000"],
+            ),
+            // M6 owner decision 12: the pressure block's ranges (the
+            // trailing `//` comments out the shipped value).
+            (
+                "d-reinforce",
+                &[(EASY, "reinforce_min_units: ", "reinforce_min_units: 65, //")],
+                &["easy.ron", "pressure.reinforce_min_units", "0..=64"],
+            ),
+            (
+                "d-commit",
+                &[(EASY, "commit_ds: ", "commit_ds: 72001, //")],
+                &["easy.ron", "pressure.commit_ds", "0..=72000"],
+            ),
+            (
+                "d-retreat",
+                &[(
+                    HARD,
+                    "retreat_ratio_permille: ",
+                    "retreat_ratio_permille: 4001, //",
+                )],
+                &["hard.ron", "pressure.retreat_ratio_permille", "0..=4000"],
+            ),
+            (
+                "d-cooldown",
+                &[(
+                    HARD,
+                    "retreat_cooldown_permille: ",
+                    "retreat_cooldown_permille: 249, //",
+                )],
+                &[
+                    "hard.ron",
+                    "pressure.retreat_cooldown_permille",
+                    "250..=4000",
+                ],
+            ),
+            (
+                "d-guard",
+                &[(EASY, "home_guard_units: ", "home_guard_units: 65, //")],
+                &["easy.ron", "pressure.home_guard_units", "0..=64"],
+            ),
+            (
+                "d-lure",
+                &[(HARD, "lure_ds: ", "lure_ds: 72001, //")],
+                &["hard.ron", "pressure.lure_ds", "0..=72000"],
+            ),
+            (
+                "d-cohesion",
+                &[(HARD, "cohesion_tiles: ", "cohesion_tiles: 65, //")],
+                &["hard.ron", "pressure.cohesion_tiles", "0..=64"],
+            ),
+            (
+                "d-launch",
+                &[(
+                    HARD,
+                    "launch_ratio_permille: ",
+                    "launch_ratio_permille: 10001, //",
+                )],
+                &["hard.ron", "pressure.launch_ratio_permille", "0..=10000"],
             ),
             // M6: a trainer of an armed kind before the first Advance.
             (

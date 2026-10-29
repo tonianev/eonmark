@@ -572,10 +572,43 @@ mod tests {
             assert_eq!(a.knobs(), &rules::ai::resolve(p, level));
             assert_eq!(a.first_raid(), level.first_raid);
             assert_eq!(a.difficulty(), id);
+            // The build order it plays is the level's resolved order (Easy's
+            // disclosed Yeomen handicap, M6 owner decision 2's fallback).
+            let order = r.ai.build_order(&p.build_order).unwrap();
+            assert_eq!(a.order(), &rules::ai::resolve_order(order, level));
         }
+        let first_workers = |o: &rules::BuildOrder| {
+            o.steps.iter().find_map(|s| match s {
+                rules::Step::Workers { count, .. } => Some(*count),
+                _ => None,
+            })
+        };
+        let easy = r.ai.difficulty("easy").unwrap();
+        let easy_bot = standard::StandardBot::new(&r, &setup, PlayerId(1), p, easy);
+        assert_eq!(first_workers(easy_bot.order()), Some(6));
         let standard = r.ai.difficulty("standard").unwrap();
         let bot = standard::StandardBot::new(&r, &setup, PlayerId(0), p, standard);
         assert_eq!(bot.knobs(), p);
+        let shipped = r.ai.build_order(&p.build_order).unwrap();
+        assert_eq!(bot.order(), shipped);
+        assert_eq!(first_workers(bot.order()), Some(7));
+        // `describe` reads the same resolved window for the Easy seat (at
+        // tick 0, before the first plan, the window starts at step 0).
+        let sim = Sim::new(
+            setup.clone(),
+            r.clone(),
+            controller_for(&setup, &r).unwrap(),
+        );
+        let line = describe(&sim.view(), PlayerId(1));
+        assert!(
+            line.starts_with("easy standard window=[0 workers 6, "),
+            "{line}"
+        );
+        let line = describe(&sim.view(), PlayerId(0));
+        assert!(
+            line.starts_with("hard standard window=[0 workers 7, "),
+            "{line}"
+        );
     }
 
     /// M6: `random` resolves per seed and seat from the pool of

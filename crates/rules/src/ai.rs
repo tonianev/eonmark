@@ -1833,6 +1833,55 @@ mod tests {
         assert_eq!(same, q);
     }
 
+    /// M6: Easy's disclosed handicap (owner decision 2's fallback,
+    /// `worker_target_permille` 850) scales every `Workers` count of the
+    /// shipped Standard build order, rounded up (15% fewer Yeomen), and
+    /// leaves the splits and every other step alone; at 1000 (Standard and
+    /// Hard) the order is unchanged, and a count never drops below 1.
+    #[test]
+    fn resolve_order_scales_worker_counts_by_the_easy_handicap() {
+        let rules = Rules::load(data_dir()).unwrap();
+        let order = rules.ai.build_order("standard").unwrap();
+        let level = |id: &str| rules.ai.difficulty(id).unwrap();
+        let counts = |o: &BuildOrder| {
+            o.steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Workers { count, .. } => Some(*count),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts(order), [7, 9, 11, 14, 17, 20, 23]);
+        assert_eq!(level("easy").worker_target_permille, 850);
+        let easy = resolve_order(order, level("easy"));
+        assert_eq!(counts(&easy), [6, 8, 10, 12, 15, 17, 20]);
+        assert_eq!(easy.id, order.id);
+        assert_eq!(easy.steps.len(), order.steps.len());
+        for (got, was) in easy.steps.iter().zip(&order.steps) {
+            match (got, was) {
+                (Step::Workers { split: a, .. }, Step::Workers { split: b, .. }) => {
+                    assert_eq!(a, b, "the split weights stay");
+                }
+                _ => assert_eq!(got, was, "a non-Workers step stays"),
+            }
+        }
+        for id in ["standard", "hard"] {
+            assert_eq!(level(id).worker_target_permille, 1000, "{id}");
+            assert_eq!(&resolve_order(order, level(id)), order, "{id}");
+        }
+        let one = BuildOrder {
+            id: "one".into(),
+            steps: vec![Step::Workers {
+                count: 1,
+                split: BTreeMap::from([("grain".to_string(), 1)]),
+            }],
+        };
+        let mut floor = level("easy").clone();
+        floor.worker_target_permille = MIN_WORKER_TARGET_PERMILLE;
+        assert_eq!(counts(&resolve_order(&one, &floor)), [1]);
+    }
+
     /// M6: `passive` is reserved for the bot that never acts, a `standard`
     /// level must exist, and non-`.ron` files under `ai/difficulty/` are
     /// ignored.

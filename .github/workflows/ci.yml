@@ -339,8 +339,11 @@ jobs:
     # parallel with headless so that job keeps its time. Measured on the
     # 4-vCPU VM: about 8-19 minutes once sim-cli is cached; if the job
     # passes 25 minutes, the flip moves to release-check.yml. Every check
-    # step runs even when an earlier one failed (`!cancelled()`), so one
-    # run reports every line; the job still fails if any step does.
+    # step runs even when an earlier one failed (`!cancelled()`), and
+    # inside a step every command runs too (`|| rc=1`, then `exit "$rc"`:
+    # the default shell is `bash -eo pipefail`, which would otherwise stop
+    # at the first failing command and hide the rest), so one run reports
+    # every line; the job still fails if any step does.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
@@ -361,26 +364,37 @@ jobs:
         # The literal command; scripts/fun_gate.sh checks every clause by
         # the M6 owner decision 1 readings (a winner is a or b; decisive is
         # seat_captured before tick 48000; past 24000 is tick > 24000).
+        # The line requires exit 0, so play-bots' exit fails the step, but
+        # only after the summary and fun_gate.sh's clauses are printed.
         run: |
           start=$(date +%s)
-          target/release/sim-cli play-bots --seeds 1..20 --a standard --b standard --personality-a rush,boom,tower --personality-b rush,boom,tower --max-ticks 72000 --jobs 5 > l1.csv 2> l1.err
+          rc=0
+          target/release/sim-cli play-bots --seeds 1..20 --a standard --b standard --personality-a rush,boom,tower --personality-b rush,boom,tower --max-ticks 72000 --jobs 5 > l1.csv 2> l1.err || { echo "play-bots exit=$?"; rc=1; }
           tail -n 1 l1.err
-          scripts/fun_gate.sh l1.csv l1.err
+          scripts/fun_gate.sh l1.csv l1.err || rc=1
           echo "elapsed_s=$(( $(date +%s) - start ))"
+          exit "$rc"
 
       - name: M6 acceptance 2 (Standard beats Easy, Hard beats Standard)
         if: ${{ !cancelled() }}
-        # The literal commands at --jobs 4 (the CSV is the same at any
-        # --jobs); only `winner == b` counts.
+        # The literal commands at --jobs 4 and with --allow-undecided: the
+        # CSV is the same at any --jobs and with or without the flag, which
+        # only stops a draw from making play-bots exit 1 (the line counts
+        # wins, not draws; a panic or a usage error still exits non-zero
+        # and fails the step). Only `winner == b` counts; check_ordering.sh
+        # also prints the cap games that ended untouched. Both pairings run
+        # and report whatever the first one gave.
         run: |
           start=$(date +%s)
-          target/release/sim-cli play-bots --a easy --b standard --seeds 1..20 --jobs 4 > e_s.csv 2> e_s.err
+          rc=0
+          target/release/sim-cli play-bots --a easy --b standard --seeds 1..20 --jobs 4 --allow-undecided > e_s.csv 2> e_s.err || { echo "play-bots exit=$?"; rc=1; }
           tail -n 1 e_s.err
-          scripts/check_ordering.sh e_s.csv b 15
-          target/release/sim-cli play-bots --a standard --b hard --seeds 1..20 --jobs 4 > s_h.csv 2> s_h.err
+          scripts/check_ordering.sh e_s.csv b 15 || rc=1
+          target/release/sim-cli play-bots --a standard --b hard --seeds 1..20 --jobs 4 --allow-undecided > s_h.csv 2> s_h.err || { echo "play-bots exit=$?"; rc=1; }
           tail -n 1 s_h.err
-          scripts/check_ordering.sh s_h.csv b 15
+          scripts/check_ordering.sh s_h.csv b 15 || rc=1
           echo "elapsed_s=$(( $(date +%s) - start ))"
+          exit "$rc"
 
       - name: M6 acceptance 4, first clause (Hard attacks the borders before minute 12)
         if: ${{ !cancelled() }}
@@ -388,19 +402,23 @@ jobs:
         # every Random style, and from seat a; check_attack_before.sh also
         # requires an armed unit on the enemy's land before tick 14400.
         run: |
-          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --max-ticks 14400 --allow-undecided > h.csv
-          scripts/check_attack_before.sh --side b --before 14400 h.csv
-          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --personality-b rush,boom,tower --max-ticks 14400 --allow-undecided > hp.csv
-          scripts/check_attack_before.sh --side b --before 14400 hp.csv
-          target/release/sim-cli play-bots --seeds 1..3 --a hard --b passive --max-ticks 14400 --allow-undecided > ha.csv
-          scripts/check_attack_before.sh --side a --before 14400 ha.csv
+          rc=0
+          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --max-ticks 14400 --allow-undecided > h.csv || rc=1
+          scripts/check_attack_before.sh --side b --before 14400 h.csv || rc=1
+          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --personality-b rush,boom,tower --max-ticks 14400 --allow-undecided > hp.csv || rc=1
+          scripts/check_attack_before.sh --side b --before 14400 hp.csv || rc=1
+          target/release/sim-cli play-bots --seeds 1..3 --a hard --b passive --max-ticks 14400 --allow-undecided > ha.csv || rc=1
+          scripts/check_attack_before.sh --side a --before 14400 ha.csv || rc=1
+          exit "$rc"
 
       - name: M6 acceptance 4, second clause (hard.ron income_interval_ds 200 -> 300 flips Hard vs Easy)
         if: ${{ !cancelled() }}
         run: |
           start=$(date +%s)
-          scripts/check_difficulty_flip.sh
+          rc=0
+          scripts/check_difficulty_flip.sh || rc=1
           echo "elapsed_s=$(( $(date +%s) - start ))"
+          exit "$rc"
 
       - name: ignored M6 bot tests (long games)
         if: ${{ !cancelled() }}

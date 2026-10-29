@@ -688,11 +688,20 @@ fn m5b_defend_answers_a_raid_at_minute_5() {
 /// (from tick 6412 to 7971 in this game, the Muster Hall idle all along).
 /// While the bot defends, that saving no longer holds the stock back from
 /// production, so P0 queues an armed unit within 200 ticks of the raid.
+/// M6: the game runs on a copy of the rules whose `standard` level pays no
+/// bonus (`income_interval_ds` 0), so it keeps the M5b timeline above; the
+/// Standard level's disclosed bonus from tick 4100 would fill the stock
+/// and keep the Muster Hall busy before the raid.
 #[test]
 #[ignore = "long: a 6900-tick game; CI runs --ignored m5b_"]
 fn m5b_defend_outranks_saving_for_an_age() {
-    let r = common::rules();
+    let mut r = common::rules();
+    r.ai.difficulties
+        .get_mut("standard")
+        .expect("the standard level")
+        .income_interval_ds = 0;
     let setup = common::standard_vs_passive(&r);
+    assert!(sim::bonus_table(&setup, &r).is_empty(), "no bonus is paid");
     let raid_at = 6700;
     let raid = common::spawn(&r, P1, "skirmisher", 24, 51, 3);
     let (mut m, log) = logged(&setup, &r, Some((raid_at, P1, raid)));

@@ -1704,6 +1704,10 @@ mod tests {
             let rally = ctx.rally();
             step(&mut ctx, &mut mem);
             assert_eq!(mem.wave.is_none(), ends, "{why}");
+            // M6: only a wave that ends with fewer than `recall_below_units`
+            // armed units counts as wiped; one that ends by the annexer
+            // rule or by age with 3 does not, nor one that goes on.
+            assert_eq!(mem.wiped, u16::from(why == "two armed"), "{why}: wiped");
             let home = ctx.into_commands().contains(&Command::AttackMove {
                 units,
                 target: rally,

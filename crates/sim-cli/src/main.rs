@@ -1401,9 +1401,14 @@ const BOTS_MIN_PLANS: usize = 200;
 const BOTS_MIN_WAVES: u32 = 2;
 /// ... or neither seat defended (a defence released or running) ...
 const BOTS_MIN_DEFENDS: u32 = 1;
-/// ... or (M6) fewer plans than this built the influence maps (retreat
-/// checks, siege and raid targets: the new path must run).
-const BOTS_MIN_INFLUENCE_PLANS: usize = 200;
+/// ... or (M6), when a siege wave went out, fewer plans than this built
+/// the influence maps (a siege target's score and a wave's retreat checks
+/// read them, so the new path must run). The maps are built only on plans
+/// that read them: 32 of the 240 plans of the default bench at
+/// `rules_version` 28. A bench whose waves are all raids (Hard rush) may
+/// build none in its minute, its raids walking to the nearest enemy tile
+/// out of tower reach, so the gate needs a siege wave.
+const BOTS_MIN_INFLUENCE_PLANS: usize = 20;
 
 /// What `bench --bots` measured.
 struct BotsBench {
@@ -1585,9 +1590,11 @@ fn bots_bench_report(
 /// bots cause is not mixed in: `step_ms` against `control_step_ms` shows
 /// that). Exits 1 when the bots were not exercised (fewer than
 /// [`BOTS_MIN_PLANS`] plans, [`BOTS_MIN_WAVES`] waves,
-/// [`BOTS_MIN_DEFENDS`] defences or, M6, [`BOTS_MIN_INFLUENCE_PLANS`]
-/// plans that built the influence maps), never on the timing budget, like the
-/// other benches.
+/// [`BOTS_MIN_DEFENDS`] defences or, M6, once a siege wave went out,
+/// [`BOTS_MIN_INFLUENCE_PLANS`] plans that built the influence maps), never
+/// on the timing budget, like the other benches. Since M6 it zeroes the
+/// personalities' `noise_first_wave_ds`, so the first waves go out within
+/// the bench's minute as in M5b.
 fn bench_bots(
     data: &Path,
     units: u16,
@@ -1609,17 +1616,26 @@ fn bench_bots(
         eprintln!("bench bots: {e}");
         return ExitCode::from(EXIT_ERROR);
     }
+    // M6: the first wave waits up to `noise_first_wave_ds` more once it is
+    // ready, which pushes the waves of this one-minute bench past its end;
+    // the bench zeroes that one knob so its waves go out on M5b's timeline
+    // and every other behaviour runs as shipped.
+    let mut rules = rules;
+    for p in &mut rules.ai.personalities {
+        p.noise_first_wave_ds = 0;
+    }
     let b = run_bots_bench(&rules, units, ticks, seed, bot, personality);
     for line in bots_bench_report(&b, units, ticks, seed, bot, personality) {
         println!("{line}");
     }
+    let siege_waves = b.waves_launched.saturating_sub(b.raids);
     if b.plans < BOTS_MIN_PLANS
         || b.waves_launched < BOTS_MIN_WAVES
         || b.defends + b.engaged < BOTS_MIN_DEFENDS
-        || b.influence_plans < BOTS_MIN_INFLUENCE_PLANS
+        || (siege_waves > 0 && b.influence_plans < BOTS_MIN_INFLUENCE_PLANS)
     {
         eprintln!(
-            "bench bots: plans={} waves_launched={} defends+engaged={} influence_plans={}: the bots were not exercised (need {BOTS_MIN_PLANS} plans, {BOTS_MIN_WAVES} waves, {BOTS_MIN_DEFENDS} defence, {BOTS_MIN_INFLUENCE_PLANS} influence plans)",
+            "bench bots: plans={} waves_launched={} defends+engaged={} influence_plans={}: the bots were not exercised (need {BOTS_MIN_PLANS} plans, {BOTS_MIN_WAVES} waves, {BOTS_MIN_DEFENDS} defence, {BOTS_MIN_INFLUENCE_PLANS} influence plans once a siege wave went out)",
             b.plans,
             b.waves_launched,
             b.defends + b.engaged,

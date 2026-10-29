@@ -340,7 +340,10 @@ mod tests {
         let mut off = base.clone();
         off.retreat_ratio_permille = 0;
         check(&staging, Some(&off), "ratio 0");
-        // The target Town at 25%: committed.
+        // The target Town at 25%: committed. The wave is staging, not
+        // assaulting, so the commit window (Assault only, and the arena is
+        // only a few ticks old) cannot be what holds it: the Town-HP clause
+        // must turn the rule off on its own.
         let mut weak = fight(12);
         weak.issue(
             P0,
@@ -354,14 +357,16 @@ mod tests {
             wave: Some(wave(
                 weak.units_of(P0, "skirmisher"),
                 8,
-                WavePhase::Assault,
+                WavePhase::Stage,
                 target,
             )),
             ..BotMemory::default()
         };
+        assert!(assess(&mut ctx, &mem).is_none(), "weak target: rule off");
         step(&mut ctx, &mut mem);
         assert!(mem.wave.is_some() && mem.retreats == 0, "weak target");
-        // The same wave against a sound Town retreats (the control).
+        // The same staging wave against the sound Town retreats (the
+        // paired control).
         let mut ctx = a.ctx(P0);
         let mut mem = staging.clone();
         step(&mut ctx, &mut mem);

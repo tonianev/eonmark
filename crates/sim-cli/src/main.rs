@@ -1401,16 +1401,20 @@ const BOTS_MIN_PLANS: usize = 200;
 const BOTS_MIN_WAVES: u32 = 2;
 /// ... or neither seat defended (a defence released or running) ...
 const BOTS_MIN_DEFENDS: u32 = 1;
-/// ... or (M6), when a siege wave went out, fewer plans than this built
-/// the influence maps (a siege target's score and a wave's retreat checks
-/// read them, so the new path must run). The maps are built only on plans
-/// that read them: 32 of the 240 plans of the default bench at
-/// `rules_version` 28. A bench whose waves are all raids (Hard rush) may
-/// build none in its minute, its raids walking to the nearest enemy tile
-/// out of tower reach, so the gate needs a siege wave.
+/// ... or (M6), once any wave went out, fewer plans than this built the
+/// influence maps (a siege target's score reads them at once, and every
+/// wave's retreat checks read them once it is past `retreat_commit_ds` of
+/// its assault order or raid launch, so the new path must run). The maps
+/// are built only on plans that read them: 32 of the 240 plans of the
+/// default bench at `rules_version` 28. The plan asked for 200, which no
+/// bench can reach. Hard rush's two raids leave in the last 20 s of a
+/// 1200-tick bench, still inside their commit window, so that bench builds
+/// none and fails this gate: run it at `--ticks 1800`, where the raids'
+/// retreat checks build the maps (49 plans).
 const BOTS_MIN_INFLUENCE_PLANS: usize = 20;
 
 /// What `bench --bots` measured.
+#[derive(Default)]
 struct BotsBench {
     /// Milliseconds inside the bots' `think` per tick (both seats).
     ai_ms: Vec<f64>,
@@ -1590,7 +1594,7 @@ fn bots_bench_report(
 /// bots cause is not mixed in: `step_ms` against `control_step_ms` shows
 /// that). Exits 1 when the bots were not exercised (fewer than
 /// [`BOTS_MIN_PLANS`] plans, [`BOTS_MIN_WAVES`] waves,
-/// [`BOTS_MIN_DEFENDS`] defences or, M6, once a siege wave went out,
+/// [`BOTS_MIN_DEFENDS`] defences or, M6, once any wave went out,
 /// [`BOTS_MIN_INFLUENCE_PLANS`] plans that built the influence maps), never
 /// on the timing budget, like the other benches. Since M6 it zeroes the
 /// personalities' `noise_first_wave_ds`, so the first waves go out within
@@ -1628,22 +1632,29 @@ fn bench_bots(
     for line in bots_bench_report(&b, units, ticks, seed, bot, personality) {
         println!("{line}");
     }
-    let siege_waves = b.waves_launched.saturating_sub(b.raids);
+    if let Err(e) = bots_exercised(&b) {
+        eprintln!("bench bots: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+/// The `bench --bots` exit gate: whether the bots were exercised.
+fn bots_exercised(b: &BotsBench) -> Result<(), String> {
     if b.plans < BOTS_MIN_PLANS
         || b.waves_launched < BOTS_MIN_WAVES
         || b.defends + b.engaged < BOTS_MIN_DEFENDS
-        || (siege_waves > 0 && b.influence_plans < BOTS_MIN_INFLUENCE_PLANS)
+        || (b.waves_launched > 0 && b.influence_plans < BOTS_MIN_INFLUENCE_PLANS)
     {
-        eprintln!(
-            "bench bots: plans={} waves_launched={} defends+engaged={} influence_plans={}: the bots were not exercised (need {BOTS_MIN_PLANS} plans, {BOTS_MIN_WAVES} waves, {BOTS_MIN_DEFENDS} defence, {BOTS_MIN_INFLUENCE_PLANS} influence plans once a siege wave went out)",
+        return Err(format!(
+            "plans={} waves_launched={} defends+engaged={} influence_plans={}: the bots were not exercised (need {BOTS_MIN_PLANS} plans, {BOTS_MIN_WAVES} waves, {BOTS_MIN_DEFENDS} defence, {BOTS_MIN_INFLUENCE_PLANS} influence plans once a wave went out)",
             b.plans,
             b.waves_launched,
             b.defends + b.engaged,
             b.influence_plans
-        );
-        return ExitCode::FAILURE;
+        ));
     }
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 /// What one fuzz case observed.
@@ -1743,6 +1754,33 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("eonmark-sim-cli-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
+    }
+
+    /// The `bench --bots` gate (M6): once any wave went out, raid or
+    /// siege, the influence maps must have been built on at least
+    /// [`BOTS_MIN_INFLUENCE_PLANS`] plans (a raid's retreat checks read
+    /// them past its commit window, a siege target's score at once), so a
+    /// raids-only bench that never ran the influence path fails.
+    #[test]
+    fn bots_gate_needs_the_influence_path_once_any_wave_went_out() {
+        let bench = |waves: u32, raids: u32, influence_plans: usize| BotsBench {
+            plans: BOTS_MIN_PLANS,
+            waves_launched: waves,
+            raids,
+            defends: 1,
+            influence_plans,
+            ..BotsBench::default()
+        };
+        let enough = BOTS_MIN_INFLUENCE_PLANS;
+        assert_eq!(bots_exercised(&bench(2, 0, enough)), Ok(()), "sieges");
+        assert_eq!(bots_exercised(&bench(2, 2, enough)), Ok(()), "raids");
+        let err = bots_exercised(&bench(2, 2, 0)).unwrap_err();
+        assert!(err.contains("influence_plans=0"), "raids, no maps: {err}");
+        assert!(
+            bots_exercised(&bench(2, 0, enough - 1)).is_err(),
+            "sieges, too few"
+        );
+        assert!(bots_exercised(&bench(0, 0, enough)).is_err(), "no waves");
     }
 
     #[test]

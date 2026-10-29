@@ -528,7 +528,7 @@ mod tests {
                 ("rush", "boom")
             ]
         );
-        assert_eq!(args("--seeds 1 --mirrors").mirrors, true);
+        assert!(args("--seeds 1 --mirrors").mirrors);
         let rules = Rules::load(data()).unwrap();
         let s = setups(
             &args("--seeds 1..2 --personality-a standard,standard --personality-b standard,standard --mirrors"),

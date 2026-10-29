@@ -128,6 +128,26 @@ jobs:
           cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/m5_first_match.eonreplay | grep '^OK' | tee hash-macos-m5.txt
           test -s hash-macos-m5.txt
 
+      - name: M6 acceptance 3 (two play-bots --seeds 7..7 runs print identical final hashes)
+        # ROADMAP M6 line 3, the literal command twice on macOS (the headless
+        # job runs the same on Linux): the CSVs hold no wall time, so they
+        # must be byte-identical; the final hash goes to hash-macos-seed7.txt
+        # and hash-parity diffs it against Linux's. A second pair, Hard
+        # against Easy, puts the difficulty paths (the disclosed bonus of
+        # step 6d' and the resolved knobs) under the same checks; it is not
+        # part of the literal line, so --allow-undecided keeps a draw from
+        # failing it.
+        run: |
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 > s7a.csv
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 > s7b.csv
+          diff s7a.csv s7b.csv
+          awk -F, 'NR==2{print "seed=7 standard/standard final_hash=" $5}' s7a.csv | tee hash-macos-seed7.txt
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 --a hard --b easy --allow-undecided > s7c.csv
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 --a hard --b easy --allow-undecided > s7d.csv
+          diff s7c.csv s7d.csv
+          awk -F, 'NR==2{print "seed=7 hard/easy final_hash=" $5}' s7c.csv | tee -a hash-macos-seed7.txt
+          test "$(grep -c 'final_hash=0x[0-9a-f]\{16\}$' hash-macos-seed7.txt)" = 2
+
       - uses: actions/upload-artifact@v7
         with:
           name: hash-macos
@@ -138,6 +158,7 @@ jobs:
             hash-macos-capture-seat.txt
             hash-macos-stalemate.txt
             hash-macos-m5.txt
+            hash-macos-seed7.txt
           if-no-files-found: error
 
   headless:
@@ -232,6 +253,20 @@ jobs:
           cargo run -p sim-cli --locked --release -- play-bots --seeds 1..5 --a passive --b standard --max-ticks 36000 | tee m5b-wave-b.csv
           scripts/check_first_wave.sh --side b --decisive m5b-wave-b.csv
 
+      - name: M6 acceptance 3 (two play-bots --seeds 7..7 runs print identical final hashes)
+        # ROADMAP M6 line 3 on Linux, the same commands as the macOS check
+        # job; hash-parity diffs the two hash-<os>-seed7.txt files.
+        run: |
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 > s7a.csv
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 > s7b.csv
+          diff s7a.csv s7b.csv
+          awk -F, 'NR==2{print "seed=7 standard/standard final_hash=" $5}' s7a.csv | tee hash-linux-seed7.txt
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 --a hard --b easy --allow-undecided > s7c.csv
+          cargo run -p sim-cli --locked --release -- play-bots --seeds 7..7 --a hard --b easy --allow-undecided > s7d.csv
+          diff s7c.csv s7d.csv
+          awk -F, 'NR==2{print "seed=7 hard/easy final_hash=" $5}' s7c.csv | tee -a hash-linux-seed7.txt
+          test "$(grep -c 'final_hash=0x[0-9a-f]\{16\}$' hash-linux-seed7.txt)" = 2
+
       - name: ignored M5b bot tests (long games)
         # The m5b_ filter leaves out golden_m5_first_match, which the
         # release verify above covers. `ai` is opt-level 3 in dev.
@@ -291,6 +326,7 @@ jobs:
             hash-linux-capture-seat.txt
             hash-linux-stalemate.txt
             hash-linux-m5.txt
+            hash-linux-seed7.txt
           if-no-files-found: error
 
   game-linux:
@@ -452,3 +488,14 @@ jobs:
           test -s hashes/macos/hash-macos-m5.txt
           test -s hashes/linux/hash-linux-m5.txt
           diff hashes/macos/hash-macos-m5.txt hashes/linux/hash-linux-m5.txt
+
+      - name: compare M6 acceptance 3 (seed 7, Standard against Standard and Hard against Easy)
+        # ROADMAP M6 line 3: both jobs ran `play-bots --seeds 7..7` twice
+        # with identical CSVs; their final-hash lines must also agree across
+        # the two operating systems.
+        run: |
+          echo "macOS:"; cat hashes/macos/hash-macos-seed7.txt
+          echo "Linux:"; cat hashes/linux/hash-linux-seed7.txt
+          test -s hashes/macos/hash-macos-seed7.txt
+          test -s hashes/linux/hash-linux-seed7.txt
+          diff hashes/macos/hash-macos-seed7.txt hashes/linux/hash-linux-seed7.txt

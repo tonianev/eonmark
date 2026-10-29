@@ -1,7 +1,7 @@
 # data/ai/
 
 This directory holds the scripted opponent's data: the personalities and
-their build orders (M5b), and later the difficulty table (M6). The schema
+their build orders (M5b), and the difficulty levels (M6). The schema
 lives in `crates/rules/src/ai.rs`; `rules::Rules::load` reads this directory
 last, after the maps, validates it against everything before it and attaches
 it as `Rules::ai`, so it is part of `rules_hash`. An edit here without a
@@ -10,24 +10,30 @@ recording`; the data-only path is the one in
 [`../rules/README.md`](../rules/README.md) ("Worked example"): edit, bump
 `rules_version`, `just rerecord`, run the tests; for a build order or a
 personality, [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) ("A build order
-or personality") adds the `play-bots` comparison. `sim-cli data-check` prints
-the counts as `personalities=1 build_orders=1`.
+or personality") adds the `play-bots` comparison, and ("A difficulty") the
+difficulty checks. `sim-cli data-check` prints the counts as
+`personalities=1 build_orders=1 difficulties=3`.
 
 | Path | Contents | Arrives |
 |------|----------|---------|
 | `personalities.ron` | One row per personality: its build order and every knob of the bot's rules | M5b (`standard`); M6 adds rush, boom and tower |
 | `build_orders/<id>.ron` | One build order per file; the `id` must equal the file stem. Non-`.ron` files here are ignored | M5b (`standard.ron`) |
-| `difficulty.ron` | Easy, Standard, Hard: the bot income interval (documented as a cheat) and aggression | M6 |
+| `difficulty/<id>.ron` | One difficulty level per file (`easy`, `standard`, `hard`); the `id` must equal the file stem, `standard` must exist and `passive` is reserved. The disclosed bonus bundle the sim pays a bot seat (the income cheat) and the wave knobs the level scales. Non-`.ron` files here are ignored | M6 |
 
 The bots themselves are in `crates/ai`: `ai::Passive` (never acts), the
 data-driven `ai::standard::StandardBot`, and `ai::Scripted` (a fixed command
 list for `sim-cli selftest`). A match header names each AI slot's bot and
 personality (`MatchSetup.ai_seats`, for example `standard` with personality
-`standard`), and `ai::controller_for` builds the bots from it.
+`standard`), and `ai::controller_for` builds the bots from it. Since M6 the
+`bot` is `passive` or a difficulty id: every difficulty is the Standard bot
+playing its personality's knobs as the level resolves them
+(`rules::ai::resolve`), while the sim pays the level's bonus.
 
 Rule for every bot: it is a deterministic function of `sim::SimView` and its
-own hashed memory (`Player::ai_memory`). No clocks, no floats, no randomness
-of its own; `crates/ai/clippy.toml` enforces this.
+own hashed memory (`Player::ai_memory`). No clocks, no floats, no generator
+of its own; `crates/ai/clippy.toml` enforces this. Its only noise (M6) is
+`SimView::ai_noise(player, salt)`, a pure hash of the hashed seed, the
+player and a salt that never draws from the sim's `Pcg32`.
 
 ## Units
 
@@ -170,6 +176,7 @@ Engine Yard fill the army with Mangonels.
 | `defend_radius_tiles`, `defend_regoal_tiles`, `defend_release_ds`, `defend_max_block_ds` | Enemy military on own land this close to an own Town is a threat; a guard is re-ordered beyond this distance from the nearest threat; defence ends after this long with no threat; it blocks launches, and calls a staging wave home, for at most this long | 1 to 64; 1 to 64; 1 to 72000; 1 to 72000 |
 | `defend_guard_pop_ratio` | Past `defend_max_block_ds`, while a launch is due, the home guard is the home armed units nearest the threat (siege last) until their pop reaches this many times the threat's pop, at least one unit; the rest go back to the rally, and those at the rally are left to the wave | 1 to 64 |
 | `recall_wave`, `recall_wave_town_hp_permille` | `WhileStaging` (a staging wave while the defence still blocks launches, or an assaulting one when any threatened Town, the engaged one or another, is contested or at or below the share of its hit points) or `Always` | 0 to 1000 |
+| `random` | In the pool the `random` personality choice draws from (`play-bots --personality-a/-b random`, the game's `--personality random`; `ai::resolve_personality`, a hash of the seed and the seat, never the sim's generator). Optional, `false` when absent; `standard` stays out of the pool, and slice 2's rush, boom and tower join it. Adding a personality to the pool remaps which style a seed draws | `true` or `false` |
 
 Since M5b's waves slice the bot reads every knob. A **defence** (enemy
 military on own land near an own Town) sends every home armed unit at the
@@ -198,3 +205,57 @@ fewer than `recall_below_units`, or older than `wave_max_ds` and not
 annexing comes home. From `all_in_after_ds` every home armed unit joins the
 wave out and nothing is recalled. The rules and their order are in
 docs/design/ai.md and `crates/ai/src/standard/waves.rs`.
+
+## Difficulty levels (`difficulty/<id>.ron`, M6)
+
+```ron
+(
+  id: "hard", name: "Hard",
+  income_interval_ds: 200,                          // Easy 300, Standard 250; 0 = no bonus
+  income_from_ds: 1800,                             // payments complete at 3:00 + n intervals
+  income: {"grain": 20, "lumber": 20, "ore": 10},   // the same in all three files
+  wave_age_gate: Off,                               // Personality | Age("masonry") | Off
+  largest_wave_only: false,
+  max_wave_units: None,
+  wave_size_permille: 1000,
+  wave_interval_permille: 900,
+  all_in_after_ds: None,                            // None keeps the personality's
+  first_raid: Some((by_ds: 6000, prep_ds: 1500, min_armed: 6, max_armed: 10)),
+)
+```
+
+Difficulty is a disclosed cheat plus wave timing; the bot does not play
+better on Hard. The sim pays every AI seat whose `bot` names a level the
+same `income` bundle on the step that completes tick `from + k x every`
+(k >= 1, `from` = `income_from_ds` and `every` = `income_interval_ds` in
+ticks): Standard's first payment lands at 3:25 (tick 4100), Hard's at 3:20
+(4000) and Easy's at 3:30 (4200). The bundle is added to the stockpile and
+clamped to the stockpile caps (Lore), and the sim emits `BonusIncome` with
+what was credited (step 6d', docs/DETERMINISM.md). Human slots and
+`passive` seats get nothing, and the bonus never reads the opponent's state
+(no rubber band). The bundle is the same in every file, so the interval
+alone sizes the cheat: a shorter interval is a larger cheat.
+
+| Field | Meaning | Range |
+|-------|---------|-------|
+| `id`, `name` | Stable id (the header's `bot`, `play-bots --a/--b`, the game's `--difficulty`) and display name | the file stem; not `passive`; non-empty name |
+| `income_interval_ds` | The bonus is paid every this many deciseconds | 0 (no bonus), or 50 to 72000 and in ticks more than `cmd_delay_ticks` |
+| `income_from_ds` | The schedule counts from this match time; the first payment completes one interval later | below `match_cap_ds` |
+| `income` | The bonus bundle, `{resource id: amount}` | resource ids of `resources.ron`; each 0 to 500 |
+| `wave_age_gate` | `Personality` keeps the personality's `wave_requires_age`; `Age(id)` replaces it; `Off` removes it | an age id for `Age` |
+| `largest_wave_only` | Every `wave_sizes` row takes the last (largest) row's size | `true` or `false` |
+| `max_wave_units` | Caps every wave and the personality's `max_wave_units` | `None`, or 1 to 64 |
+| `wave_size_permille` | Scales every `wave_sizes` row, rounded up, at least 1, at most the cap | 250 to 4000 |
+| `wave_interval_permille` | Scales `wave_interval_ds`, rounded to nearest | 250 to 4000 |
+| `all_in_after_ds` | Replaces the personality's all-in time | `None`, or 0 to 72000 |
+| `first_raid` | `Some((by_ds, prep_ds, min_armed, max_armed))`: the guaranteed early raid by `by_ds`, emergency production from `by_ds - prep_ds` (slice 2's behaviour; slice 1 loads and stores it) | `1 <= min_armed <= max_armed <= 64`, `prep_ds < by_ds`, `by_ds` below `match_cap_ds` |
+
+`rules::ai::resolve(personality, difficulty)` applies the wave knobs once, a
+pure function of the two rows (so a bot rebuilt mid-match plays the same
+knobs); retreat, counters, influence and noise stay the personality's at
+every level. The `standard` level resolves to the personality itself. M6
+also requires every build order to build a trainer of an armed kind before
+its first `Advance` (a difficulty's raid trains armed units before then).
+The shipped values, the bundle sweep and the line-4 flip (`hard.ron`
+`income_interval_ds` 200 to 300) are in docs/design/ai.md, "Difficulty
+table".

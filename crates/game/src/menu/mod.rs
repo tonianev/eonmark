@@ -16,12 +16,17 @@
 //! from the menu writes no replay. New Game only switches the state; M6's
 //! Play Again will rebuild the match on entering `Skirmish` instead.
 //!
+//! M6 (slice 3): the menu is also the New Game selector
+//! ([`new_game`]), and the match lifecycle (`crate::match_scope`) rebuilds
+//! the match in place for New Game, Play Again and Main Menu.
+//!
 //! On entering `Skirmish` the game prints one line naming the match
 //! ([`match_line`]): `match: new game vs standard personality=standard
 //! seed=<s> map=plains_1v1` against the bot, `match: spectate ...` with
 //! both slots bots.
 
 pub mod main_menu;
+pub mod new_game;
 
 use std::time::Duration;
 
@@ -76,7 +81,7 @@ pub fn match_line(setup: &MatchSetup) -> Option<String> {
 }
 
 /// Print [`match_line`] once the match starts (`OnEnter(Skirmish)`).
-fn announce_match(sim: NonSend<SimHandle>) {
+pub fn announce_match(sim: NonSend<SimHandle>) {
     if let Some(line) = match_line(sim.setup()) {
         println!("{line}");
     }
@@ -96,7 +101,8 @@ impl Plugin for MenuPlugin {
         app.add_systems(OnEnter(AppState::Menu), main_menu::spawn_main_menu)
             .add_systems(
                 Update,
-                main_menu::menu_button_colors.run_if(in_state(AppState::Menu)),
+                (main_menu::menu_button_colors, main_menu::update_selector)
+                    .run_if(in_state(AppState::Menu)),
             )
             .add_systems(OnEnter(AppState::Skirmish), announce_match);
         if let Some(after) = self.new_game_after {
@@ -242,14 +248,7 @@ mod tests {
             .collect();
         lines.sort();
         let lines: Vec<String> = lines.into_iter().map(|(_, t)| t).collect();
-        assert_eq!(
-            lines,
-            [
-                "Eonmark",
-                "Skirmish against the Standard bot on plains_1v1",
-                "Seed 1234"
-            ]
-        );
+        assert_eq!(lines, ["Eonmark", "Skirmish on plains_1v1", "Seed 1234"]);
         assert!(app.world().resource::<ReplayRecorder>().0.is_none());
         assert_eq!(
             app.world().resource::<PendingRecording>().0.as_deref(),

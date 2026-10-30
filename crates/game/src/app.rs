@@ -147,9 +147,9 @@ pub fn vs_bot_setup(cli: &Cli, rules: &Rules, seed: u64) -> Result<MatchSetup, S
 ///
 /// An unknown scenario, or a fast-forward the outcome came before.
 pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputSource>), String> {
-    if cli.spectate {
-        let setup = spectate_setup(&rules, match_seed(cli));
-        let mut handle = SimHandle::try_from_setup(setup, rules)?;
+    // `--fast-forward-to`: with `--spectate`, or (M6) with `--skip-menu`,
+    // whose human gives no order before the window opens.
+    let fast_forward = |mut handle: SimHandle| -> Result<SimHandle, String> {
         if let Some(target) = cli.fast_forward_to {
             let wall = handle.fast_forward(target)?;
             println!(
@@ -158,7 +158,24 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
                 wall.as_secs_f64()
             );
         }
-        return Ok((handle, Box::new(LocalInput)));
+        Ok(handle)
+    };
+    if cli.spectate {
+        let seed = match_seed(cli);
+        let setup = match (&cli.spectate_a, &cli.spectate_b) {
+            (None, None) => spectate_setup(&rules, seed),
+            (a, b) => {
+                let d = (
+                    ai::BOT_STANDARD.to_string(),
+                    STANDARD_PERSONALITY.to_string(),
+                );
+                let a = a.clone().unwrap_or_else(|| d.clone());
+                let b = b.clone().unwrap_or(d);
+                MatchSetup::bots(&rules, seed, (&a.0, &a.1), (&b.0, &b.1))
+            }
+        };
+        let handle = SimHandle::try_from_setup(setup, rules)?;
+        return Ok((fast_forward(handle)?, Box::new(LocalInput)));
     }
     match &cli.scenario {
         // M5b: a plain launch plays the Standard bot (`MatchSetup::vs_bot`);
@@ -166,10 +183,8 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
         None => {
             let seed = match_seed(cli);
             let setup = vs_bot_setup(cli, &rules, seed)?;
-            Ok((
-                SimHandle::try_from_setup(setup, rules)?,
-                Box::new(LocalInput),
-            ))
+            let handle = SimHandle::try_from_setup(setup, rules)?;
+            Ok((fast_forward(handle)?, Box::new(LocalInput)))
         }
         Some(name) => {
             let Some((mut setup, stream, _ticks)) = scenarios::by_name(name, &rules) else {
@@ -383,6 +398,11 @@ pub fn run(cli: &Cli) -> AppExit {
         }
     };
     let replay_path = new_replay_path(&replay_dir(cli.replay_dir.as_deref()), handle.seed());
+    // M6: what New Game and Play Again build, and where they record.
+    let settings = crate::menu::new_game::NewGameSettings::from_cli(cli, handle.seed());
+    let style_hidden = crate::alert::StyleHidden(
+        settings.hides_style() && !cli.starts_in_menu() && cli.scenario.is_none(),
+    );
     let hud_click_check = cli.scenario.as_deref() == Some("hud_click");
     let present_mode = if cli.max_fps.is_some() {
         PresentMode::AutoNoVsync
@@ -445,6 +465,11 @@ pub fn run(cli: &Cli) -> AppExit {
     app.insert_resource(crate::economy_hud::UiStrings(strings));
     // M5b: the main menu on a plain launch, the match at once otherwise.
     app.insert_state(initial_state(cli));
+    app.insert_resource(settings)
+        .insert_resource(style_hidden)
+        .insert_resource(crate::match_scope::ReplayDirectory(replay_dir(
+            cli.replay_dir.as_deref(),
+        )));
     app.add_plugins(MenuPlugin {
         new_game_after: cli.new_game_after_seconds.map(Duration::from_secs_f64),
     });
@@ -494,13 +519,21 @@ pub fn run(cli: &Cli) -> AppExit {
     // arrows, stones and melee lunges for every hit (presentation only).
     app.add_plugins((
         crate::markers::MarkersPlugin,
-        crate::outcome::OutcomeOverlayPlugin,
+        crate::outcome::GameOverPlugin {
+            play_again_after: cli.play_again_after_seconds.map(Duration::from_secs_f64),
+        },
         crate::combat_fx::CombatFxPlugin,
     ));
 
     // Art pass AP6 (owner decision 7): the minimap bottom-left over the
     // bottom bar; it prints `frame_stats: minimap ...` on exit.
     app.add_plugins(crate::minimap::MinimapPlugin);
+    // M6: the under-attack alert and the top bar's readouts, and the
+    // match lifecycle (New Game, Play Again, Main Menu in place).
+    app.add_plugins((
+        crate::alert::AlertPlugin,
+        crate::match_scope::MatchScopePlugin,
+    ));
 
     // Art pass AP10: every unit selectable by a real click (a driver
     // clicks the printed targets; `crate::click_check`).

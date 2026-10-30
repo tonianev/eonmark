@@ -24,7 +24,9 @@
 #      It must exit 0 and stay on the menu: no `match:` and no `replay:`
 #      line, and its --replay-dir stays empty (the lazy recorder).
 #   4. New Game: a plain launch with --seed 7 whose
-#      --new-game-after-seconds proxy clicks the real button. It must
+#      --new-game-after-seconds proxy clicks the real button. Since M6 the
+#      menu's style defaults to Random (owner decision 6), so the run
+#      passes --personality standard to keep M5b's Standard setup. It must
 #      print `new-game: clicked at`, `match: new game vs standard` and a
 #      `replay:` path, and `sim-cli verify` of that replay must print `OK`
 #      with more than 600 ticks. The bot trains a Yeoman at its first
@@ -176,7 +178,7 @@ echo "==> 4. New Game: the proxy clicks the real button 3 s in"
 o3="$out/new-game-replays"
 rm -rf "$o3"; mkdir -p "$o3"
 log="$out/new-game.log"
-game "$log" --background --seed 7 --replay-dir "$o3" --new-game-after-seconds 3 \
+game "$log" --background --seed 7 --personality standard --replay-dir "$o3" --new-game-after-seconds 3 \
   --exit-after-seconds "$click_seconds"
 if [ "$status" -eq 0 ]; then ok "the game exited 0"; else bad "the game exited $status"; fi
 no_errors "$log"

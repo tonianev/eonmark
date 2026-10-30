@@ -108,6 +108,14 @@ pub const ANNEX_TRACK: Color = Color::srgba(0.227, 0.227, 0.247, 0.8);
 /// over the frozen world.
 pub const OUTCOME_SCRIM: Color = Color::srgba(0.16, 0.18, 0.20, 0.80);
 
+/// The game-over screen's backdrop (M6): darker than the M5a overlay's
+/// scrim, so the statistics read over a busy battlefield and the minimap
+/// on a 1280 x 720 stream.
+pub const GAME_OVER_SCRIM: Color = Color::srgba(0.10, 0.11, 0.13, 0.93);
+
+/// The game-over table's row labels (M6): a quieter cream than the values.
+pub const GAME_OVER_LABEL: Color = Color::srgb(0.72, 0.71, 0.67);
+
 /// Arrows in flight (art pass hit feedback, unlit): the dark neutral
 /// (#3A3A3F, `docs/ART_STYLE.md`, "Neutral and fog"), a streak, not a glow.
 pub const ARROW: Color = Color::srgb(0.227, 0.227, 0.247);

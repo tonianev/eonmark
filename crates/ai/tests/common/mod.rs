@@ -170,6 +170,28 @@ impl Arena {
         self.bot(me).ctx(self.sim.view(), me)
     }
 
+    /// [`Arena::ctx`] with the seat's personality as written (not resolved
+    /// for its level) and no level pressure: the bot the slice-2 tests
+    /// describe, which a Standard seat played until the M6 retune (owner
+    /// decision 12) gave the level its pressure and all-in time.
+    pub fn base_ctx(&self, me: PlayerId) -> Ctx<'_> {
+        let mut ctx = self.ctx(me);
+        let view = self.sim.view();
+        let seat = view
+            .setup()
+            .ai_seats
+            .iter()
+            .find(|s| s.player == me)
+            .expect("the seat is a bot");
+        ctx.knobs = view
+            .rules()
+            .ai
+            .personality(&seat.personality)
+            .expect("personality");
+        ctx.pressure = rules::Pressure::OFF;
+        ctx
+    }
+
     /// What `me`'s Standard bot would plan now, whatever its cadence, and
     /// the memory it would leave; nothing is stepped.
     pub fn plan(&self, me: PlayerId) -> (Vec<Command>, AiMemory) {

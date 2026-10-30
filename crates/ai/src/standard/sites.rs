@@ -505,14 +505,8 @@ pub fn site_for(
     // M6: an Expansion or BorderEdge site is picked among the first
     // `noise_site_top_k` candidates that pass the cheap tests, by the
     // bot's noise salted with the step, so seeds differ in where the
-    // second Town and the border towers go. M6 owner decision 12: a
-    // BorderEdge site among the first `noise_border_top_k` when that is
-    // set, so mirrored seats rarely end with mirror-image borders.
-    let k = match at {
-        Placement::BorderEdge if ctx.knobs.noise_border_top_k > 0 => ctx.knobs.noise_border_top_k,
-        _ => ctx.knobs.noise_site_top_k,
-    };
-    let top_k = usize::try_from(k).unwrap_or(1);
+    // second Town and the border towers go.
+    let top_k = usize::try_from(ctx.knobs.noise_site_top_k).unwrap_or(1);
     if top_k > 1 && matches!(at, Placement::Expansion | Placement::BorderEdge) {
         let mut firsts: Vec<Tile> = Vec::new();
         for t in &candidates {
@@ -721,7 +715,6 @@ mod tests {
     fn no_site_noise(r: &Rules) -> Personality {
         let mut k = r.ai.personality("standard").unwrap().clone();
         k.noise_site_top_k = 1;
-        k.noise_border_top_k = 0;
         k
     }
 
@@ -927,75 +920,5 @@ mod tests {
             p0.tie_index(Tile::new(18, 81), 3, 3),
             p1.tie_index(Tile::new(107, 81), 3, 3)
         );
-    }
-
-    /// M6 owner decision 12: with `noise_border_top_k` a border Watchtower
-    /// goes on one of the first `noise_border_top_k` passing candidates
-    /// (each seat by its own noise, salted with the step), so the two seats
-    /// of the mirrored map stop building mirror-image borders: over a few
-    /// seeds the picks spread over several tiles, some seed's two picks
-    /// are not mirror images, and every pick is one of the noise-free
-    /// candidates near the best one.
-    #[test]
-    fn border_towers_spread_over_the_first_noise_border_top_k_candidates() {
-        use crate::testkit::{Arena, P0, P1};
-        let r = rules();
-        let tower = BuildingKindId(r.building_kind_by_id("watchtower").unwrap().0);
-        let mut k = no_site_noise(&r);
-        k.noise_border_top_k = 4;
-        let mut picks = std::collections::BTreeSet::new();
-        let mut asymmetric = false;
-        for seed in 1..=8u64 {
-            let mut setup =
-                MatchSetup::bots(&r, seed, ("standard", "standard"), ("standard", "standard"));
-            setup.debug_commands = true;
-            let grants = [
-                crate::testkit::grant_all(&r, P0, 100),
-                crate::testkit::grant_all(&r, P1, 100),
-            ]
-            .concat();
-            let a = Arena::frozen(setup, grants);
-            let mut got = Vec::new();
-            for p in [P0, P1] {
-                let view = a.sim.view();
-                let mut ctx = Ctx::new(a.sim.view(), p, &k, a.map(p));
-                let mut mem = BotMemory::default();
-                let pool = view.idle_workers(p);
-                let SiteSearch::Found { tile, .. } =
-                    site_for(&mut ctx, &mut mem, 16, tower, Placement::BorderEdge, &pool)
-                else {
-                    panic!("seed {seed} {p:?}");
-                };
-                let best = if p == P0 {
-                    Tile::new(43, 64)
-                } else {
-                    Tile::new(84, 64)
-                };
-                assert!(d2(tile, best) <= 4 * 4, "seed {seed} {p:?}: {tile:?}");
-                got.push(tile);
-                if p == P0 {
-                    picks.insert(tile);
-                }
-            }
-            let size = a.map(P0).size;
-            if mirrored_nw(Symmetry::MirrorX, size, got[0], 1, 1) != got[1] {
-                asymmetric = true;
-            }
-        }
-        assert!(picks.len() >= 2, "the noise spreads P0's picks: {picks:?}");
-        assert!(asymmetric, "some seed's two borders are not mirror images");
-        // 0 falls back to noise_site_top_k (1 here): always the best.
-        k.noise_border_top_k = 0;
-        let mut setup = MatchSetup::bots(&r, 3, ("standard", "standard"), ("standard", "standard"));
-        setup.debug_commands = true;
-        let a = Arena::frozen(setup, crate::testkit::grant_all(&r, P0, 100));
-        let view = a.sim.view();
-        let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
-        let mut mem = BotMemory::default();
-        let pool = view.idle_workers(P0);
-        assert!(matches!(
-            site_for(&mut ctx, &mut mem, 16, tower, Placement::BorderEdge, &pool),
-            SiteSearch::Found { tile, .. } if tile == Tile::new(43, 64)
-        ));
     }
 }

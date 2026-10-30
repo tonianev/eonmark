@@ -20,7 +20,13 @@
   // neutral, and a siege wave's memory gains its target's last hit points;
   // every fixture is re-recorded for its header; only m5_first_match's
   // .hash moves (the bots' hashed memory bytes).
-  rules_version: 29,
+  // 30: M6 retune (owner decision 12): Standard and Hard press their sieges
+  // (reinforce, commit, no retreat, lure, cohesion; Standard's launch gate,
+  // Hard's assault gate), the all-ins go Hard 30:00, Easy 33:00, Standard
+  // 36:00, Easy researches Statecraft II and drops the 850 Yeomen handicap,
+  // tower adds Statecraft II, the difficulty files gain `extra_research` and
+  // `assault_ratio_permille` and the personalities lose `noise_border_top_k`.
+  rules_version: 30,
   tick_rate_hz: 20,
   cmd_delay_ticks: 2,
   default_map: "plains_1v1",

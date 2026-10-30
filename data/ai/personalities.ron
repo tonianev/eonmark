@@ -39,7 +39,7 @@
       defend_economy: true, defend_economy_tiles: 8, defend_wains_first: false,
       reactive_towers: 0,
       noise_wave_interval_permille: 150, noise_wave_units: 2, noise_first_wave_ds: 300,
-      noise_mix_permille: 200, noise_site_top_k: 2, noise_border_top_k: 0,
+      noise_mix_permille: 200, noise_site_top_k: 2,
     ),
     // Rush: an early Muster Hall and raids of Skirmishers and Bowmen from
     // about minute 5, no age gate; small siege waves once it has a
@@ -80,7 +80,7 @@
       defend_economy: true, defend_economy_tiles: 8, defend_wains_first: false,
       reactive_towers: 0,
       noise_wave_interval_permille: 150, noise_wave_units: 2, noise_first_wave_ds: 300,
-      noise_mix_permille: 200, noise_site_top_k: 2, noise_border_top_k: 0,
+      noise_mix_permille: 200, noise_site_top_k: 2,
     ),
     // Boom: a second Town at once, Statecraft I and a third Town, Masonry
     // before the army; few, large siege waves from minute 15.
@@ -119,7 +119,7 @@
       defend_economy: true, defend_economy_tiles: 8, defend_wains_first: false,
       reactive_towers: 0,
       noise_wave_interval_permille: 150, noise_wave_units: 2, noise_first_wave_ds: 300,
-      noise_mix_permille: 200, noise_site_top_k: 2, noise_border_top_k: 0,
+      noise_mix_permille: 200, noise_site_top_k: 2,
     ),
     // Tower: Ore first, border Watchtowers and Harrying I before any wave,
     // a Bowman-led mix; its guard goes for enemy Supply Wains first and it
@@ -160,7 +160,7 @@
       defend_economy: true, defend_economy_tiles: 8, defend_wains_first: true,
       reactive_towers: 2,
       noise_wave_interval_permille: 150, noise_wave_units: 2, noise_first_wave_ds: 300,
-      noise_mix_permille: 200, noise_site_top_k: 2, noise_border_top_k: 0,
+      noise_mix_permille: 200, noise_site_top_k: 2,
     ),
   ],
 )

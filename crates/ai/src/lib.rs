@@ -558,7 +558,8 @@ mod tests {
 
     /// M6: a Standard bot's knobs are `resolve(personality, difficulty)`,
     /// a pure function of the rules and the header: two bots built for
-    /// the same seat agree, and `standard` plays the personality itself.
+    /// the same seat agree, and `standard` plays the personality with its
+    /// level's all-in time and (M6 owner decision 12) no retreat.
     #[test]
     fn knobs_are_pure_functions_of_rules_and_header() {
         let r = rules();
@@ -572,8 +573,8 @@ mod tests {
             assert_eq!(a.knobs(), &rules::ai::resolve(p, level));
             assert_eq!(a.first_raid(), level.first_raid);
             assert_eq!(a.difficulty(), id);
-            // The build order it plays is the level's resolved order (Easy's
-            // disclosed Yeomen handicap, M6 owner decision 2's fallback).
+            // The build order it plays is the level's resolved order (M6
+            // owner decision 12: Easy's Statecraft II appended).
             let order = r.ai.build_order(&p.build_order).unwrap();
             assert_eq!(a.order(), &rules::ai::resolve_order(order, level));
         }
@@ -585,11 +586,22 @@ mod tests {
         };
         let easy = r.ai.difficulty("easy").unwrap();
         let easy_bot = standard::StandardBot::new(&r, &setup, PlayerId(1), p, easy);
-        assert_eq!(first_workers(easy_bot.order()), Some(6));
+        assert_eq!(first_workers(easy_bot.order()), Some(7));
+        let shipped = r.ai.build_order(&p.build_order).unwrap();
+        assert_eq!(easy_bot.order().steps.len(), shipped.steps.len() + 1);
+        assert_eq!(
+            easy_bot.order().steps.last(),
+            Some(&rules::Step::Research {
+                tech: "statecraft_2".into(),
+                optional: true
+            })
+        );
         let standard = r.ai.difficulty("standard").unwrap();
         let bot = standard::StandardBot::new(&r, &setup, PlayerId(0), p, standard);
-        assert_eq!(bot.knobs(), p);
-        let shipped = r.ai.build_order(&p.build_order).unwrap();
+        let mut want = p.clone();
+        want.all_in_after_ds = 21600;
+        want.retreat_ratio_permille = 0;
+        assert_eq!(bot.knobs(), &want);
         assert_eq!(bot.order(), shipped);
         assert_eq!(first_workers(bot.order()), Some(7));
         // `describe` reads the same resolved window for the Easy seat (at
@@ -601,7 +613,7 @@ mod tests {
         );
         let line = describe(&sim.view(), PlayerId(1));
         assert!(
-            line.starts_with("easy standard window=[0 workers 6, "),
+            line.starts_with("easy standard window=[0 workers 7, "),
             "{line}"
         );
         let line = describe(&sim.view(), PlayerId(0));

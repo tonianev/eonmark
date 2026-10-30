@@ -159,7 +159,8 @@ fn m6_memory_stays_under_1_kib() {
 }
 
 /// Hidden state in the M6 behaviours: a rush-against-tower match (seed 2,
-/// where the rush seat raids and both seats retreat) restored into a fresh
+/// where the Standard rush seat raids and the Easy tower seat retreats;
+/// since the M6 retune a Standard seat never retreats) restored into a fresh
 /// `Sim` with fresh bots from the header, once while a raid is out and
 /// once just after a retreat, matches the uninterrupted run, every
 /// sub-hash, every tick, for the next 2000 ticks.
@@ -175,7 +176,7 @@ fn m6_restore_during_a_raid_idle_and_after_a_retreat_matches_uninterrupted() {
         .map(|(what, pick)| {
             Box::new(move || {
                 let r = common::rules();
-                let setup = MatchSetup::bots(&r, 2, ("standard", "rush"), ("standard", "tower"));
+                let setup = MatchSetup::bots(&r, 2, ("standard", "rush"), ("easy", "tower"));
                 let fresh = || {
                     Sim::new(
                         setup.clone(),

@@ -15,9 +15,10 @@
 # wins <= 9/20 while Easy takes the majority, >= 11/20, in both seat
 # orders (M6 plan 2a #3 and 7: a draw is not a win for Easy, so Hard's
 # 9/20 alone could pass with Hard still ahead of Easy). At 300 both sides
-# receive the same bonus bundle, but Easy keeps its disclosed handicap
-# (`worker_target_permille` 850 in easy.ron: 15% fewer Yeomen), so the
-# flipped run is an equal-bonus control, not an equal-income one.
+# receive the same bonus bundle on the same schedule, and since the M6
+# retune (owner decision 12) Easy has no Yeomen handicap, so the flipped run
+# is an equal-bonus control: the levels then differ only in how they play
+# (data/ai/difficulty/*.ron).
 #
 # Usage: scripts/check_difficulty_flip.sh [--data D] [--seeds A..B] [--jobs N] [--out DIR]
 # SIM_CLI names the sim-cli binary (default target/release/sim-cli, built

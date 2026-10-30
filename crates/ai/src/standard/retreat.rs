@@ -200,7 +200,7 @@ mod tests {
         let a = fight(12);
         let units = a.units_of(P0, "skirmisher");
         let target = a.seat(P1);
-        let mut ctx = a.ctx(P0);
+        let mut ctx = a.base_ctx(P0);
         let rally = ctx.rally();
         let mut mem = BotMemory {
             wave: Some(wave(units.clone(), 8, WavePhase::Stage, target)),
@@ -230,7 +230,7 @@ mod tests {
 
         // Down only a fifth: no retreat yet.
         let units = a.units_of(P0, "skirmisher");
-        let mut ctx = a.ctx(P0);
+        let mut ctx = a.base_ctx(P0);
         let mut mem = BotMemory {
             wave: Some(wave(units.clone(), 5, WavePhase::Stage, target)),
             ..BotMemory::default()
@@ -242,7 +242,7 @@ mod tests {
         // Not outnumbered: no retreat, however many were lost.
         let even = fight(3);
         let units = even.units_of(P0, "skirmisher");
-        let mut ctx = even.ctx(P0);
+        let mut ctx = even.base_ctx(P0);
         let mut mem = BotMemory {
             wave: Some(wave(units, 8, WavePhase::Stage, even.seat(P1))),
             ..BotMemory::default()
@@ -275,7 +275,7 @@ mod tests {
             ..BotMemory::default()
         };
         let cmds = {
-            let mut ctx = a.ctx(P0);
+            let mut ctx = a.base_ctx(P0);
             step(&mut ctx, &mut mem);
             ctx.into_commands()
         };
@@ -319,7 +319,7 @@ mod tests {
         let check = |mem: &BotMemory, knobs: Option<&rules::Personality>, why: &str| {
             let mut ctx = match knobs {
                 Some(k) => crate::standard::Ctx::new(a.sim.view(), P0, k, a.map(P0)),
-                None => a.ctx(P0),
+                None => a.base_ctx(P0),
             };
             let mut mem = mem.clone();
             step(&mut ctx, &mut mem);
@@ -360,7 +360,7 @@ mod tests {
                 amount: 1500,
             }],
         );
-        let mut ctx = weak.ctx(P0);
+        let mut ctx = weak.base_ctx(P0);
         let mut mem = BotMemory {
             wave: Some(wave(
                 weak.units_of(P0, "skirmisher"),
@@ -375,7 +375,7 @@ mod tests {
         assert!(mem.wave.is_some() && mem.retreats == 0, "weak target");
         // The same staging wave against the sound Town retreats (the
         // paired control).
-        let mut ctx = a.ctx(P0);
+        let mut ctx = a.base_ctx(P0);
         let mut mem = staging.clone();
         step(&mut ctx, &mut mem);
         assert_eq!(mem.retreats, 1, "control");
@@ -395,7 +395,7 @@ mod tests {
             ..BotMemory::default()
         };
         {
-            let mut ctx = a.ctx(P0);
+            let mut ctx = a.base_ctx(P0);
             step(&mut ctx, &mut mem);
         }
         assert_eq!(mem.retreats, 1);

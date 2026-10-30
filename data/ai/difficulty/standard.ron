@@ -1,6 +1,9 @@
 // Standard (M6): the fun-gate opponent and the New Game default. The bot
 // receives a bonus bundle every 25 s from 3:00 (the first one at 3:25) and
-// plays its personality's wave timing. Disclosed on New Game and on the
+// plays its personality's wave timing, keeps up siege pressure (M6 owner
+// decision 12: groups from the rally join an assault, a siege that is taking
+// a Town down neither retreats nor times out, waves never retreat), launches
+// only when it outweighs the army at home, and goes all-in at minute 36. Disclosed on New Game and on the
 // game-over screen; never rubber-banded. _ds deciseconds, _permille per mille.
 // Schema: crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,
 // "Difficulty table".
@@ -14,17 +17,19 @@
   max_wave_units: None,
   wave_size_permille: 1000,
   wave_interval_permille: 1000,
-  all_in_after_ds: None,                            // None keeps the personality's
+  all_in_after_ds: Some(21600),                     // 36:00; None keeps the personality's
   first_raid: Some((by_ds: 9000, prep_ds: 1500, min_armed: 6, max_armed: 12)),
   worker_target_permille: 1000,
+  extra_research: [],
   pressure: (
-    reinforce_min_units: 0,
-    commit_ds: 0,
-    retreat_ratio_permille: 1000,
+    reinforce_min_units: 6,
+    commit_ds: 300,
+    retreat_ratio_permille: 0,
     retreat_cooldown_permille: 1000,
     home_guard_units: 0,
-    lure_ds: 0,
-    cohesion_tiles: 0,
-    launch_ratio_permille: 0,
+    lure_ds: 600,
+    cohesion_tiles: 4,
+    launch_ratio_permille: 800,
+    assault_ratio_permille: 0,
   ),
 )

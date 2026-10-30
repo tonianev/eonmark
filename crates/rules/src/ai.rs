@@ -50,6 +50,8 @@ pub const MAX_BONUS_AMOUNT: u32 = 500;
 pub const MIN_INCOME_INTERVAL_DS: u32 = 50;
 /// Smallest `worker_target_permille` (M6).
 pub const MIN_WORKER_TARGET_PERMILLE: u32 = 500;
+/// Most `extra_research` entries of a difficulty (M6 owner decision 12).
+pub const MAX_EXTRA_RESEARCH: usize = 8;
 /// Smallest difficulty multiplier (`wave_size_permille`,
 /// `wave_interval_permille`).
 pub const MIN_DIFFICULTY_PERMILLE: u32 = 250;
@@ -176,6 +178,13 @@ pub struct Pressure {
     /// units standing on the enemy's own land; 0: off
     /// (`0..=MAX_AI_RATIO_PERMILLE`).
     pub launch_ratio_permille: u32,
+    /// A staged siege wave (not the all-in) starts its assault only when
+    /// its Lanchester strength times 1000 reaches this times that of the
+    /// enemy armed units on the enemy's own land; until then it holds at
+    /// its stage point, where reinforcements join it, and if it is still
+    /// short at `stage_max_ds` it comes home; 0: off
+    /// (`0..=MAX_AI_RATIO_PERMILLE`).
+    pub assault_ratio_permille: u32,
 }
 
 impl Pressure {
@@ -189,6 +198,7 @@ impl Pressure {
         lure_ds: 0,
         cohesion_tiles: 0,
         launch_ratio_permille: 0,
+        assault_ratio_permille: 0,
     };
 }
 
@@ -241,6 +251,12 @@ pub struct Difficulty {
     /// economic handicap M6 owner decision 2 allows for Easy alone (850: 15%
     /// fewer Yeomen); 1000 at the other levels.
     pub worker_target_permille: u32,
+    /// Techs the level researches once its build order is through (M6
+    /// owner decision 12: a defensive level widens the border it holds),
+    /// each appended to the build order as an optional `Research` step
+    /// unless the order already researches it; at most
+    /// `MAX_EXTRA_RESEARCH`, each a tech id, each once.
+    pub extra_research: Vec<String>,
     /// How the level presses its sieges (M6 owner decision 12).
     pub pressure: Pressure,
 }
@@ -343,14 +359,28 @@ pub fn resolve(p: &Personality, d: &Difficulty) -> Personality {
 
 /// The build order a bot of difficulty `d` plays (M6): `order` with every
 /// `Workers` count scaled by `d.worker_target_permille`, rounded up, at
-/// least 1 (the split weights stay as they are: they are shares). A pure
-/// function of the two rows, like [`resolve`].
+/// least 1 (the split weights stay as they are: they are shares), and (M6
+/// owner decision 12) an optional `Research` step appended for each of
+/// `d.extra_research` that the order does not research already, in the
+/// level's order. A pure function of the two rows, like [`resolve`].
 pub fn resolve_order(order: &BuildOrder, d: &Difficulty) -> BuildOrder {
     let mut out = order.clone();
     for step in &mut out.steps {
         if let Step::Workers { count, .. } = step {
             let scaled = (u64::from(*count) * u64::from(d.worker_target_permille)).div_ceil(1000);
             *count = u32::try_from(scaled).unwrap_or(u32::MAX).max(1);
+        }
+    }
+    for tech in &d.extra_research {
+        let has = out
+            .steps
+            .iter()
+            .any(|s| matches!(s, Step::Research { tech: t, .. } if t == tech));
+        if !has {
+            out.steps.push(Step::Research {
+                tech: tech.clone(),
+                optional: true,
+            });
         }
     }
     out
@@ -725,15 +755,9 @@ pub struct Personality {
     pub noise_first_wave_ds: u32,
     /// Each army-mix weight is jittered by up to this share, per mille.
     pub noise_mix_permille: u32,
-    /// `Expansion` sites (and, unless `noise_border_top_k` is set,
-    /// `BorderEdge` ones) are picked among the first this many candidates
-    /// that pass the cheap tests (1: always the best).
+    /// `Expansion` and `BorderEdge` sites are picked among the first this
+    /// many candidates that pass the cheap tests (1: always the best).
     pub noise_site_top_k: u32,
-    /// M6 owner decision 12: `BorderEdge` sites (the border Watchtowers) are
-    /// picked among the first this many candidates that pass the cheap
-    /// tests, each seat by its own noise, so the two seats of a mirrored map
-    /// rarely end with mirror-image borders; 0 uses `noise_site_top_k`.
-    pub noise_border_top_k: u32,
 }
 
 impl Personality {
@@ -917,6 +941,33 @@ fn check_difficulty(path: &Path, d: &Difficulty, rules: &Rules) -> Check {
         MIN_WORKER_TARGET_PERMILLE,
         1000,
     )?;
+    if d.extra_research.len() > MAX_EXTRA_RESEARCH {
+        return Err(Error::invalid(
+            path,
+            "extra_research",
+            format!(
+                "{} techs; a level adds at most {MAX_EXTRA_RESEARCH}",
+                d.extra_research.len()
+            ),
+        ));
+    }
+    for (i, tech) in d.extra_research.iter().enumerate() {
+        let at = format!("extra_research[{i}]");
+        if rules.tech_by_id(tech).is_none() {
+            return Err(Error::invalid(
+                path,
+                &at,
+                format!("{tech:?} is not a tech id in techs.ron"),
+            ));
+        }
+        if d.extra_research[..i].contains(tech) {
+            return Err(Error::invalid(
+                path,
+                &at,
+                format!("{tech:?} is listed twice"),
+            ));
+        }
+    }
     let pr = &d.pressure;
     in_range(
         path,
@@ -959,6 +1010,13 @@ fn check_difficulty(path: &Path, d: &Difficulty, rules: &Rules) -> Check {
         path,
         "pressure.launch_ratio_permille",
         pr.launch_ratio_permille,
+        0,
+        MAX_AI_RATIO_PERMILLE,
+    )?;
+    in_range(
+        path,
+        "pressure.assault_ratio_permille",
+        pr.assault_ratio_permille,
         0,
         MAX_AI_RATIO_PERMILLE,
     )?;
@@ -1740,13 +1798,6 @@ fn check_m6_knobs(
         1,
         MAX_SITE_TOP_K,
     )?;
-    in_range(
-        path,
-        &f("noise_border_top_k"),
-        p.noise_border_top_k,
-        0,
-        MAX_SITE_TOP_K,
-    )?;
     Ok(())
 }
 
@@ -1929,28 +1980,35 @@ mod tests {
     /// capped), the interval (rounded to nearest), sets the age gate and
     /// the all-in time, and `largest_wave_only` flattens the rows; it
     /// leaves every other knob alone. Standard resolves to the
-    /// personality itself.
+    /// personality with its all-in at 36:00 and (M6 owner decision 12) no
+    /// retreat.
     #[test]
     fn resolve_scales_sizes_and_intervals_once_and_caps_largest_only() {
         let rules = Rules::load(data_dir()).unwrap();
         let p = rules.ai.personality("standard").unwrap();
         let level = |id: &str| rules.ai.difficulty(id).unwrap();
-        assert_eq!(&resolve(p, level("standard")), p);
+        let mut want = p.clone();
+        want.all_in_after_ds = 21600;
+        want.retreat_ratio_permille = 0;
+        assert_eq!(resolve(p, level("standard")), want);
         let sizes = |k: &Personality| k.wave_sizes.iter().map(|w| w.armed).collect::<Vec<_>>();
         let easy = resolve(p, level("easy"));
         assert_eq!(sizes(&easy), [14, 14, 14, 14]);
         assert_eq!(easy.max_wave_units, 14);
         assert_eq!(easy.wave_interval_ds, 2700);
         assert_eq!(easy.wave_requires_age.as_deref(), Some("masonry"));
-        assert_eq!(easy.all_in_after_ds, 24000);
+        assert_eq!(easy.all_in_after_ds, 19800);
         let hard = resolve(p, level("hard"));
         assert_eq!(sizes(&hard), sizes(p));
-        assert_eq!(hard.wave_interval_ds, 1620);
+        assert_eq!(hard.wave_interval_ds, 1440);
         assert_eq!(hard.wave_requires_age, None);
         assert_eq!(hard.all_in_after_ds, p.all_in_after_ds);
         // Rounding: sizes up, at least 1, under the cap; the interval to
-        // nearest, half up.
+        // nearest, half up (the level's all-in and pressure off, so nothing
+        // else moves).
         let mut d = level("standard").clone();
+        d.all_in_after_ds = None;
+        d.pressure = Pressure::OFF;
         d.wave_size_permille = 250;
         d.wave_interval_permille = 333;
         d.max_wave_units = Some(3);
@@ -1979,11 +2037,12 @@ mod tests {
         assert_eq!(same, q);
     }
 
-    /// M6: Easy's disclosed handicap (M6 owner decision 2's fallback,
+    /// M6: a disclosed Yeomen handicap (M6 owner decision 2's fallback,
     /// `worker_target_permille` 850) scales every `Workers` count of the
     /// shipped Standard build order, rounded up (15% fewer Yeomen), and
-    /// leaves the splits and every other step alone; at 1000 (Standard and
-    /// Hard) the order is unchanged, and a count never drops below 1.
+    /// leaves the splits and every other step alone; at 1000 (every shipped
+    /// level since the M6 retune: line 2 passes without the fallback) the
+    /// order's steps are unchanged, and a count never drops below 1.
     #[test]
     fn resolve_order_scales_worker_counts_by_the_easy_handicap() {
         let rules = Rules::load(data_dir()).unwrap();
@@ -1999,8 +2058,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(counts(order), [7, 9, 11, 14, 17, 20, 23]);
-        assert_eq!(level("easy").worker_target_permille, 850);
-        let easy = resolve_order(order, level("easy"));
+        let mut handicap = level("easy").clone();
+        handicap.worker_target_permille = 850;
+        handicap.extra_research.clear();
+        let easy = resolve_order(order, &handicap);
         assert_eq!(counts(&easy), [6, 8, 10, 12, 15, 17, 20]);
         assert_eq!(easy.id, order.id);
         assert_eq!(easy.steps.len(), order.steps.len());
@@ -2016,6 +2077,11 @@ mod tests {
             assert_eq!(level(id).worker_target_permille, 1000, "{id}");
             assert_eq!(&resolve_order(order, level(id)), order, "{id}");
         }
+        // Shipped Easy: no Yeomen handicap; its Statecraft II is appended.
+        assert_eq!(level("easy").worker_target_permille, 1000);
+        let shipped_easy = resolve_order(order, level("easy"));
+        assert_eq!(counts(&shipped_easy), counts(order));
+        assert_eq!(&shipped_easy.steps[..order.steps.len()], &order.steps[..]);
         let one = BuildOrder {
             id: "one".into(),
             steps: vec![Step::Workers {
@@ -2061,6 +2127,37 @@ mod tests {
         assert_eq!(&same, p, "nothing else moves");
         d.pressure.retreat_ratio_permille = 0;
         assert_eq!(resolve(p, &d).retreat_ratio_permille, 0, "never retreats");
+    }
+
+    /// M6 owner decision 12: `extra_research` appends one optional
+    /// `Research` step per tech the build order does not research yet, in
+    /// the level's order, and leaves every other step alone.
+    #[test]
+    fn extra_research_appends_optional_steps_once() {
+        let rules = Rules::load(data_dir()).unwrap();
+        let order = rules.ai.build_order("standard").unwrap();
+        let mut d = rules.ai.difficulty("standard").unwrap().clone();
+        d.worker_target_permille = 1000;
+        d.extra_research = Vec::new();
+        assert_eq!(&resolve_order(order, &d), order);
+        d.extra_research = vec!["statecraft_2".into(), "arms_1".into(), "letters_2".into()];
+        let o = resolve_order(order, &d);
+        let n = order.steps.len();
+        assert_eq!(o.steps[..n], order.steps[..], "the order itself stays");
+        assert_eq!(
+            o.steps[n..],
+            [
+                Step::Research {
+                    tech: "statecraft_2".into(),
+                    optional: true
+                },
+                Step::Research {
+                    tech: "letters_2".into(),
+                    optional: true
+                },
+            ],
+            "arms_1 is researched already"
+        );
     }
 
     /// M6: `passive` is reserved for the bot that never acts, a `standard`
@@ -2708,11 +2805,6 @@ mod tests {
                 &["personalities[0].noise_site_top_k", "1..=8"],
             ),
             (
-                "p-border-k",
-                &[(PE, "noise_border_top_k: ", "noise_border_top_k: 9, //")],
-                &["personalities[0].noise_border_top_k", "0..=8"],
-            ),
-            (
                 "p-mode",
                 &[(PE, "wave_mode: Siege,", "wave_mode: Sometimes,")],
                 &["personalities.ron", "Sometimes"],
@@ -2730,6 +2822,20 @@ mod tests {
                     "worker_target_permille: 1",
                 )],
                 &["easy.ron", "worker_target_permille", "500..=1000"],
+            ),
+            (
+                "d-research-id",
+                &[(EASY, "extra_research: [", "extra_research: [\"nope\", ")],
+                &["easy.ron", "extra_research[0]", "nope"],
+            ),
+            (
+                "d-research-twice",
+                &[(
+                    EASY,
+                    "extra_research: [",
+                    "extra_research: [\"arms_1\", \"arms_1\", ",
+                )],
+                &["easy.ron", "extra_research[1]", "twice"],
             ),
             // M6 owner decision 12: the pressure block's ranges (the
             // trailing `//` comments out the shipped value).
@@ -2788,6 +2894,15 @@ mod tests {
                     "launch_ratio_permille: 10001, //",
                 )],
                 &["hard.ron", "pressure.launch_ratio_permille", "0..=10000"],
+            ),
+            (
+                "d-assault",
+                &[(
+                    HARD,
+                    "assault_ratio_permille: ",
+                    "assault_ratio_permille: 10001, //",
+                )],
+                &["hard.ron", "pressure.assault_ratio_permille", "0..=10000"],
             ),
             // M6: a trainer of an armed kind before the first Advance.
             (
@@ -2859,7 +2974,7 @@ mod tests {
                 "d-interval-permille",
                 &[(
                     HARD,
-                    "wave_interval_permille: 900,",
+                    "wave_interval_permille: 800,",
                     "wave_interval_permille: 4001,",
                 )],
                 &["hard.ron", "wave_interval_permille", "250..=4000"],
@@ -2877,7 +2992,7 @@ mod tests {
                 "d-all-in",
                 &[(
                     EASY,
-                    "all_in_after_ds: Some(24000),",
+                    "all_in_after_ds: Some(19800),",
                     "all_in_after_ds: Some(72001),",
                 )],
                 &["easy.ron", "all_in_after_ds", "0..=72000"],

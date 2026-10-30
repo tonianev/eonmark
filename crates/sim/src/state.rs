@@ -216,8 +216,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// derived from the header and the rules and rebuilt in `rebuild_derived`.
 /// `SimView::ai_noise` (a pure hash, never the `Pcg32`). In `crates/ai`
 /// the Standard bot plays the knobs `rules::ai::resolve` derives from its
-/// personality and difficulty (identical to the personality's for
-/// `standard`); slice 2's bot behaviours ship under the same number.
+/// personality and difficulty; slice 2's bot behaviours and the M6 retune
+/// (`rules_version` 29 to 31: the difficulty files' `pressure` block and
+/// `extra_research`, the `Wave` target-hit-points memory in the hashed
+/// `BotMemory`, rally-group reinforcement, commit, the lure, cohesion and
+/// the launch and assault gates; since 30 every shipped level, `standard`
+/// included, moves the all-in time) ship under the same number.
 pub const SIM_VERSION: u32 = 18;
 
 /// Who drives a player slot.

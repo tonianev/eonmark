@@ -83,7 +83,9 @@ pub fn phase(me: PlayerId, every: u32, setup: &MatchSetup) -> u32 {
 impl StandardBot {
     /// The bot for seat `player` with `personality` (a row of `rules.ai`)
     /// at `difficulty` (M6): it plays `rules::ai::resolve(personality,
-    /// difficulty)`, which is the personality itself for `standard`.
+    /// difficulty)`; for `standard` that is the personality with its all-in
+    /// at 36:00 (`rules_version` 30; its `pressure` block is read by the
+    /// bot, not by `resolve`).
     pub fn new(
         rules: &Rules,
         setup: &MatchSetup,

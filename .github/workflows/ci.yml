@@ -509,6 +509,31 @@ jobs:
           scripts/check_draws.sh --fight "$RUNNER_TEMP/render-smoke/enemy_outpost/render_smoke.log"
           scripts/check_draws.sh --fight "$RUNNER_TEMP/render-smoke/art_bench/render_smoke.log"
 
+      # ROADMAP M6 line 5 in a window: `--scenario scripted_match` at x4
+      # with a 3 s pause at tick 600, under Xvfb on lavapipe (about 18-21
+      # ticks/s at x4 there, so the outcome comes about 70-100 s in; the
+      # 240 s deadline is a margin). The pause must land on tick 600, the
+      # `outcome:` line's hash must be scripted_match.hash (the replay is
+      # the same at any speed), and the game's own replay must re-simulate
+      # to it through --headless-run. Lavapipe cannot show x4 throughput;
+      # the headless rate test and the owner's Mac do (docs/PLAYTEST.md).
+      - name: M6 line 5 (scripted_match at x4 with a pause, Xvfb, lavapipe)
+        run: |
+          out="$RUNNER_TEMP/m6-x4"
+          mkdir -p "$out/replays"
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd" \
+            target/ci/eonmark --scenario scripted_match --speed 4 --pause-at-tick 600 --pause-seconds 3 \
+            --background --exit-after-seconds 240 --replay-dir "$out/replays" > "$out/x4.log" 2>&1
+          grep -E '^(speed|pause|outcome|replay|driver): ' "$out/x4.log"
+          grep -q '^pause: on tick=600$' "$out/x4.log"
+          grep -q '^pause: off tick=600 after_s=' "$out/x4.log"
+          golden="$(cat crates/sim/tests/fixtures/scripted_match.hash)"
+          grep -q "^outcome: victory player=1 decisive=true reason=surrender tick=1203 hash=$golden\$" "$out/x4.log"
+          replay="$(sed -n 's/^replay: //p' "$out/x4.log" | head -1)"
+          cargo run -p game --locked --profile ci -- --headless-run "$replay" | tail -n 1 | tee "$out/headless.txt"
+          grep -q "^tick=1203 hash=$golden\$" "$out/headless.txt"
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:

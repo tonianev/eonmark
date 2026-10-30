@@ -782,7 +782,7 @@ pub fn on_card_click(
     mut mode: ResMut<OrderMode>,
     mut pending: ResMut<PendingCommands>,
     mut message: ResMut<MessageState>,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     seat: Option<Res<crate::sim_driver::LocalSeat>>,
 ) {
     if click.event().event.button != PointerButton::Primary
@@ -794,8 +794,7 @@ pub fn on_card_click(
         return;
     };
     if !state.enabled {
-        message.text.clone_from(&state.tooltip);
-        message.since = time.elapsed_secs_f64();
+        message.set(state.tooltip.clone(), time.secs());
         return;
     }
     match button.0 {

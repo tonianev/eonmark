@@ -451,7 +451,7 @@ pub fn on_unit_click(
     over_ui: Res<PointerOverUi>,
     keys: Res<ButtonInput<KeyCode>>,
     mut last: ResMut<LastClick>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     sim: NonSend<SimHandle>,
     camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     drag: Res<DragBox>,
@@ -949,10 +949,10 @@ fn log_first_gizmo_spawns(
 /// Shrinks and despawns move markers past their expiry.
 pub fn expire_move_markers(
     mut commands: Commands,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     mut markers: Query<(Entity, &MoveMarker, &mut Transform)>,
 ) {
-    let now = time.elapsed_secs();
+    let now = time.secs_f32();
     for (entity, marker, mut transform) in &mut markers {
         if now >= marker.expires_at {
             commands.entity(entity).despawn();

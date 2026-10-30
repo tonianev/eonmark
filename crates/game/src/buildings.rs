@@ -90,7 +90,8 @@ pub struct SeatFlag(pub BuildingId);
 /// The wreck of a destroyed building or site.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Rubble {
-    /// `Time<Real>` seconds at which it goes.
+    /// `Time<Virtual>` seconds at which it goes (M6: world time, so
+    /// rubble does not expire while the game is paused).
     pub until: f64,
     /// Its footprint: north-west tile and size in tiles.
     pub tile: (u16, u16),
@@ -622,7 +623,7 @@ pub fn spawn_rubble(
     entities: Res<BuildingEntities>,
     transforms: Query<&Transform, With<BuildingRef>>,
     mut assets: DrawAssets,
-    time: Option<Res<Time<Real>>>,
+    time: Option<Res<Time<Virtual>>>,
     mut commands: Commands,
 ) {
     let rules = sim.rules();
@@ -688,7 +689,7 @@ pub fn spawn_rubble(
 
 /// Every frame: despawn rubble whose time is up.
 pub fn expire_rubble(
-    time: Res<Time<Real>>,
+    time: Res<Time<Virtual>>,
     rubble: Query<(Entity, &Rubble)>,
     mut commands: Commands,
 ) {
@@ -1738,7 +1739,7 @@ mod tests {
         assert_eq!(r.tile, (target.1.x, target.1.y));
         assert_eq!(r.size, (2, 2));
         assert_eq!(t.scale, Vec3::splat(2.0));
-        let now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+        let now = app.world().resource::<Time<Virtual>>().elapsed_secs_f64();
         assert!((r.until - now - 30.0).abs() < 1.0, "rubble.ds 300 is 30 s");
 
         // It yields: a Croft placed on the footprint before the 30 s are
@@ -1768,13 +1769,18 @@ mod tests {
         );
         assert!(rubble(&mut app).is_empty(), "the new Croft removed it");
 
-        // It expires: the second Croft's rubble stays until 30 s of real
-        // time have passed, then goes.
+        // It expires: the second Croft's rubble stays until 30 s of world
+        // (virtual) time have passed, then goes.
         destroy(&mut app, crofts[1].0);
         let found = rubble(&mut app);
         assert_eq!(found.len(), 1);
         let until = found[0].0.until;
-        let now = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+        let now = app.world().resource::<Time<Virtual>>().elapsed_secs_f64();
+        // Rubble runs on virtual time (M6), which clamps a frame to
+        // `max_delta`: lift the clamp so one frame covers the 30 s.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(Duration::from_secs(60));
         app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             until - now - 0.5,
         )));

@@ -256,7 +256,7 @@ pub fn on_advance_click(
     buttons: Query<&CardState, With<AdvanceButton>>,
     mut pending: ResMut<PendingCommands>,
     mut message: ResMut<MessageState>,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     seat: Option<Res<crate::sim_driver::LocalSeat>>,
 ) {
     if click.event().event.button != PointerButton::Primary
@@ -268,8 +268,7 @@ pub fn on_advance_click(
         return;
     };
     if !state.enabled {
-        message.text.clone_from(&state.tooltip);
-        message.since = time.elapsed_secs_f64();
+        message.set(state.tooltip.clone(), time.secs());
         return;
     }
     let seq = pending.push_local(Command::AdvanceAge {

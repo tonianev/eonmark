@@ -29,7 +29,7 @@ pub const ZOOM_DEFAULT: f32 = 35.0;
 pub const EDGE_SCROLL_MARGIN_PX: f32 = 12.0;
 
 /// Keyboard and edge-scroll pan speed as a fraction of zoom distance per second.
-const PAN_SPEED_PER_ZOOM: f32 = 0.7;
+pub const PAN_SPEED_PER_ZOOM: f32 = 0.7;
 /// Trackpad pan: world metres per logical pixel, per metre of zoom, over the window height.
 const TRACKPAD_PAN_GAIN: f32 = 1.6;
 /// Wheel zoom: exponential step per scroll line.
@@ -163,9 +163,9 @@ fn spawn_camera_and_sun(mut commands: Commands) {
     ));
 }
 
-fn pan_keyboard(
+pub fn pan_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut cameras: Query<&mut RtsCamera>,
 ) {
     let mut dir = Vec3::ZERO;
@@ -193,7 +193,7 @@ fn pan_keyboard(
 
 fn pan_edge_scroll(
     windows: Query<&Window, With<PrimaryWindow>>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut cameras: Query<&mut RtsCamera>,
 ) {
     let Ok(window) = windows.single() else {
@@ -263,7 +263,7 @@ fn pinch_zoom(mut pinches: MessageReader<PinchGesture>, mut cameras: Query<&mut 
     }
 }
 
-fn apply_camera(time: Res<Time>, mut cameras: Query<(&mut RtsCamera, &mut Transform)>) {
+fn apply_camera(time: Res<Time<Real>>, mut cameras: Query<(&mut RtsCamera, &mut Transform)>) {
     let blend = 1.0 - (-ZOOM_SMOOTHING * time.delta_secs()).exp();
     for (mut cam, mut transform) in &mut cameras {
         cam.zoom = cam.zoom.lerp(cam.zoom_target, blend);

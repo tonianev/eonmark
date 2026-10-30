@@ -263,6 +263,19 @@ pub fn wgpu_settings(disable: Option<&str>) -> Result<Option<WgpuSettings>, Stri
     }))
 }
 
+/// The starting [`crate::speed::GameSpeed`] of a windowed session (M6):
+/// `--speed` (x1 by default), `--pause-at-tick` and `--pause-seconds`.
+pub fn speed_start(cli: &Cli) -> crate::speed::GameSpeed {
+    let mut speed = crate::speed::GameSpeed::at(
+        cli.speed
+            .and_then(crate::speed::Speed::from_factor)
+            .unwrap_or_default(),
+    );
+    speed.pause_at = cli.pause_at_tick;
+    speed.pause_for = cli.pause_seconds.map(Duration::from_secs_f64);
+    speed
+}
+
 /// `--exit-after-seconds`: wall-clock deadline for smoke tests.
 #[derive(Resource)]
 struct ExitAfter(Duration);
@@ -448,6 +461,11 @@ pub fn run(cli: &Cli) -> AppExit {
             .recording(Some(replay_path))
             .hash_every(cli.hash_every()),
     );
+    // M6: game speed and the active pause (x1/x2/x4, Space, - and =).
+    app.add_plugins(crate::speed::SpeedPlugin {
+        start: speed_start(cli),
+        ui: true,
+    });
     app.add_plugins((
         camera::CameraPlugin,
         ground::GroundPlugin,

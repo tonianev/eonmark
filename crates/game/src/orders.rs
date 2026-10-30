@@ -464,7 +464,7 @@ pub fn issue_pointer_orders(
     mut attacks: ResMut<IssuedAttacks>,
     ring_assets: Option<Res<RingAssets>>,
     models: Option<Res<ModelLibrary>>,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     mut commands: Commands,
 ) {
     let right = buttons.just_released(MouseButton::Right);
@@ -526,9 +526,9 @@ pub fn issue_pointer_orders(
         && let Some(assets) = ring_assets.as_deref()
     {
         if attack {
-            spawn_attack_marker(&mut commands, assets, at, time.elapsed_secs());
+            spawn_attack_marker(&mut commands, assets, at, time.secs_f32());
         } else {
-            spawn_move_marker(&mut commands, assets, at, time.elapsed_secs());
+            spawn_move_marker(&mut commands, assets, at, time.secs_f32());
         }
     }
 }

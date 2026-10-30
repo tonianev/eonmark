@@ -147,7 +147,9 @@ pub struct PopReadout;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct MessageLine;
 
-/// What the message line shows and since when (`Time::elapsed_secs_f64`).
+/// What the message line shows and since when (M6: seconds on the
+/// `speed::UiClock`, which stops while paused, so a message shown before a
+/// pause is still shown after it; [`MessageState::set`] is the writer).
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
 pub struct MessageState {
     /// The message; empty when nothing is shown.
@@ -159,6 +161,14 @@ pub struct MessageState {
     /// `TownAnnexed` remove): a reset carries only the Town, and its
     /// "Annexation stopped" is for the attacker too (M5a).
     pub annexing: BTreeMap<BuildingId, PlayerId>,
+}
+
+impl MessageState {
+    /// Show `text` from `now` (`speed::UiNow::secs`).
+    pub fn set(&mut self, text: String, now: f64) {
+        self.text = text;
+        self.since = now;
+    }
 }
 
 /// The snake-case key of `reason` in the `reject` table of the strings
@@ -504,7 +514,7 @@ pub fn collect_messages(
     sim: NonSend<SimHandle>,
     strings: Option<Res<UiStrings>>,
     attacks: Option<Res<IssuedAttacks>>,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     mut state: ResMut<MessageState>,
 ) {
     let Some(strings) = strings else {
@@ -546,10 +556,9 @@ pub fn collect_messages(
                 text
             }
         };
-        state.text = text;
-        state.since = time.elapsed_secs_f64();
+        state.set(text, time.secs());
     }
-    if !state.text.is_empty() && time.elapsed_secs_f64() - state.since > MESSAGE_SECONDS {
+    if !state.text.is_empty() && time.secs() - state.since > MESSAGE_SECONDS {
         state.text.clear();
     }
 }

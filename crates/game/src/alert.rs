@@ -4,7 +4,7 @@
 //! "Lumber Yard lost"): a `SimEvent::Hit` whose target is the local
 //! player's and whose attacker is another player's shows "Yeomen under
 //! attack" (a civilian unit), "Army under attack" (any other unit) or
-//! "<Building> under attack" on the message line, at most once per
+//! "`<Building>` under attack" on the message line, at most once per
 //! [`ALERT_THROTTLE_SECS`] of `speed::UiClock` per [`ALERT_AREA_TILES`]
 //! square area, with a [`PING_SECS`] amber ping on the minimap at the hit.
 //! Backspace centres the camera on the last alert.
@@ -268,9 +268,9 @@ pub fn jump_to_alert(
     }
 }
 
-/// The top bar's "vs <Difficulty> · <style>" for `setup` as `local` sees it
+/// The top bar's "vs `<Difficulty>` · `<style>`" for `setup` as `local` sees it
 /// before the outcome: a Random style is "?" (owner decision 6), which the
-/// game-over screen reveals. Spectating: "Spectating <a> vs <b>".
+/// game-over screen reveals. Spectating: "Spectating `<a>` vs `<b>`".
 pub fn opponent_label(
     setup: &sim::MatchSetup,
     rules: &rules::Rules,

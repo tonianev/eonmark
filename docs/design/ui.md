@@ -93,6 +93,16 @@ M5a adds the annexation events, for a Town the local player owns or annexes (a f
 | `TownAnnexed` to the local player | "Town annexed" (the text this table's message line row has named since M2) |
 | `TownAnnexed` from the local player | "Town was lost" |
 
+M6 adds the under-attack alert (`alert.rs`, game-design note 8), for a `Hit` on the local player's unit or building by another player's:
+
+| Event | Notice |
+| --- | --- |
+| `Hit` on a civilian unit (Yeoman, Scribe) of the local player | "Yeomen under attack" |
+| `Hit` on any other unit of the local player | "Army under attack" |
+| `Hit` on a building of the local player | "Lumber Yard under attack" (the building's name) |
+
+At most one alert per 16 x 16-tile area per 20 s of `UiClock`, each with a 3 s amber ping on the minimap at the hit; Backspace centres the camera on the last one (`under_attack_notice_is_throttled_per_area_and_names_the_target`).
+
 A reset names only the Town, so the message line remembers the attacker of each timer it heard start (`MessageState::annexing`) to tell the attacker too (`annexation_notices_name_the_owner_and_the_attacker`). `MatchDecided` gets no notice: the outcome overlay shows it.
 
 The building's name comes from the event's own `owner` and `kind` (M4a), since the building is gone by the time the event is read; another player's research and age stay silent. `economy_hud::HUD_KEYS` lists every `hud` string key the game reads with the placeholders it fills, and `every_hud_key_the_game_reads_exists_with_whitelisted_placeholders` holds `en.ron` to it (each key exists, its value uses only those placeholders, all on the strings file's whitelist) and checks that every literal key in the game's sources is listed.
@@ -111,15 +121,35 @@ M5a (`outcome.rs` and `sim_driver.rs`, done): the minimal end of a match; the fu
 
 The acceptance run: `just m5a-checks` (`scripts/m5a_checks.sh`, background mode) verifies the golden, runs `--scenario capture_seat` with a screenshot at the deciding tick, and requires the `outcome:` line's hash to equal both `capture_seat.hash` and `sim-cli verify` of the game's own replay ([../PLAYTEST.md](../PLAYTEST.md#automated-proxies-m5a), [../screenshots/m5a-victory-overlay.png](../screenshots/m5a-victory-overlay.png)).
 
+## Game-over screen, speed, clocks and alerts (M6)
+
+**Game-over screen** (`outcome.rs`, `GameOverPlugin`; the M5a overlay grown, owner decision 8). Over a darker scrim (`palette::GAME_OVER_SCRIM`), at 1280 x 720 logical with nothing under 16 px (Inter, tabular figures; `game_over_panel_fits_1280x720_with_inter_tabular_figures`): the M5a lines (the title at 40 px, the reason, time and tick, final hash, replay name), then a table with "You" and the bot's "Standard · Rush" (Blue and Red with their seats when spectating): units trained, units lost by kind, Towns taken / lost, ages reached with their times, minutes at the Yield Cap, peak army, the bot's disclosed bonus ("+1150 (20% of income), 20 Grain, 20 Lumber, 10 Ore every 25 s") and its waves · raids · retreats; then the match facts: Decisive or "Tiebreak, territory 51% to 49%", enemy first on your land, your lowest Town ("annexed" once one was taken), first contact. A Random style is revealed here. Buttons: Play Again (the same difficulty and style at a fresh seed, Random drawn again), Main Menu, Quit. The numbers are `ai::match_log::MatchReport`'s from the live `MatchStats`, the ones `sim-cli match-log` re-derives from the replay (`match_log_equals_sim_cli_match_log`); at the outcome the game prints the `match_log:` line, that row with today's date, `-` for the commit and `to verify 0x<hash>` in the Verify cell, plus `speed x1=..s x2=..s x4=..s paused_s=.. orders_while_paused=..`. The sparkline is deferred to a help-wanted issue. Picture: [../screenshots/m6-game-over.png](../screenshots/m6-game-over.png).
+
+**Match lifecycle** (`match_scope.rs`). New Game, Play Again and Main Menu rebuild the match in place in the same window (OBS window capture survives): `teardown_match` finishes a live recorder, clears the sim's messages, despawns every `MatchScoped` entity (the marker is a required component of units, buildings, banners, Seat flags, bars, rings, markers, rubble and alert pings) and resets the per-match resources registered with `init_match_resource`; `rebuild_match` inserts the new `SimHandle`, input, pending queue, seat and recording path, unpauses (keeping the speed) and frames the camera on the local units. Play Again prints its `match:` line itself (no state transition); Main Menu enters `Menu` with a fresh unstarted match.
+
+**Top bar.** The speed chip (x1, x2, amber x4), "vs Standard · ?" (the opponent; a Random style is "?" until the game-over screen, owner decision 6; "Spectating Easy · Boom vs Standard · Tower" when spectating), and from 35:00 the tiebreak race "Tiebreak 45:00 · You 51% · Bot 49%" (`alert::tiebreak_text`, territory shares sampled once a second).
+
+**Clocks** (`speed.rs`). Every reader of time names its clock:
+
+| Reader | Clock | Why |
+| --- | --- | --- |
+| camera pan, zoom, `apply_camera` (`camera.rs`); the double-click window (`selection.rs`) | `Time<Real>` | works while paused and at x4 at the x1 rate (`camera_pans_while_paused_at_the_x1_rate`) |
+| the message line (`MessageState::set`, written by `placement.rs`, `command_card.rs`, `age_hud.rs`, `economy_hud.rs`, `alert.rs`), order markers (`orders.rs`, `selection::expire_move_markers`), alert pings | `speed::UiClock` through `speed::UiNow` | real seconds that stop while paused: a message shown before a pause is still shown after it (`a_message_shown_before_a_5s_pause_is_still_shown_after`) |
+| gait bob (`present::sync_transforms`), rubble expiry (`buildings.rs`) | `Time<Virtual>` | world presentation: runs x4, freezes when paused |
+| combat FX, health bars, markers, interpolation | `Time<Fixed>` | game speed, frozen when paused (unchanged) |
+| frame stats, background mode, models, menus, smoke-test timers | `Time<Real>` | unchanged |
+
+**Speed** (`speed.rs`). `GameSpeed` sets `Time<Virtual>`'s relative speed and pause in `First`, before the time system; ticks per frame are `20 x speed x min(frame, 250 ms)`, capped at 8 (`DriverStats::dropped_ticks` counts the rest; a 250 ms hitch at x4 asks for 20, runs 8, drops 12). `step_sim` holds while paused and discards the fixed overstep, so `--pause-at-tick` lands exactly and the unpause does not burst. The replay is unaffected: a match at x4 with pauses records the same replay as at x1 (`x4_with_a_pause_records_the_x1_replay`, ROADMAP M6 line 5). Lines: `speed: x4 tick=<n>`, `pause: on tick=<n>`, `pause: off tick=<n> after_s=<s>`, and at exit `driver: ticks_frame_max=.. dropped_ticks=.. x1_s=.. x2_s=.. x4_s=.. paused_s=.. orders_while_paused=..`.
+
 ## Menus
 
 | Menu | Entered by | Contents |
 | --- | --- | --- |
 | Main menu | app start, Quit to menu | New Game (difficulty Easy/Standard/Hard, seed, faction: Freeholders), Quit. The seed field defaults to a fresh value and accepts a typed number so a match can be replayed by hand. |
 | Pause menu | Esc during a match | Resume, UI scale, volume, Borderless fullscreen toggle (`WindowMode::BorderlessFullscreen` with `Window::borderless_game`; exclusive fullscreen is never used), Quit to menu. The sim does not tick while this menu is open. |
-| Game over | `Sim::outcome()` returns `Some` | Victory or Defeat, decisive or tiebreak, duration, units lost by kind, Towns annexed, ages reached, minutes spent at the Yield Cap, the replay's final hash and file name, Play Again (same settings, new seed), Main menu. M6; M5a ships the minimal overlay below, without the statistics and buttons. |
+| Game over | `Sim::outcome()` returns `Some` | Victory or Defeat, decisive or tiebreak, duration, units lost by kind, Towns annexed, ages reached, minutes spent at the Yield Cap, the replay's final hash and file name, Play Again (same settings, new seed), Main menu. M6 (slice 3, below); M5a shipped the minimal overlay above. |
 
-States: `Menu`, `Skirmish`, `Paused`, `GameOver`, arriving with the menus (M5b New Game, M6 pause and game over); at M2 the app started straight into a skirmish (or the `--scenario`) and had no states. M5a marks the end of a match with the `sim_driver::MatchOver` resource instead of a state. M5b adds `menu::AppState` with `Menu` and `Skirmish` only (`crates/game/src/menu/mod.rs`, below); `Paused` and `GameOver` come with M6's menus. Pause through the menu and pause through Space are the same sim state; the menu adds the overlay.
+States: `Menu` and `Skirmish` only (`menu::AppState`, M5b). M6 adds no state (it amends the earlier plan of `Paused` and `GameOver` states): the end of a match stays the `sim_driver::MatchOver` resource, which the game-over screen shows, and the pause is `speed::GameSpeed::paused`, a `PauseReason` of `Key` (Space, the active pause: orders, camera and selection work) or `Menu` (M7's Esc pause menu, which also gates `hud::WorldInputSet` through `speed::world_input_allowed`). Pause through the menu and pause through Space are the same sim state; the menu adds the overlay. At M2 the app started straight into a skirmish (or the `--scenario`) and had no states.
 
 ### Main menu (M5b)
 
@@ -177,10 +207,11 @@ Keys the design fixes are given as such. Keys marked "proposed" are not fixed by
 | Set rally point | right click with a training building selected | M3b |
 | Infinite queue toggle | button on the command card; key proposed Q | Not in M4b (owner decision 9, 2026-10-22, ROADMAP M4b Notes): help-wanted issue #42 (also needs-design), since it needs a repeat flag on the sim's training queue, a `Command` and a hash change |
 | Select next idle Yeoman | period (.): the next idle builder by id, wrapping, and the camera centres on it (`selection::select_idle_builder`; idle as the sim's idle seeking reads it: no job, no order) | M3b |
-| Pause | Space | M6 |
-| Game speed x1 / x2 / x4 | proposed minus and equals to step down and up | M6 |
+| Pause | Space (`speed::speed_keys`): the active pause, in every build (owner decision 7): the camera, selection, orders and the command card work, orders queue in `PendingCommands` and go out with the first tick after it; a centred "PAUSED" banner on a light scrim that lets every click through. Active in the running match before its outcome, spectating included | M6 |
+| Game speed x1 / x2 / x4 | minus and equals (and the numpad's) step down and up, saturating; a click on the top bar's speed chip cycles x1, x2, x4 (amber at x4); `--speed <1|2|4>` starts at it. The speed persists across Play Again | M6 |
+| Jump to the last alert | Backspace (`alert::jump_to_alert`) centres the camera on the last under-attack alert | M6 |
 | Clear selection, cancel attack-move | Esc (`selection::clear_selection_on_escape`, `orders::order_mode_keys`) | M2 |
-| Pause menu | Esc (the same key once the menu exists; it then also clears the selection) | M6 |
+| Pause menu | Esc (the same key once the menu exists; it then also clears the selection) | M7 (ROADMAP M7; M6 ships the Space pause only) |
 | Camera pan | W A S D, arrow keys, edge scroll, two-finger trackpad scroll (`MouseScrollUnit::Pixel`) (`camera.rs`; S and A are shared with Stop and attack-move, see Open questions) | M2 |
 | Camera zoom | mouse wheel (`MouseScrollUnit::Line`), trackpad pinch (`PinchGesture`, Bevy `gestures` feature) | M2 |
 | Show or hide the debug grid (the 8-tile gizmo grid) | G (`ground::toggle_grid`, a view setting that works while spectating and after the outcome); the grid is off by default, `--grid` starts with it on (art-pass owner decision 11: no debug furniture on the stream) | art pass |

@@ -125,6 +125,17 @@ ROADMAP M5b line 4 is an [owner] line ("From the window: New Game starts a match
 | `just m5b-checks` (local only, like `just m5a-checks`) | `just m5b-checks out` (`scripts/m5b_checks.sh target/ci/eonmark target/release/sim-cli out`; on Linux without a display it wraps every game run, and `scripts/m2_checks.sh`, in `xvfb-run` on lavapipe itself; `M5B_OVERLAY_SECONDS=90` and `M5B_CLICK_SECONDS=45` by default) | 1. the `m5_first_match` golden's `sim-cli verify`; 2. `--spectate --seed 1 --fast-forward-to <T-400> --screenshot-at <T>:m5b-overlay.png` (the Standard bot against itself, m5_first_match's setup), its `fast_forward:` and `outcome:` lines against the golden's tick and hash, and `sim-cli verify` of its own replay; 3. a plain launch for 6 s with `--screenshot m5b-menu.png`: it stays on the menu and writes no replay; 4. a plain launch with `--seed 7 --new-game-after-seconds 3`: the synthetic mouse clicks the real New Game button, and the replay verifies with the Standard bot rebuilt from its header; 5. `scripts/m2_checks.sh` checks 3 and 4 with `--skip-menu` on the same binaries; 6. no `eonmark` or `Xvfb` process left | the script prints `m5b_checks: ok`: every step `PASS`, no ERROR line, `fast_forward: tick=<T-400>`, `outcome: victory player=0 decisive=true reason=seat_captured tick=<T> hash=<m5_first_match.hash>` and `OK final_hash=<m5_first_match.hash> ticks=<T>` for the game's replay (`<T>` and the hash are read from the golden), no `match:`/`replay:` line and an empty replay directory for the menu run, `new-game: clicked at`, `match: new game vs standard personality=standard seed=7 map=plains_1v1` and `OK` with more than 600 ticks for the New Game run | 2026-10-26, Linux VM, lavapipe, slice 4 head (3 min 21 s for the whole script): every step `PASS`; `fast_forward: tick=25612 wall_s=1.49`; `outcome: victory player=0 decisive=true reason=seat_captured tick=26012 hash=0x3d2552033d51b4a2` and `OK final_hash=0x3d2552033d51b4a2 ticks=26012` for the game's replay; the menu run wrote nothing; `new-game: clicked at (566, 455) after 4.00 s`, `match: new game vs standard personality=standard seed=7 map=plains_1v1`, `OK final_hash=0x461acceffe99d3bc ticks=822` for the New Game replay; m2_checks `PASS check 3` and `PASS check 4`. The pictures are [screenshots/m5b-overlay.png](screenshots/m5b-overlay.png) and [screenshots/m5b-menu.png](screenshots/m5b-menu.png). Re-run at the M5b close (slice 5, at `0aea6b7`, the code the close ships; 164 s): every step `PASS`, ending `m5b_checks: ok, m5_first_match decided at tick 26012 with hash 0x3d2552033d51b4a2; menu and New Game proxies pass`; `fast_forward: tick=25612 wall_s=1.58`; `outcome: victory player=0 decisive=true reason=seat_captured tick=26012 hash=0x3d2552033d51b4a2` and `OK final_hash=0x3d2552033d51b4a2 ticks=26012` for the game's replay; the menu run printed no `match:` or `replay:` line and wrote nothing; `new-game: clicked at (566, 455) after 3.95 s`, `match: new game vs standard personality=standard seed=7 map=plains_1v1`, `OK final_hash=0x9e3858e14223ca5c ticks=810`; `PASS check 3: clean exit: OK final_hash=0xf91a4944a42c051c ticks=101` and `PASS check 4: kill -9: truncated replay verifies: OK final_hash=0x771cc5d91db392cd ticks=120`; `pgrep -x eonmark` and `pgrep -x Xvfb` empty. Its overlay picture shows "Victory", "The Seat was captured", "21:40, tick 26012" and "Final hash 0x3d2552033d51b4a2", as the committed one does |
 | Game tests (`cargo test -p game`, in CI) | `cargo test -p game --profile ci` | `menu::tests::{new_game_click_enters_skirmish_and_the_sim_starts_stepping, the_sim_does_not_step_and_no_replay_is_written_while_the_menu_is_open, quit_writes_app_exit, match_lines_name_the_bots_the_seed_and_the_map}`; `app::tests::{a_plain_launch_builds_a_match_against_the_standard_bot_on_plains_1v1, scenarios_skip_menu_and_spectate_start_in_skirmish}`; `sim_driver::tests::{a_match_vs_the_standard_bot_records_a_replay_that_verifies_to_the_outcome_hash, a_replay_recorded_after_a_fast_forward_verifies_from_tick_0, fast_forward_drains_events_and_refuses_a_target_past_the_outcome, local_commands_for_an_ai_slot_are_dropped, sim_plugin_drops_local_commands_for_an_ai_slot}`; `hud::tests::a_spectator_has_no_world_input_card_or_advance`; `outcome::tests::defeat_by_the_bot_texts`; `cli::tests::m5b_flags_parse_and_fast_forward_needs_spectate` | all pass | 2026-10-26: `174 passed` (lib), `1 passed; 1 ignored` (headless_replay). Re-run after the slice 4 and 5 review fixes (the Stop button gated for a spectator, the plain launch's fresh seed asserted, the drop tested through `SimPlugin`): `175 passed` (lib), `1 passed; 1 ignored` (headless_replay) |
 
+## Automated proxies (M6)
+
+ROADMAP M6 line 5 ("Game speed x4 and pause work and the replay verifies with the same final hash as the x1 replay of the same scripted input (`--scenario scripted_match --speed 4`)") and line 6's automated proxy (the 20-game bot run of line 1 plus a `ci_testing` screenshot of the game-over stats screen; `--screenshot-at` stands in for `ci_testing`, M6 owner decision 9). Line 6 itself is the owner's fun gate ([Owner's Mac checklist (M6)](#owners-mac-checklist-m6)); no proxy ticks it.
+
+| Proxy | Command | Covers | Pass when | Observed |
+|---|---|---|---|---|
+| Game tests (`cargo test -p game`, in CI) | `cargo test -p game --profile ci` | `speed::tests` (x1, x2 and x4 step 1, 2 and 4 ticks per 50 ms; `--pause-at-tick` lands exactly and the unpause does not burst; the 8-tick cap at x4 with 250 ms frames drops 12; Space, `-` and `=`; keys ignored in the menu and after the outcome; the camera pans while paused at the x1 rate; real, virtual and UI clocks; a message survives a 5 s pause; orders given while paused apply after it; `x4_with_a_pause_records_the_x1_replay`), `match_scope::tests`, `outcome::tests` (the game-over table, the 1280 x 720 fit, `match_log_equals_sim_cli_match_log`, the buttons), `alert::tests`, `menu::new_game::tests`, `cli::tests::m6_speed_pause_play_again_and_seat_flags_parse` | all pass | 2026-10-30, slice 3: 282 game lib tests pass |
+| Golden (`cargo test -p ai`, CI verify and hash parity) | `cargo test -p ai golden_scripted_match scripted_match_stream_is_never_rejected`; `sim-cli verify crates/sim/tests/fixtures/scripted_match.eonreplay` | the x1 replay of the scripted input, recorded through `sim-cli record --scenario scripted_match` (`Scenario::Bot`) | `OK final_hash=0x0680794c15a1f7dd ticks=1203` on both operating systems | 2026-10-30: `OK final_hash=0x0680794c15a1f7dd ticks=1203` |
+| CI `game-linux`, x4 with a pause | `eonmark --scenario scripted_match --speed 4 --pause-at-tick 600 --pause-seconds 3 --background --exit-after-seconds 240` under Xvfb on lavapipe, then `--headless-run` of its replay | line 5 in a window, in CI | `pause: on tick=600`, `pause: off tick=600 after_s=...`, `outcome: ... tick=1203 hash=<scripted_match.hash>` and `tick=1203 hash=<the same>` | 2026-10-30 locally: `pause: on tick=600`, `pause: off tick=600 after_s=3.2`, `outcome: victory player=1 decisive=true reason=surrender tick=1203 hash=0x0680794c15a1f7dd`, the replay `OK final_hash=0x0680794c15a1f7dd ticks=1203` |
+| `just m6-checks` (local only, like `just m5b-checks`) | `M6_SECONDS=360 just m6-checks out` (`scripts/m6_checks.sh target/ci/eonmark target/release/sim-cli out`; every run at 1280x720 in background mode, under `xvfb-run` on lavapipe without a display) | 1. line 5: x1 and x4-with-pause runs of `scripted_match`, both `outcome:` lines and both replays against the golden, the paused screenshot; 2. the New Game selector (Hard, rush, seed 42): the menu screenshot, `match: new game vs hard personality=rush seed=42` and the replay's header via `sim-cli match-log`; 3. the game-over screen from the human seat at play-bots' tick T (seed 3, Standard rush against a no-input human), its `match_log:` line and its replay; 4. Play Again: a second `match:` line and replay, both verifying; 5. no `eonmark` or `Xvfb` left | `m6_checks: ok`, every step `PASS` | 2026-10-30, Linux VM, lavapipe, slice 3 head (13 min 16 s): every step `PASS`, `m6_checks: ok`. x1: `outcome: victory player=1 decisive=true reason=surrender tick=1203 hash=0x0680794c15a1f7dd`, `driver: ticks_frame_max=5 dropped_ticks=0 x1_s=61.9 ...`, replay `OK final_hash=0x0680794c15a1f7dd ticks=1203`. x4: `pause: on tick=600`, `pause: off tick=600 after_s=3.3`, the same `outcome:` line, `driver: ticks_frame_max=8 dropped_ticks=1693 x1_s=0.0 x2_s=0.0 x4_s=39.4 paused_s=3.6 orders_while_paused=0` (lavapipe draws 2-3 frames a second, so the 8-tick cap binds; x4 throughput is the headless rate test's and the Mac's), replay `OK final_hash=0x0680794c15a1f7dd ticks=1203`. Selector: `match: new game vs hard personality=rush seed=42 map=plains_1v1`, match-log `| 42 | Hard | rush | 31 | ... | OK 0x6910f730cb22ff09 |`. Game over: `fast_forward: tick=14744`, `outcome: victory player=1 decisive=true reason=seat_captured tick=15144 hash=0xe6f3c181c653ecd7` (play-bots' T is 15144), `match_log: \| 2026-10-30 \| - \| 3 \| Standard \| rush \| 31 \| 12.6 \| loss decisive \| y 5:08 \| y annexed \| n \| \| \| 20261030-223943-3.eonreplay \| to verify 0xe6f3c181c653ecd7 \| speed x1=22s ...`, replay `OK final_hash=0xe6f3c181c653ecd7 ticks=15144`. Play Again: `play-again: pressed after 2.12 s`, `match: new game vs standard personality=rush seed=140397499 map=plains_1v1`, its replay `OK final_hash=0xbb361869e9db68dd ticks=1253`. Pictures: [screenshots/m6-game-over.png](screenshots/m6-game-over.png), [screenshots/m6-new-game.png](screenshots/m6-new-game.png), [screenshots/m6-paused.png](screenshots/m6-paused.png) |
+
 ## Automated proxies (art pass)
 
 The art pass's acceptance list is in the ROADMAP's "Art pass (pre-stream)" section (AP1 to AP10). Its local proxies are two scripts, run on 2026-10-28 on the 4-vCPU Linux VM under Xvfb with Mesa's lavapipe (the `ci` profile binary in background mode, `target/release/sim-cli` for `verify`), not on the dev Mac; frame rates there measure software rendering and can neither pass nor fail AP5. CI's game-linux job renders `art_bench` too and gates every render smoke's draw calls under 500 (`scripts/check_draws.sh`).
@@ -195,7 +206,8 @@ At sign-off, look hard at two things the agent's check flagged:
 ROADMAP M5b line 4, in the one batched Mac session (M5b owner decision 9, with the M3b, M4a, M4b and M5a rows below). Run from `main` (or the PR branch) at the repository root and paste each output into the PR.
 
 ```bash
-# 1. The main menu: it shows "Skirmish against the Standard bot on plains_1v1" and a seed.
+# 1. The main menu: it shows "Skirmish on plains_1v1" and a seed ("Skirmish against the
+#    Standard bot on plains_1v1" at M5b; since M6 it is the New Game selector too).
 cargo run --release -p game
 # 2. Click New Game and play to the overlay in one sitting (note the result, the reason,
 #    the time, the final hash and the replay's name on the overlay; stdout has the
@@ -384,22 +396,59 @@ Captured on 2026-10-28 by `just art-checks` on Linux under Xvfb with Mesa's lava
 
 Play against the Standard bot from New Game to the game-over screen. One row per match. Keep the replay file; its name is the seed and timestamp.
 
-| Date | Commit | Seed | Difficulty | Duration (min) | Outcome | AI reached my borders | Town below 50% HP | Cap readout amber | Fun (1-5) | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|
-| | | | Standard | | decisive / tiebreak | y / n | y / n | y / n | | |
-| | | | Standard | | decisive / tiebreak | y / n | y / n | y / n | | |
-| | | | Standard | | decisive / tiebreak | y / n | y / n | y / n | | |
+Since M6 slice 3 the row is printed for you: the game prints a `match_log:` line at the outcome (with `-` for the commit and `to verify 0x<hash>` in the Verify cell, then the time at each speed and paused), and `just match-log <replay>` prints the same row from the replay with today's date, the commit and `OK 0x<hash>` once the replay verifies. Paste that row, then fill Fun and Notes. Notes carries what the row has no cell for: the style you guessed before the reveal (`Guess: boom`), the bot's disclosed bonus from the game-over screen (`bonus +2350 (14%)`), the speed and pause times from the `match_log:` line (`x1 27m, paused 2m, 0 orders while paused`), and the tuning iteration (`iteration 0`).
+
+| Date | Commit | Seed | Difficulty | Style | rules_version | Duration (min) | Outcome | AI reached my borders | Town below 50% HP | Cap readout amber (min) | Fun (1-5) | Notes | Replay | Verify |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| | | | Standard | | | | win / loss decisive / tiebreak | y m:ss / n | y NN% / y annexed / n NN% | y N.N / n | | Guess: ; bonus ; speed ; iteration 0 | | OK 0x... |
+| | | | Standard | | | | win / loss decisive / tiebreak | y m:ss / n | y NN% / y annexed / n NN% | y N.N / n | | Guess: ; bonus ; speed ; iteration 0 | | OK 0x... |
+| | | | Standard | | | | win / loss decisive / tiebreak | y m:ss / n | y NN% / y annexed / n NN% | y N.N / n | | Guess: ; bonus ; speed ; iteration 0 | | OK 0x... |
 
 Column meanings:
 
 | Column | Meaning |
 |---|---|
-| Outcome | `decisive` if the match ended by capital capture or all Towns lost; `tiebreak` if the 45-minute territory tiebreak ended it. Add `win` or `loss`. |
-| AI reached my borders | The bot's army crossed into tiles I owned at least once |
-| Town below 50% HP | Any of my Towns dropped below half hit points, or was annexed |
-| Cap readout amber | The Yield Cap indicator in the resource bar turned amber at least once |
+| Style | The bot's personality, revealed on the game-over screen (`rush`, `boom`, `tower`; `standard` is Balanced) |
+| rules_version | From the replay's header (`data/rules/rules.ron` when it was recorded) |
+| Outcome | `decisive` if the match ended by capital capture or all Towns lost; `tiebreak` if the 45-minute territory tiebreak ended it. `win` or `loss` first. |
+| AI reached my borders | The bot's army crossed into tiles I owned at least once; `y` with the match time it first did ("Enemy first on your land" on the game-over screen) |
+| Town below 50% HP | Any of my Towns dropped below half hit points, or was annexed; the lowest HP ("Your lowest Town") |
+| Cap readout amber (min) | The Yield Cap indicator in the resource bar turned amber at least once; the minutes it was amber ("Income capped"), read per match |
+| Replay, Verify | The replay's file name and `OK 0x<final hash>` from `sim-cli verify` (`just match-log` fills both) |
 | Fun | Owner's rating, 1 to 5, honest |
 | Notes | What was tense, what was dull, which number felt wrong and in which RON file |
+
+## Owner's Mac checklist (M6)
+
+ROADMAP M6 line 6, the fun gate (owner decisions 10 and 11): three blind matches against Standard, streamed live as the first M6 stream after slice 3 merges, one sitting, at x1, with the [STREAMING.md](STREAMING.md) pre-flight first. The three seeds below each resolve Random to a different style at `rules_version` 31 (one rush, one boom, one tower, shuffled; `play-bots --personality-b random --seeds <n>` names it, so do not run that before playing). Use each once. If `rules_version` moves before the stream, ask for a new list.
+
+| Match | Seed |
+|---|---|
+| 1 | 112 |
+| 2 | 107 |
+| 3 | 110 |
+
+```bash
+# 1. Build once.
+cargo build --release -p game -p sim-cli
+# 2. New Game: Difficulty Standard, Opponent style Random, type the match's seed, New Game.
+#    The top bar shows "vs Standard · ?". Play at x1 to the game-over screen in one sitting.
+#    Space pauses for a break (the world stays visible); avoid giving orders while paused.
+cargo run --release -p game -- --window-size 1280x720 --draw-stats
+# 3. Before reading the reveal on the game-over screen, write your guess of the style in Notes.
+# 4. Paste the `match_log:` line from stdout into the log above, or the verified row:
+just match-log "$(ls -t ~/Library/Application\ Support/com.tonianev.Eonmark/replays/*.eonreplay | head -n 1)"
+#    Add Fun (1-5) and Notes (guess, bonus, speed and paused times, iteration).
+# 5. Verify the replay (the row's Verify cell is OK 0x<the screen's final hash>).
+# 6. Play Again keeps the window but draws a fresh seed: use Main Menu and type the next seed.
+#    Repeat for matches 2 and 3.
+# 7. x4 throughput on Metal (owner decision 9), off air: --scenario scripted_match --speed 4,
+#    window focused; the exit `driver:` line should show about 80 ticks a second
+#    (x4_s with dropped_ticks=0), and the outcome line must end hash=<scripted_match.hash>.
+cargo run --release -p game -- --scenario scripted_match --speed 4 --window-size 1280x720 --exit-after-seconds 40
+```
+
+What to look for: the game-over screen reads at stream size (no text under 16 px, the bot's bonus disclosed with its share), the under-attack alert names raids on your Yeomen with a minimap ping, the tiebreak race appears from 35:00 if a match goes that long, and the `match_log:` line is complete. Every failed criterion of the thresholds below gets a `rules.ron` tuning commit and three new matches (decision 11).
 
 ## Fun gate thresholds (M6)
 

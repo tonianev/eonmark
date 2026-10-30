@@ -1,18 +1,27 @@
 # Streaming Eonmark
 
-How the owner streams a match from the dev Mac: the commands, the settings that bite, OBS, a five-minute pre-flight and what to keep afterwards. Every flag, path and number below was checked against the code at the art pass's close (2026-10-28); `eonmark --help` prints the flags.
+How the owner streams a match from the dev Mac: the commands, the settings that bite, OBS, a five-minute pre-flight and what to keep afterwards. Every flag, path and number below was checked against the code at the art pass's close (2026-10-28), and the speed, pause, New Game and game-over parts at M6 slice 3 (2026-10-30); `eonmark --help` prints the flags.
 
 ## Two stream formats
 
 | Format | Command | Notes |
 |---|---|---|
 | You against the Standard bot | `cargo run --release -p game -- --skip-menu --window-size 1280x720 --draw-stats` | `--skip-menu` starts the match at once. Without `--seed <n>` the seed comes from the wall clock; it is in the replay's file name (`<yyyymmdd-hhmmss>-<seed>.eonreplay`), which the outcome overlay shows. A seed does not reproduce a match you played: your orders are in the replay, not the seed. Since M6 `--difficulty <id>` (`easy`, `standard`, the default, or `hard`) and `--personality <id>` (default `standard`) choose the bot; every level receives a disclosed bonus bundle from 3:00 (`data/ai/difficulty/`, docs/design/ai.md), so say which level you play. |
-| Bot against bot (spectate) | `cargo run --release -p game -- --spectate --seed 1 --window-size 1280x720 --draw-stats` | Seed 1 is the `m5_first_match` setup: P0 takes P1's Seat at tick 38818, 32:20 on the overlay's clock (26012, 21:40, at the M5b close; 22832, 19:01, once M6 gave both Standard seats their level's bonus, before the slice-2 behaviours; 41889, 34:54, before the M6 retune; 52108, 43:25, at `rules_version` 30). You can select units and move the camera but give no orders. `--fast-forward-to 9000` skips the opening (7:30) before the window opens; it works only with `--spectate` and is refused if the match is decided by then. The replay is recorded from that tick and still verifies. |
+| Bot against bot (spectate) | `cargo run --release -p game -- --spectate --seed 1 --window-size 1280x720 --draw-stats` | Seed 1 is the `m5_first_match` setup: P0 takes P1's Seat at tick 38818, 32:20 on the overlay's clock (26012, 21:40, at the M5b close; 22832, 19:01, once M6 gave both Standard seats their level's bonus, before the slice-2 behaviours; 41889, 34:54, before the M6 retune; 52108, 43:25, at `rules_version` 30). You can select units and move the camera but give no orders. `--fast-forward-to 9000` skips the opening (7:30) before the window opens; it works with `--spectate` and (M6) with `--skip-menu` (you give no order before it), and is refused if the match is decided by then. The replay is recorded from that tick and still verifies. |
 
 - **Why 1280x720:** it is the logical size the art pass measures fps at (AP5 in the ROADMAP's "Art pass (pre-stream)"). On a Retina display it is 2560x1440 physical pixels, which OBS scales down to 1080p. A 1920x1080 window renders 3840x2160 physical pixels, 2.25 times as many, for nothing once OBS scales it to 1080p.
 - **`--draw-stats`** costs next to nothing and makes the game print its `frame_stats:` lines on exit (frame times, the window, draw calls); without it a plain match prints only the minimap's line.
 - **Framing:** the camera starts over your first units at 35 m, its default zoom; the wheel or a pinch zooms from 15 to 60 m. The art pass is judged at 40 m, and `--camera 24,64,40` opens there over P0's Seat (`--camera <x>,<y>,<zoom>`, a map tile and a zoom).
 - **Build:** a release build only. A `dev` build links Bevy dynamically and draws the egui dev panels over the game.
+
+## New Game, speed, pause and the end card (M6)
+
+- **New Game** (a plain launch, no `--skip-menu`): choose the difficulty (Easy, Standard, Hard; the caption under it discloses the bot's bonus, "+20 Grain, +20 Lumber, +10 Ore every 25 s from 3:00" for Standard), the opponent's style (Random, the default, draws Rush, Boom or Tower from the seed and shows "?" in the top bar until the game-over screen reveals it; Balanced, Rush, Boom and Tower are explicit) and the seed (type digits while the menu is open, Backspace deletes, New seed draws one). The menu also says "The bot knows where your Seat is". The logged matches are played at Standard, Random, x1.
+- **Speed:** `-` and `=` step x1, x2, x4 (the chip in the top bar shows it, amber at x4; a click cycles it); `--speed 2` starts at x2. Spectate at x2 or x4 through the build-up, x1 from first contact; play and log your own matches at x1. A replay is the same at any speed.
+- **Pause:** Space. The pause is active: the camera, selection and orders keep working (orders go out with the first tick after it), and a "PAUSED" banner over a light scrim leaves the world visible, a freeze frame for commentary. Avoid giving orders while paused in a logged match; the `match_log:` line counts them.
+- **Under attack:** "Yeomen under attack", "Army under attack" or "<Building> under attack" on the message line with an amber ping on the minimap; Backspace jumps to it.
+- **The end card:** the game-over screen shows the result, the revealed style, the bot's disclosed bonus and its share of the bot's income, the statistics, the final hash and the replay's name. Read it out, then Play Again (same level and style, new seed), Main Menu or Quit; Play Again and Main Menu keep the window, so OBS's window capture survives. The game prints a `match_log:` line at the outcome: paste it into the VOD notes and into [PLAYTEST.md](PLAYTEST.md#match-log-m6), then run `just match-log <replay>` for the verified row.
+- **Spectating other seats:** `--spectate --spectate-a hard:rush --spectate-b easy:tower`; Play Again spectates the same seats on a fresh seed.
 
 ## Settings that bite
 
@@ -37,6 +46,7 @@ How the owner streams a match from the dev Mac: the commands, the settings that 
    - `frame_stats: window focused=<n>/<n> occluded=0/<n>`;
    - `frame_stats: draws frames=<n> mean=<f> p95=<n> max=<n> ...` with max under 500.
 4. Verify the replay the run printed as `replay: <path>`: `cargo run --release -p sim-cli -- verify <path>` must print `OK final_hash=0x... ticks=<n>`.
+5. M6: press `=` twice and Space once off air and check the exit line `driver: ticks_frame_max=<n> dropped_ticks=<d> x1_s=.. x2_s=.. x4_s=.. paused_s=..`: at x4 on the Mac about 80 ticks a second with `dropped_ticks=0` outside a 400-unit fight.
 
 ## After the stream
 

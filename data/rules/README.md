@@ -192,9 +192,13 @@ fixture was re-recorded for its header alone and no `.hash` moved; a look
 edit needs no bump from then on. M6 changed no value here either:
 `rules_version` 26 added `../ai/difficulty/` (the disclosed bot bonus, paid
 by step 6d' under `SIM_VERSION` 18), 27 the rush, boom and tower
-personalities and the new bot knobs, and 28 the tuned Standard build
-order and Easy's Yeomen handicap, all under `../ai/`; in each only
-`m5_first_match.hash` moved.
+personalities and the new bot knobs, 28 the tuned Standard build
+order and Easy's Yeomen handicap, 29 the retune groundwork (the
+difficulty files' `pressure` block and `noise_border_top_k`, all neutral,
+and a siege wave's memory of its target's last hit points), 30 the retune
+itself (M6 owner decision 12: siege pressure, the all-in times, Easy's
+and `tower`'s Statecraft II) and 31 Standard's retreat restored after its
+review, all under `../ai/`; in each only `m5_first_match.hash` moved.
 
 ## resources.ron
 

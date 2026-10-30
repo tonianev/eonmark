@@ -2,9 +2,10 @@
 // receives a bonus bundle every 25 s from 3:00 (the first one at 3:25) and
 // plays its personality's wave timing, keeps up siege pressure (M6 owner
 // decision 12: groups from the rally join an assault, a siege that is taking
-// a Town down neither retreats nor times out, waves never retreat), launches
-// only when it outweighs the army at home, and goes all-in at minute 36. Disclosed on New Game and on the
-// game-over screen; never rubber-banded. _ds deciseconds, _permille per mille.
+// a Town down neither retreats nor times out; a wave losing without progress
+// retreats as the personality's does), launches only when it outweighs the
+// army at home, and goes all-in at minute 36. Disclosed on New Game and on
+// the game-over screen; never rubber-banded. _ds deciseconds, _permille per mille.
 // Schema: crates/rules/src/ai.rs (deny_unknown_fields). docs/design/ai.md,
 // "Difficulty table".
 (
@@ -24,7 +25,7 @@
   pressure: (
     reinforce_min_units: 6,
     commit_ds: 300,
-    retreat_ratio_permille: 0,
+    retreat_ratio_permille: 1000,                   // the personality's retreat (review of the retune)
     retreat_cooldown_permille: 1000,
     home_guard_units: 0,
     lure_ds: 600,

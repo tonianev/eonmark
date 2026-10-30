@@ -262,10 +262,12 @@ docs/design/ai.md and `crates/ai/src/standard/waves.rs`.
 ```
 
 Difficulty is a disclosed cheat plus wave timing and, since the M6 retune
-(owner decision 12, `rules_version` 30), how hard the level presses its
-sieges: Easy stays defensive (its largest wave only, later, no pressure,
-Statecraft II for wider borders), Standard and Hard reinforce, commit and
-never retreat. The sim pays every AI seat whose `bot` names a level the
+(M6 owner decision 12, `rules_version` 30; 31 after its review), how hard
+the level presses its sieges: Easy stays defensive (its largest wave only,
+later, no pressure, Statecraft II for wider borders), Standard and Hard
+reinforce and commit; Standard retreats as its personality does, Hard
+never retreats (a deviation from the plan's equal retreat, pending the
+owner: docs/design/ai.md, "Difficulty table (as retuned)"). The sim pays every AI seat whose `bot` names a level the
 same `income` bundle on the step that completes tick `from + k x every`
 (k >= 1, `from` = `income_from_ds` and `every` = `income_interval_ds` in
 ticks): Standard's first payment lands at 3:25 (tick 4100), Hard's at 3:20
@@ -305,8 +307,8 @@ alone sizes the cheat: a shorter interval is a larger cheat.
 pure function of the two rows (so a bot rebuilt mid-match plays the same
 knobs); counters, influence and noise stay the personality's at every
 level, and retreat is the personality's scaled by `pressure`. The
-`standard` level resolves to the personality with its all-in at 36:00 and
-no retreat; `resolve` leaves the rest of `pressure` to the bot
+`standard` level resolves to the personality with its all-in at 36:00
+(retreat unchanged since `rules_version` 31); `resolve` leaves the rest of `pressure` to the bot
 (`crates/ai`, `waves.rs` and `retreat.rs`), which reads it from the level. M6
 also requires every build order to build a trainer of an armed kind before
 its first `Advance` (a difficulty's raid trains armed units before then).

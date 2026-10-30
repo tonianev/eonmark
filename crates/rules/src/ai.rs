@@ -1980,8 +1980,8 @@ mod tests {
     /// capped), the interval (rounded to nearest), sets the age gate and
     /// the all-in time, and `largest_wave_only` flattens the rows; it
     /// leaves every other knob alone. Standard resolves to the
-    /// personality with its all-in at 36:00 and (M6 owner decision 12) no
-    /// retreat.
+    /// personality with its all-in at 36:00 (M6 owner decision 12); it
+    /// retreats as the personality does, and Hard never retreats.
     #[test]
     fn resolve_scales_sizes_and_intervals_once_and_caps_largest_only() {
         let rules = Rules::load(data_dir()).unwrap();
@@ -1989,8 +1989,8 @@ mod tests {
         let level = |id: &str| rules.ai.difficulty(id).unwrap();
         let mut want = p.clone();
         want.all_in_after_ds = 21600;
-        want.retreat_ratio_permille = 0;
         assert_eq!(resolve(p, level("standard")), want);
+        assert_eq!(resolve(p, level("hard")).retreat_ratio_permille, 0);
         let sizes = |k: &Personality| k.wave_sizes.iter().map(|w| w.armed).collect::<Vec<_>>();
         let easy = resolve(p, level("easy"));
         assert_eq!(sizes(&easy), [14, 14, 14, 14]);

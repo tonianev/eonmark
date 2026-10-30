@@ -160,7 +160,7 @@ fn m6_memory_stays_under_1_kib() {
 
 /// Hidden state in the M6 behaviours: a rush-against-tower match (seed 2,
 /// where the Standard rush seat raids and the Easy tower seat retreats;
-/// since the M6 retune a Standard seat never retreats) restored into a fresh
+/// a Standard seat retreats as its personality does) restored into a fresh
 /// `Sim` with fresh bots from the header, once while a raid is out and
 /// once just after a retreat, matches the uninterrupted run, every
 /// sub-hash, every tick, for the next 2000 ticks.

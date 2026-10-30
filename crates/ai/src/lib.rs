@@ -599,8 +599,9 @@ mod tests {
         let standard = r.ai.difficulty("standard").unwrap();
         let bot = standard::StandardBot::new(&r, &setup, PlayerId(0), p, standard);
         let mut want = p.clone();
+        // Standard retreats as its personality does (the review of the M6
+        // retune put it back); only its all-in time moves.
         want.all_in_after_ds = 21600;
-        want.retreat_ratio_permille = 0;
         assert_eq!(bot.knobs(), &want);
         assert_eq!(bot.order(), shipped);
         assert_eq!(first_workers(bot.order()), Some(7));

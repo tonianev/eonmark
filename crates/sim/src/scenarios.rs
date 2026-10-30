@@ -2146,6 +2146,88 @@ pub fn art_bench(rules: &Rules) -> (MatchSetup, Stream) {
     (setup, stream)
 }
 
+/// Scenarios with a bot seat (M6), accepted by [`by_name`], `sim-cli
+/// record --scenario` (its `Scenario::Bot`) and the game's `--scenario`,
+/// but never by [`run`], which has no bots: a bot is built by
+/// `ai::controller_for`, outside the sim. Disjoint from [`NAMES`] (a test
+/// says so). `scripted_match` is the M6 line-5 golden.
+pub const BOT_NAMES: [&str; 1] = ["scripted_match"];
+
+/// The `scripted_match` seed.
+pub const SCRIPTED_MATCH_SEED: u64 = 6;
+/// The tick during which P0's `Surrender` is issued in `scripted_match`;
+/// the match is decided `cmd_delay` later, at the same tick at any game
+/// speed.
+pub const SCRIPTED_MATCH_SURRENDER_TICK: u32 = 1200;
+/// Upper bound of a `scripted_match` recording (it stops at the outcome).
+pub const SCRIPTED_MATCH_MAX_TICKS: u32 = 1400;
+/// The tick P0's Muster Hall is placed in `scripted_match`, once the 150
+/// starting Lumber less the Croft and the Lumber Yard has grown back to
+/// its cost.
+pub const SCRIPTED_MATCH_MUSTER_TICK: u32 = 1000;
+/// The tick P0 walks two Yeomen towards the centre in `scripted_match`.
+pub const SCRIPTED_MATCH_MOVE_TICK: u32 = 900;
+/// Where those two Yeomen walk: east of P0's Seat, inside its border.
+pub const SCRIPTED_MATCH_MOVE_TO: FxVec2 = FxVec2::from_ints(42, 64);
+
+/// The M6 line-5 scenario (`--scenario scripted_match`, ROADMAP M6
+/// acceptance 5): the local player against the Standard bot (personality
+/// `standard`), `MatchSetup::vs_bot` at seed [`SCRIPTED_MATCH_SEED`] from
+/// the standard start, no debug commands. P0's stream names start ids only
+/// (Seat `BuildingId(1)`, Yeomen `UnitId(1..=5)`):
+///
+/// - tick 0: the Seat trains two Yeomen;
+/// - tick 20: Yeoman 1 places a Croft at (28, 60); tick 40: Yeoman 2 a
+///   Lumber Yard at (18, 54), on the forest north-west of the Seat;
+/// - tick [`SCRIPTED_MATCH_MOVE_TICK`]: Yeomen 4 and 5 walk to
+///   [`SCRIPTED_MATCH_MOVE_TO`];
+/// - tick [`SCRIPTED_MATCH_MUSTER_TICK`]: Yeoman 3 places a Muster Hall at
+///   (28, 67);
+/// - tick [`SCRIPTED_MATCH_SURRENDER_TICK`]: P0 surrenders.
+///
+/// The bot plays its real opening meanwhile. The match is decided at the
+/// same tick at every game speed, so a replay recorded at x1 and one at x4
+/// with a pause end on the same hash (the golden `scripted_match.hash`).
+/// `ai`'s `scripted_match_stream_is_never_rejected` keeps every command
+/// valid. Recorded by `sim-cli record --scenario scripted_match` up to
+/// [`SCRIPTED_MATCH_MAX_TICKS`], stopping at the outcome.
+pub fn scripted_match(rules: &Rules) -> (MatchSetup, Stream) {
+    let setup = MatchSetup::vs_bot(rules, SCRIPTED_MATCH_SEED, "standard", "standard");
+    let yeoman = unit_kind(rules, "yeoman");
+    let p0 = |seq: u32, cmd: Command| PlayerCommand::new(PlayerId(0), seq, cmd);
+    let stream = vec![
+        (0, vec![train(0, 0, 1, yeoman), train(0, 1, 1, yeoman)]),
+        (
+            20,
+            vec![build(0, 2, 1, building_kind(rules, "croft"), 28, 60)],
+        ),
+        (
+            40,
+            vec![build(0, 3, 2, building_kind(rules, "lumber_yard"), 18, 54)],
+        ),
+        (
+            SCRIPTED_MATCH_MOVE_TICK,
+            vec![p0(
+                4,
+                Command::Move {
+                    units: vec![UnitId(4), UnitId(5)],
+                    target: SCRIPTED_MATCH_MOVE_TO,
+                    queue: false,
+                },
+            )],
+        ),
+        (
+            SCRIPTED_MATCH_MUSTER_TICK,
+            vec![build(0, 5, 3, building_kind(rules, "muster_hall"), 28, 67)],
+        ),
+        (
+            SCRIPTED_MATCH_SURRENDER_TICK,
+            vec![p0(6, Command::Surrender)],
+        ),
+    ];
+    (setup, stream)
+}
+
 /// Look a scenario up by name: `(setup, stream, ticks)`.
 pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
     let (setup, stream, ticks) = match name {
@@ -2216,6 +2298,11 @@ pub fn by_name(name: &str, rules: &Rules) -> Option<(MatchSetup, Stream, u32)> {
         "art_bench" => {
             let (s, c) = art_bench(rules);
             (s, c, ART_BENCH_TICKS)
+        }
+        // M6: a bot seat; never in `NAMES`, never through `run`.
+        "scripted_match" => {
+            let (s, c) = scripted_match(rules);
+            (s, c, SCRIPTED_MATCH_MAX_TICKS)
         }
         _ => return None,
     };
@@ -2289,6 +2376,41 @@ mod tests {
             assert_eq!(keys.len(), n, "{name}");
         }
         assert!(by_name("nope", &rules).is_none());
+    }
+
+    /// M6: the bot scenarios are a separate list (`run` asserts no AI
+    /// slots), resolve through `by_name`, issue only P0 commands without
+    /// debug commands, and end before their recording bound.
+    #[test]
+    fn bot_names_are_disjoint_from_names_and_resolve() {
+        let rules = rules();
+        for name in BOT_NAMES {
+            assert!(!NAMES.contains(&name), "{name} is in NAMES");
+            let (setup, stream, ticks) = by_name(name, &rules).unwrap_or_else(|| panic!("{name}"));
+            assert!(!setup.debug_commands, "{name}");
+            assert!(!setup.ai_seats.is_empty(), "{name} has a bot seat");
+            assert!(stream.windows(2).all(|w| w[0].0 < w[1].0), "{name}");
+            assert!(stream.last().is_some_and(|(t, _)| *t < ticks), "{name}");
+            let mut seqs: Vec<u32> = Vec::new();
+            for (_, cmds) in &stream {
+                for c in cmds {
+                    assert_eq!(c.player, PlayerId(0), "{name}: only the human seat");
+                    assert!(
+                        !format!("{:?}", c.cmd).starts_with("Debug"),
+                        "{name}: {:?}",
+                        c.cmd
+                    );
+                    seqs.push(c.seq);
+                }
+            }
+            assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{name}: {seqs:?}");
+        }
+        let (setup, stream) = scripted_match(&rules);
+        assert_eq!(setup.seed, SCRIPTED_MATCH_SEED);
+        assert_eq!(
+            stream.last().map(|(t, c)| (*t, c[0].cmd.clone())),
+            Some((SCRIPTED_MATCH_SURRENDER_TICK, Command::Surrender))
+        );
     }
 
     /// The M4b looks lineup: one unit of every kind per player on two rows

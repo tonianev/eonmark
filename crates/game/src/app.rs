@@ -175,7 +175,12 @@ pub fn build_match(cli: &Cli, rules: Rules) -> Result<(SimHandle, Box<dyn InputS
             let Some((mut setup, stream, _ticks)) = scenarios::by_name(name, &rules) else {
                 return Err(format!(
                     "unknown scenario {name:?}; one of {}",
-                    scenarios::NAMES.join(", ")
+                    scenarios::NAMES
+                        .iter()
+                        .chain(scenarios::BOT_NAMES.iter())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             };
             // `--seed` overrides the scenario's own seed only when given.

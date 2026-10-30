@@ -24,6 +24,7 @@
 #![warn(missing_docs)]
 
 pub mod harness;
+pub mod match_log;
 pub mod seats;
 pub mod standard;
 
@@ -748,5 +749,88 @@ mod tests {
             err(&s).to_string(),
             "player 1: bot \"passive\" takes no personality, got \"standard\""
         );
+    }
+
+    /// M6 line 5: `scripted_match`'s human stream is valid against the
+    /// real Standard bot: no P0 command is rejected, the Croft, the Lumber
+    /// Yard and the Muster Hall are placed, and the Surrender decides the
+    /// match `cmd_delay` ticks after it is issued, the same tick at any
+    /// game speed.
+    #[test]
+    fn scripted_match_stream_is_never_rejected() {
+        let r = rules();
+        let (setup, stream) = sim::scenarios::scripted_match(&r);
+        let delay = setup.cmd_delay;
+        let controller = controller_for(&setup, &r).unwrap();
+        let mut sim = Sim::new(setup, r.clone(), controller);
+        let mut rejected = Vec::new();
+        while sim.result().is_none() && sim.tick() < sim::scenarios::SCRIPTED_MATCH_MAX_TICKS {
+            sim.step(sim::scenarios::commands_at(&stream, sim.tick()));
+            for e in sim.drain_events() {
+                if let sim::SimEvent::CommandRejected {
+                    player: PlayerId(0),
+                    seq,
+                    reason,
+                } = e
+                {
+                    rejected.push((sim.tick(), seq, reason));
+                }
+            }
+        }
+        assert_eq!(rejected, Vec::new(), "P0's stream is never rejected");
+        let result = sim.result().expect("decided by the surrender");
+        assert_eq!(result.reason, sim::OutcomeReason::Surrender);
+        assert_eq!(
+            result.outcome,
+            sim::Outcome::Victory {
+                player: PlayerId(1),
+                decisive: true
+            }
+        );
+        assert_eq!(
+            result.tick,
+            sim::scenarios::SCRIPTED_MATCH_SURRENDER_TICK + delay + 1
+        );
+        let view = sim.view();
+        for kind in ["croft", "lumber_yard", "muster_hall"] {
+            let k = r.building_kind_by_id(kind).unwrap().0;
+            assert!(
+                view.buildings()
+                    .any(|b| b.owner == PlayerId(0) && b.kind.0 == k),
+                "P0 placed a {kind}"
+            );
+        }
+        assert!(
+            view.units().filter(|u| u.owner == PlayerId(1)).count() > 5,
+            "the bot played its opening"
+        );
+    }
+
+    /// M6 line 5's golden: `scripted_match.eonreplay` (a human stream
+    /// against the Standard bot) verifies with the bot rebuilt from its
+    /// header to the hash in `scripted_match.hash`.
+    #[test]
+    fn golden_scripted_match() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures");
+        let expected = std::fs::read_to_string(dir.join("scripted_match.hash")).unwrap();
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let outcome = sim::replay::verify_with(
+            &dir.join("scripted_match.eonreplay"),
+            &data,
+            Box::new(|setup: &MatchSetup, rules: &Rules| {
+                controller_for(setup, rules).map_err(|e| e.to_string())
+            }),
+        )
+        .unwrap();
+        match outcome {
+            sim::replay::VerifyOutcome::Ok { final_hash, ticks } => {
+                assert_eq!(format!("{final_hash:#018x}"), expected.trim());
+                assert_eq!(
+                    ticks,
+                    sim::scenarios::SCRIPTED_MATCH_SURRENDER_TICK + rules().cmd_delay_ticks + 1
+                );
+            }
+            other => panic!("scripted_match: {other}"),
+        }
     }
 }

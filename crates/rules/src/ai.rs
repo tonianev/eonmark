@@ -2129,6 +2129,44 @@ mod tests {
         assert_eq!(resolve(p, &d).retreat_ratio_permille, 0, "never retreats");
     }
 
+    /// M6 owner decision 12 (mirrored sites must not make cap games exact
+    /// copies): the research a level or a build order adds is what keeps
+    /// two seats from building mirror images, so it is pinned here. Easy's
+    /// resolved `standard` order differs from Standard's and Hard's (its
+    /// Statecraft II), and the `tower` order researches Statecraft II
+    /// itself (as `boom` does); Standard and Hard resolve the `standard`
+    /// order identically,
+    /// the known limit (an untouched Standard-vs-Hard or Standard mirror cap
+    /// game is still decided by site noise; docs/design/ai.md, "Difficulty
+    /// table (as retuned)").
+    #[test]
+    fn the_research_that_breaks_mirrored_cap_games_is_pinned() {
+        let rules = Rules::load(data_dir()).unwrap();
+        let order = rules.ai.build_order("standard").unwrap();
+        let resolved = |id: &str| resolve_order(order, rules.ai.difficulty(id).unwrap());
+        let statecraft_2 = |o: &BuildOrder| {
+            o.steps
+                .iter()
+                .any(|s| matches!(s, Step::Research { tech, .. } if tech == "statecraft_2"))
+        };
+        let (easy, standard, hard) = (resolved("easy"), resolved("standard"), resolved("hard"));
+        assert!(statecraft_2(&easy), "Easy researches Statecraft II");
+        assert!(!statecraft_2(&standard) && !statecraft_2(&hard));
+        assert_ne!(easy, standard, "Easy vs Standard");
+        assert_ne!(easy, hard, "Hard vs Easy (the flip)");
+        assert_eq!(
+            standard, hard,
+            "Standard vs Hard: the same order (the known limit)"
+        );
+        // Since the retune `tower` researches Statecraft II too (boom has
+        // since slice 2), so a tower seat's untouched cap game is not a
+        // mirror of a rush or Balanced seat's.
+        let has = |id: &str| statecraft_2(rules.ai.build_order(id).unwrap());
+        assert!(has("tower"), "tower researches Statecraft II");
+        assert!(has("boom"));
+        assert!(!has("standard") && !has("rush"));
+    }
+
     /// M6 owner decision 12: `extra_research` appends one optional
     /// `Research` step per tech the build order does not research yet, in
     /// the level's order, and leaves every other step alone.

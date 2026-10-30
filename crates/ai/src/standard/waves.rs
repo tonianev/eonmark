@@ -2848,15 +2848,19 @@ mod tests {
         // One armed unit always stays at the rally (a pop that fills after
         // the group left must still hold one at home), so 6 at the rally is
         // one short of a group of 6.
-        for (at_rally, guard, latched, joins) in [
-            (7u16, 0u32, false, 6usize),
-            (6, 0, false, 0),
-            (7, 2, false, 0),
-            (8, 2, false, 6),
-            (7, 0, true, 0),
+        // `held`: the target is at 0 HP, so the wave holds its ring (a group
+        // joins a holding wave as it joins an assaulting one).
+        for (at_rally, guard, latched, held, joins) in [
+            (7u16, 0u32, false, false, 6usize),
+            (6, 0, false, false, 0),
+            (7, 2, false, false, 0),
+            (8, 2, false, false, 6),
+            (7, 0, true, false, 0),
+            (7, 0, false, true, 6),
         ] {
-            let why = format!("{at_rally} at the rally, guard {guard}, latched {latched}");
-            let a = Arena::frozen(
+            let why =
+                format!("{at_rally} at the rally, guard {guard}, latched {latched}, held {held}");
+            let mut a = Arena::frozen(
                 standard_vs_passive(&r),
                 vec![
                     Command::DebugAdvanceAge { owner: P0 },
@@ -2867,9 +2871,25 @@ mod tests {
             let out = a.units_of(P0, "skirmisher");
             let home = a.units_of(P0, "bowman");
             let target = a.seat(P1);
+            if held {
+                a.issue(
+                    P0,
+                    vec![Command::DebugDamage {
+                        target: TargetId::Building(target),
+                        amount: 1_000_000,
+                    }],
+                );
+                a.run(r.cmd_delay_ticks + 1);
+                assert_eq!(a.sim.view().building_hp(target).map(|h| h.0), Some(0));
+            }
             let tick = a.sim.tick();
             let mut w = wave(out.clone(), None, target, Tile::new(72, 64));
-            w.phase = WavePhase::Assault;
+            // A wave whose target fell to 0 HP on an earlier plan holds.
+            w.phase = if held {
+                WavePhase::Hold
+            } else {
+                WavePhase::Assault
+            };
             w.phase_at = tick;
             let mut mem = BotMemory {
                 wave: Some(w),
@@ -2887,6 +2907,12 @@ mod tests {
             });
             step(&mut ctx, &mut mem);
             let w = mem.wave.clone().expect("the wave goes on");
+            let phase = if held {
+                WavePhase::Hold
+            } else {
+                WavePhase::Assault
+            };
+            assert_eq!(w.phase, phase, "{why}");
             let mut want = out.clone();
             want.extend(home[..joins].iter().copied());
             want.sort();
@@ -3026,6 +3052,59 @@ mod tests {
                 "{why}: {cmds:?}"
             );
             assert_ne!(point, centre);
+        }
+    }
+
+    /// M6 owner decision 12: the lure already holds the assault's first
+    /// plan. A staged wave whose target has defenders within
+    /// `siege_focus_tiles` sends its units to the Wain point W, not to the
+    /// Town; with no defenders there it goes for the Town's centre.
+    #[test]
+    fn a_staged_wave_starts_its_assault_at_the_wain_point_while_defenders_stand_near() {
+        let r = crate::testkit::rules();
+        let k = quiet(&r, |_| {});
+        for (defenders, to_w) in [(3u16, true), (0, false)] {
+            let why = format!("{defenders} defenders");
+            let mut setup = vec![
+                Command::DebugAdvanceAge { owner: P0 },
+                spawn(&r, P0, "skirmisher", 72, 64, 6),
+            ];
+            if defenders > 0 {
+                setup.push(spawn(&r, P1, "skirmisher", 100, 60, defenders));
+            }
+            let mut a = Arena::frozen(standard_vs_passive(&r), setup);
+            a.run(10);
+            let units = a.units_of(P0, "skirmisher");
+            let target = a.seat(P1);
+            let tick = a.sim.tick();
+            let mut w = wave(units.clone(), None, target, Tile::new(72, 64));
+            w.phase_at = tick;
+            w.launched_at = tick;
+            let mut mem = BotMemory {
+                wave: Some(w.clone()),
+                ..BotMemory::default()
+            };
+            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            ctx.pressure = pressed(|p| p.lure_ds = 600);
+            let point = wain_point(&ctx, target, w.stage);
+            step(&mut ctx, &mut mem);
+            assert_eq!(
+                mem.wave.as_ref().map(|w| w.phase),
+                Some(WavePhase::Assault),
+                "{why}"
+            );
+            let view = a.sim.view();
+            let b = view.building(target).unwrap();
+            let centre = kind_centre(&r, b.kind, b.tile);
+            assert_ne!(point, centre);
+            let want = if to_w { point } else { centre };
+            let cmds = ctx.into_commands();
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::AttackMove { units: u, target: t }
+                    if *t == want && u.contains(&units[0]))),
+                "{why}: {cmds:?}"
+            );
         }
     }
 
@@ -3170,17 +3249,21 @@ mod tests {
     fn a_launch_waits_until_the_wave_outweighs_the_army_at_home() {
         let r = crate::testkit::rules();
         let k = quiet(&r, |_| {});
-        for (enemy, at, ratio, launches) in [
-            (20u16, (100, 58), 1000u32, false),
-            (2, (100, 58), 1000, true),
-            (20, (100, 58), 0, true),
-            (20, (56, 40), 1000, true),
+        let all_in = quiet(&r, |k| k.all_in_after_ds = 0);
+        for (enemy, at, ratio, during_all_in, launches) in [
+            (20u16, (100, 58), 1000u32, false, false),
+            (2, (100, 58), 1000, false, true),
+            (20, (100, 58), 0, false, true),
+            (20, (56, 40), 1000, false, true),
+            // The all-in launches whatever the army at home.
+            (20, (100, 58), 1000, true, true),
         ] {
-            let why = format!("{enemy} enemies at {at:?}, ratio {ratio}");
+            let why = format!("{enemy} enemies at {at:?}, ratio {ratio}, all-in {during_all_in}");
             let mut setup = at_rally(&r, true, 7, 1, 1);
             setup.push(spawn(&r, P1, "skirmisher", at.0, at.1, enemy));
             let a = Arena::frozen(standard_vs_passive(&r), setup);
-            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            let knobs = if during_all_in { &all_in } else { &k };
+            let mut ctx = Ctx::new(a.sim.view(), P0, knobs, a.map(P0));
             ctx.pressure = pressed(|p| p.launch_ratio_permille = ratio);
             let mut mem = BotMemory::default();
             step(&mut ctx, &mut mem);
@@ -3197,13 +3280,18 @@ mod tests {
         let r = crate::testkit::rules();
         let k = quiet(&r, |_| {});
         let (x, y) = RALLY;
-        for (enemy, ratio, stage_over, want) in [
-            (20u16, 1000u32, false, "stage"),
-            (20, 1000, true, "home"),
-            (2, 1000, false, "assault"),
-            (20, 0, false, "assault"),
+        let all_in = quiet(&r, |k| k.all_in_after_ds = 0);
+        for (enemy, ratio, stage_over, during_all_in, want) in [
+            (20u16, 1000u32, false, false, "stage"),
+            (20, 1000, true, false, "home"),
+            (2, 1000, false, false, "assault"),
+            (20, 0, false, false, "assault"),
+            // The all-in assaults whatever the army at home.
+            (20, 1000, false, true, "assault"),
         ] {
-            let why = format!("{enemy} enemies, ratio {ratio}, stage over {stage_over}");
+            let why = format!(
+                "{enemy} enemies, ratio {ratio}, stage over {stage_over}, all-in {during_all_in}"
+            );
             let mut a = Arena::frozen(
                 standard_vs_passive(&r),
                 vec![
@@ -3241,10 +3329,13 @@ mod tests {
                 wave: Some(w),
                 ..BotMemory::default()
             };
-            let mut ctx = Ctx::new(a.sim.view(), P0, &k, a.map(P0));
+            let knobs = if during_all_in { &all_in } else { &k };
+            let mut ctx = Ctx::new(a.sim.view(), P0, knobs, a.map(P0));
             ctx.pressure = pressed(|p| {
                 p.assault_ratio_permille = ratio;
-                p.reinforce_min_units = 6;
+                // The all-in case keeps its rally group home (no group of 64
+                // there), so the staged seven alone decide.
+                p.reinforce_min_units = if during_all_in { 64 } else { 6 };
             });
             step(&mut ctx, &mut mem);
             let cmds = ctx.into_commands();

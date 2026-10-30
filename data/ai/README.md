@@ -242,15 +242,30 @@ docs/design/ai.md and `crates/ai/src/standard/waves.rs`.
   largest_wave_only: false,
   max_wave_units: None,
   wave_size_permille: 1000,
-  wave_interval_permille: 900,
+  wave_interval_permille: 800,
   all_in_after_ds: None,                            // None keeps the personality's
   first_raid: Some((by_ds: 6000, prep_ds: 1500, min_armed: 6, max_armed: 10)),
   worker_target_permille: 1000,
+  extra_research: [],
+  pressure: (
+    reinforce_min_units: 6,
+    commit_ds: 300,
+    retreat_ratio_permille: 0,
+    retreat_cooldown_permille: 1000,
+    home_guard_units: 0,
+    lure_ds: 600,
+    cohesion_tiles: 4,
+    launch_ratio_permille: 0,
+    assault_ratio_permille: 1300,
+  ),
 )
 ```
 
-Difficulty is a disclosed cheat plus wave timing; the bot does not play
-better on Hard. The sim pays every AI seat whose `bot` names a level the
+Difficulty is a disclosed cheat plus wave timing and, since the M6 retune
+(owner decision 12, `rules_version` 30), how hard the level presses its
+sieges: Easy stays defensive (its largest wave only, later, no pressure,
+Statecraft II for wider borders), Standard and Hard reinforce, commit and
+never retreat. The sim pays every AI seat whose `bot` names a level the
 same `income` bundle on the step that completes tick `from + k x every`
 (k >= 1, `from` = `income_from_ds` and `every` = `income_interval_ds` in
 ticks): Standard's first payment lands at 3:25 (tick 4100), Hard's at 3:20
@@ -288,8 +303,11 @@ alone sizes the cheat: a shorter interval is a larger cheat.
 
 `rules::ai::resolve(personality, difficulty)` applies the wave knobs once, a
 pure function of the two rows (so a bot rebuilt mid-match plays the same
-knobs); retreat, counters, influence and noise stay the personality's at
-every level. The `standard` level resolves to the personality itself. M6
+knobs); counters, influence and noise stay the personality's at every
+level, and retreat is the personality's scaled by `pressure`. The
+`standard` level resolves to the personality with its all-in at 36:00 and
+no retreat; `resolve` leaves the rest of `pressure` to the bot
+(`crates/ai`, `waves.rs` and `retreat.rs`), which reads it from the level. M6
 also requires every build order to build a trainer of an armed kind before
 its first `Advance` (a difficulty's raid trains armed units before then).
 The shipped values, the bundle sweep and the line-4 flip (`hard.ron`

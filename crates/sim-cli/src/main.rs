@@ -1598,7 +1598,11 @@ fn bots_bench_report(
 /// [`BOTS_MIN_INFLUENCE_PLANS`] plans that built the influence maps), never
 /// on the timing budget, like the other benches. Since M6 it zeroes the
 /// personalities' `noise_first_wave_ds`, so the first waves go out within
-/// the bench's minute as in M5b.
+/// the bench's minute as in M5b, and (M6 owner decision 12) sets a level's
+/// nonzero launch and assault strength gates to 1 per mille, so they are
+/// checked (and timed) but never hold a wave in the mirrored world, and
+/// gives a level that never retreats the personality's retreat, so the
+/// influence-map retreat checks are timed.
 fn bench_bots(
     data: &Path,
     units: u16,
@@ -1627,6 +1631,25 @@ fn bench_bots(
     let mut rules = rules;
     for p in &mut rules.ai.personalities {
         p.noise_first_wave_ds = 0;
+    }
+    // M6 owner decision 12: a level's launch and assault strength gates
+    // compare a wave with the enemy army at home, and in this mirrored
+    // world of 200 units a side no wave ever outweighs it, so no wave would
+    // go out. The bench keeps each gate on but at 1 per mille, so every
+    // check still runs (its cost is measured) and always passes; and a
+    // level that never retreats (`retreat_ratio_permille` 0) gets the
+    // personality's retreat back, so the influence-map retreat checks the
+    // bench exists to time still run.
+    for d in rules.ai.difficulties.values_mut() {
+        if d.pressure.retreat_ratio_permille == 0 {
+            d.pressure.retreat_ratio_permille = 1000;
+        }
+        if d.pressure.launch_ratio_permille > 0 {
+            d.pressure.launch_ratio_permille = 1;
+        }
+        if d.pressure.assault_ratio_permille > 0 {
+            d.pressure.assault_ratio_permille = 1;
+        }
     }
     let b = run_bots_bench(&rules, units, ticks, seed, bot, personality);
     for line in bots_bench_report(&b, units, ticks, seed, bot, personality) {

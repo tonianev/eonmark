@@ -60,6 +60,10 @@ Options:
                                path the red close button takes (bevy_window despawns
                                it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
+  --exit-after-outcome-seconds <S>
+                               Send AppExit::Success S seconds after the match is
+                               decided (automated runs; --exit-after-seconds stays the
+                               deadline).
   --camera <X>,<Y>,<ZOOM>      Start the camera over sim tile (X, Y) at ZOOM metres
                                (15 to 60) instead of jumping to the first units
                                (screenshots, stream framing).
@@ -95,7 +99,8 @@ Options:
   --pause-seconds <S>          With --pause-at-tick: unpause after S real seconds.
   --play-again-after-seconds <S>
                                The Play Again proxy: S seconds after the game-over
-                               screen appears, click its Play Again button.
+                               screen appears, ask for Play Again directly (what the
+                               button's click asks for; no picking path).
   --new-game-after-seconds <S>
                                The New Game proxy: after S seconds click the menu's real
                                New Game button with a synthetic mouse (picking path).
@@ -203,6 +208,10 @@ pub struct Cli {
     pub headless_run: Option<HeadlessRun>,
     /// `--exit-after-seconds <s>`.
     pub exit_after_seconds: Option<f64>,
+    /// `--exit-after-outcome-seconds <s>` (M6): exit `s` real seconds
+    /// after the match is decided; `--exit-after-seconds` stays the hard
+    /// deadline.
+    pub exit_after_outcome_seconds: Option<f64>,
     /// `--seed <u64>`; defaults to 1 so `--headless-run` is reproducible.
     pub seed: u64,
     /// `true` when `--seed` was given (M5b): a scenario's own seed and a
@@ -286,6 +295,7 @@ impl Default for Cli {
         Self {
             headless_run: None,
             exit_after_seconds: None,
+            exit_after_outcome_seconds: None,
             seed: 1,
             seed_explicit: false,
             data_dir: None,
@@ -387,12 +397,16 @@ impl Cli {
                     cli.headless_run =
                         Some(HeadlessRun::parse(&value).map_err(|e| format!("{arg}: {e}"))?);
                 }
-                "--exit-after-seconds" => {
+                "--exit-after-seconds" | "--exit-after-outcome-seconds" => {
                     let secs: f64 = parse_value(&arg, args.next())?;
                     if !secs.is_finite() || secs < 0.0 {
                         return Err(format!("{arg}: expected a non-negative number"));
                     }
-                    cli.exit_after_seconds = Some(secs);
+                    if arg == "--exit-after-seconds" {
+                        cli.exit_after_seconds = Some(secs);
+                    } else {
+                        cli.exit_after_outcome_seconds = Some(secs);
+                    }
                 }
                 "--seed" => {
                     cli.seed = parse_value(&arg, args.next())?;
@@ -554,6 +568,10 @@ impl Cli {
                 (
                     cli.play_again_after_seconds.is_some(),
                     "--play-again-after-seconds",
+                ),
+                (
+                    cli.exit_after_outcome_seconds.is_some(),
+                    "--exit-after-outcome-seconds",
                 ),
             ] {
                 if given {
@@ -822,6 +840,7 @@ mod tests {
             Parsed::Run(Cli {
                 headless_run: Some(HeadlessRun::Ticks(200)),
                 exit_after_seconds: Some(6.0),
+                exit_after_outcome_seconds: None,
                 seed: 42,
                 seed_explicit: true,
                 data_dir: Some(PathBuf::from("/tmp/data")),
@@ -878,6 +897,7 @@ mod tests {
                 scenario: Some("units200".into()),
                 screenshot: Some(PathBuf::from("/tmp/shot.png")),
                 exit_after_seconds: Some(4.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             })
         );
@@ -897,6 +917,7 @@ mod tests {
             Parsed::Run(Cli {
                 quit_via_menu_after_seconds: Some(3.0),
                 exit_after_seconds: Some(20.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             })
         );
@@ -928,6 +949,7 @@ mod tests {
             Ok(Parsed::Run(Cli {
                 background: true,
                 exit_after_seconds: Some(6.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             }))
         );
@@ -1012,6 +1034,7 @@ mod tests {
             Ok(Parsed::Run(Cli {
                 new_game_after_seconds: Some(3.0),
                 exit_after_seconds: Some(45.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             }))
         );
@@ -1276,6 +1299,23 @@ mod tests {
                 ..Cli::default()
             }))
         );
+        assert_eq!(
+            parse(&[
+                "--scenario",
+                "scripted_match",
+                "--exit-after-outcome-seconds",
+                "2",
+                "--exit-after-seconds",
+                "240"
+            ]),
+            Ok(Parsed::Run(Cli {
+                scenario: Some("scripted_match".into()),
+                exit_after_outcome_seconds: Some(2.0),
+                exit_after_seconds: Some(240.0),
+                ..Cli::default()
+            }))
+        );
+        assert!(parse(&["--exit-after-outcome-seconds", "-1"]).is_err());
         assert!(parse(&["--speed", "3"]).is_err(), "x1, x2 or x4 only");
         assert!(parse(&["--speed", "0"]).is_err());
         assert!(

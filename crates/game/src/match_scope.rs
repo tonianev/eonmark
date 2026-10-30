@@ -139,6 +139,7 @@ impl Plugin for MatchScopePlugin {
             .init_match_resource::<crate::economy_hud::MessageState>()
             .init_match_resource::<crate::alert::Alerts>()
             .init_match_resource::<DriverStats>()
+            .init_match_resource::<crate::speed::SpeedStats>()
             .init_match_resource::<SimStepped>()
             .add_message::<MatchStarted>()
             .add_systems(
@@ -171,7 +172,7 @@ pub fn apply_match_request(world: &mut World) {
             return;
         };
         if pending != PendingMatch::NewGame {
-            settings.seed = crate::app::fresh_seed();
+            settings.offer_seed(crate::app::fresh_seed());
         }
         let rules = world.non_send::<SimHandle>().rules().clone();
         let built = settings.setup(&rules, settings.seed);
@@ -252,7 +253,10 @@ pub fn rebuild_match(world: &mut World, setup: MatchSetup, announce: bool) -> Re
     let seed = handle.seed();
     let pending = PendingCommands::for_setup(handle.setup());
     let seat = LocalSeat::of(handle.setup());
-    let line = crate::menu::match_line(handle.setup());
+    let hidden = world
+        .get_resource::<crate::alert::StyleHidden>()
+        .is_some_and(|h| h.0);
+    let line = crate::menu::match_line(handle.setup(), hidden);
     let focus = first_units_centroid(&handle);
     world.insert_non_send(handle);
     world.insert_resource(ActiveInput(Box::new(LocalInput)));
@@ -403,6 +407,26 @@ mod tests {
             .insert(sim::UnitId(1));
         assert_eq!(scoped(&mut a), 2);
         let old_hash = a.world().non_send::<SimHandle>().hash();
+        // An event of the old match still queued when the rebuild comes (a
+        // hit on P0's first Yeoman: `UnitId(1)` exists again in the new
+        // match, so a reader would raise a false alert from it).
+        a.world_mut().write_message(SimEventMsg {
+            tick: 300,
+            event: sim::SimEvent::Hit {
+                attacker: sim::TargetId::Unit(sim::UnitId(6)),
+                target: sim::TargetId::Unit(sim::UnitId(1)),
+                damage: 1,
+            },
+        });
+        assert!(
+            !a.world().resource::<Messages<SimEventMsg>>().is_empty(),
+            "the old match has an event to leak"
+        );
+        let speed_before = *a.world().resource::<crate::speed::SpeedStats>();
+        assert!(
+            speed_before.at_speed_s[0] > 0.0,
+            "the old match ran at x1: {speed_before:?}"
+        );
         a.world_mut().insert_resource(MatchRequest {
             setup: MatchSetup::vs_bot(&r, 9, "standard", "rush"),
             announce: true,
@@ -415,11 +439,17 @@ mod tests {
                 .units
                 .is_empty()
         );
+        // Nothing steps between the `Update` rebuild and here, so any queued
+        // event is the old match's.
+        assert_eq!(a.world().non_send::<SimHandle>().tick(), 0);
         assert!(
-            a.world().resource::<Messages<SimEventMsg>>().is_empty() || {
-                // Only events of the new match's first tick may be queued.
-                a.world().non_send::<SimHandle>().tick() <= 1
-            }
+            a.world().resource::<Messages<SimEventMsg>>().is_empty(),
+            "no stale SimEventMsg survives the rebuild"
+        );
+        assert_eq!(
+            *a.world().resource::<crate::speed::SpeedStats>(),
+            crate::speed::SpeedStats::default(),
+            "the speed and pause totals restart with the match"
         );
         assert!(!a.world().contains_resource::<MatchOver>());
         run_to(&mut a, 300);
@@ -481,6 +511,7 @@ mod tests {
             style: StyleChoice::Id("tower".into()),
             seed: 5,
             spectate: None,
+            seed_typed: false,
         });
         run_to(&mut app, 120);
         let old = app.world().non_send::<SimHandle>().hash();
@@ -525,6 +556,7 @@ mod tests {
             style: StyleChoice::Random,
             seed: 42,
             spectate: None,
+            seed_typed: false,
         });
         for _ in 0..5 {
             app.update();
@@ -540,6 +572,7 @@ mod tests {
             style: StyleChoice::Random,
             seed: 42,
             spectate: None,
+            seed_typed: false,
         }
         .setup(&r, 42)
         .unwrap();

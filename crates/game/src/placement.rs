@@ -269,6 +269,7 @@ pub fn update_placement(
             message.text = text;
         }
         message.since = time.secs();
+        message.alert = false;
     }
 
     if !buttons.just_released(MouseButton::Left) {

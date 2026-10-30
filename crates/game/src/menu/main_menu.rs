@@ -20,7 +20,8 @@
 //! (`super::new_game`): a Difficulty row (Easy, Standard, Hard) with the
 //! chosen level's disclosed bonus under it, an Opponent style row
 //! (Random, Balanced, Rush, Boom, Tower), the seed readout with New seed
-//! (digits typed while the menu is open edit it, Backspace deletes), and
+//! (digits typed while the menu is open edit it, the first one replacing
+//! the seed shown, Backspace deletes), and
 //! the disclosure "The bot knows where your Seat is". New Game then asks
 //! `match_scope` for the chosen match ([`PendingMatch::NewGame`]).
 
@@ -35,7 +36,7 @@ use bevy::window::{PrimaryWindow, WindowRef};
 use rules::strings::fill;
 
 use super::AppState;
-use crate::command_card::{CARD_BUTTON_PX, CARD_GAP_PX};
+use crate::command_card::CARD_GAP_PX;
 use crate::economy_hud::UiStrings;
 use crate::hud::{
     HUD_CLICK_STEP_FRAMES, HUD_FONT_PX, PADDING_PX, RealCursor, SyntheticMouse, node_centre_logical,
@@ -116,12 +117,7 @@ pub fn button_label(button: MenuButton, strings: &UiStrings) -> String {
 }
 
 fn text(value: &str, size: f32) -> impl Bundle {
-    (
-        Text::new(value),
-        crate::fonts::hud_font(size),
-        TextColor(palette::HUD_TEXT),
-        Pickable::IGNORE,
-    )
+    super::widgets::label(value, size)
 }
 
 /// `OnEnter(AppState::Menu)`: spawn the menu, a full-window column (all
@@ -135,10 +131,15 @@ pub fn spawn_main_menu(
     mut commands: Commands,
     sim: NonSend<SimHandle>,
     strings: Option<Res<UiStrings>>,
+    settings: Option<ResMut<super::new_game::NewGameSettings>>,
 ) {
     let Some(strings) = strings else {
         return;
     };
+    // The seed shown is one set for the player: typing replaces it.
+    if let Some(mut settings) = settings {
+        settings.seed_typed = false;
+    }
     let lines = menu_texts(&sim.setup().map, sim.seed(), &strings);
     commands
         .spawn((
@@ -167,9 +168,10 @@ pub fn spawn_main_menu(
             }
             // M6: the New Game selector.
             let rules = sim.rules();
-            option_row(
+            super::widgets::option_row(
                 menu,
                 strings.hud("menu.difficulty"),
+                HUD_FONT_PX,
                 super::new_game::DIFFICULTIES
                     .iter()
                     .enumerate()
@@ -180,11 +182,13 @@ pub fn spawn_main_menu(
                         )
                     })
                     .collect(),
+                on_option_click,
             );
             menu.spawn((BonusCaption, text("", HUD_FONT_PX)));
-            option_row(
+            super::widgets::option_row(
                 menu,
                 strings.hud("menu.style"),
+                HUD_FONT_PX,
                 super::new_game::STYLES
                     .iter()
                     .enumerate()
@@ -195,6 +199,7 @@ pub fn spawn_main_menu(
                         )
                     })
                     .collect(),
+                on_option_click,
             );
             menu.spawn(text(strings.hud("menu.disclosure"), HUD_FONT_PX));
             menu.spawn((
@@ -210,27 +215,17 @@ pub fn spawn_main_menu(
             .with_children(|row| {
                 for button in [MenuButton::NewGame, MenuButton::NewSeed, MenuButton::Quit] {
                     let label = button_label(button, &strings);
-                    let mut entity = row.spawn((
-                        Name::new(format!("Menu button {label}")),
+                    let mut entity = super::widgets::spawn_button(
+                        row,
+                        format!("Menu button {label}"),
                         button,
-                        Button,
-                        Node {
-                            width: Val::Px(CARD_BUTTON_PX.x),
-                            height: Val::Px(CARD_BUTTON_PX.y),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(palette::HUD_BUTTON),
-                    ));
+                        text(&label, HUD_FONT_PX),
+                    );
                     match button {
                         MenuButton::NewGame => entity.observe(on_new_game_click),
                         MenuButton::Quit => entity.observe(on_quit_click),
                         MenuButton::NewSeed => entity.observe(on_new_seed_click),
                     };
-                    entity.with_children(|b| {
-                        b.spawn(text(&label, HUD_FONT_PX));
-                    });
                 }
             });
         });
@@ -265,7 +260,7 @@ pub fn on_new_seed_click(
         return;
     }
     if let Some(mut settings) = settings {
-        settings.seed = crate::app::fresh_seed();
+        settings.offer_seed(crate::app::fresh_seed());
     }
 }
 
@@ -294,50 +289,6 @@ pub fn on_option_click(
             };
         }
     }
-}
-
-/// One labelled row of option buttons.
-fn option_row(menu: &mut ChildSpawnerCommands, label: &str, options: Vec<(MenuOption, String)>) {
-    menu.spawn((
-        Node {
-            flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(CARD_GAP_PX),
-            align_items: AlignItems::Center,
-            ..default()
-        },
-        Pickable::IGNORE,
-    ))
-    .with_children(|row| {
-        row.spawn((
-            Node {
-                width: Val::Px(150.0),
-                ..default()
-            },
-            Pickable::IGNORE,
-        ))
-        .with_children(|l| {
-            l.spawn(text(label, HUD_FONT_PX));
-        });
-        for (option, name) in options {
-            row.spawn((
-                Name::new(format!("Option {name}")),
-                option,
-                Button,
-                Node {
-                    width: Val::Px(CARD_BUTTON_PX.x),
-                    height: Val::Px(CARD_BUTTON_PX.y),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BackgroundColor(palette::HUD_BUTTON),
-            ))
-            .observe(on_option_click)
-            .with_children(|b| {
-                b.spawn(text(&name, HUD_FONT_PX));
-            });
-        }
-    });
 }
 
 /// Whether `option` is the chosen one in `settings`.
@@ -372,10 +323,7 @@ pub fn update_selector(
     };
     if let Some(keys) = keys {
         for key in keys.get_just_pressed() {
-            let seed = super::new_game::edit_seed(settings.seed, *key);
-            if seed != settings.seed {
-                settings.seed = seed;
-            }
+            settings.type_seed_key(*key);
         }
     }
     for (option, mut bg, interaction) in &mut options {
@@ -413,20 +361,12 @@ pub fn on_quit_click(click: On<Pointer<Click>>, mut exit: MessageWriter<AppExit>
     exit.write(AppExit::Success);
 }
 
-/// Hover and pressed colours for the menu's buttons (`palette::HUD_BUTTON*`).
+/// Hover and pressed colours for the menu's buttons (`palette::HUD_BUTTON*`,
+/// `widgets::button_colors`).
 pub fn menu_button_colors(
-    mut buttons: Query<
-        (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, With<MenuButton>),
-    >,
+    buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuButton>)>,
 ) {
-    for (interaction, mut background) in &mut buttons {
-        background.0 = match interaction {
-            Interaction::Pressed => palette::HUD_BUTTON_PRESSED,
-            Interaction::Hovered => palette::HUD_BUTTON_HOVER,
-            Interaction::None => palette::HUD_BUTTON,
-        };
-    }
+    super::widgets::button_colors::<MenuButton>(buttons);
 }
 
 /// The New Game click proxy's state (`--new-game-after-seconds`).

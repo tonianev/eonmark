@@ -4,7 +4,9 @@
 //! Rush, Boom or Tower; Random draws one of rush, boom and tower per seed
 //! with `ai::resolve_personality` and stays "?" until the game-over
 //! screen) and the seed (the readout, New seed, and digits typed while the
-//! menu is open, Backspace to delete). Defaults: Standard, Random, a fresh
+//! menu is open, Backspace to delete; the first digit typed after the seed
+//! was set for the player replaces it, so a blind seed such as 112 can be
+//! typed over the prefilled one). Defaults: Standard, Random, a fresh
 //! wall-clock seed; the speed (x1) persists across Play Again.
 //!
 //! [`NewGameSettings`] holds the choice; New Game turns it into a
@@ -46,6 +48,11 @@ pub struct NewGameSettings {
     /// `--spectate`: both seats as `(bot, personality)`; Play Again then
     /// spectates again on a fresh seed.
     pub spectate: Option<[(String, String); 2]>,
+    /// Whether the player has typed into the seed field since the seed was
+    /// last set for them (the launch, New seed, opening the menu): until
+    /// then the first digit typed replaces the prefilled seed instead of
+    /// extending it ([`NewGameSettings::type_seed_key`]).
+    pub seed_typed: bool,
 }
 
 impl Default for NewGameSettings {
@@ -55,6 +62,7 @@ impl Default for NewGameSettings {
             style: StyleChoice::Random,
             seed: 1,
             spectate: None,
+            seed_typed: false,
         }
     }
 }
@@ -91,7 +99,33 @@ impl NewGameSettings {
             style,
             seed,
             spectate,
+            seed_typed: false,
         }
+    }
+
+    /// Show `seed` in the field as one set for the player (New seed, a
+    /// fresh seed on opening the menu): the next digit typed replaces it.
+    pub fn offer_seed(&mut self, seed: u64) {
+        self.seed = seed;
+        self.seed_typed = false;
+    }
+
+    /// One key typed while the menu is open: the first digit after the seed
+    /// was set for the player replaces it (the owner types a blind seed
+    /// such as 112 over a 9- or 10-digit wall-clock one), later digits
+    /// append ([`edit_seed`]), Backspace deletes; any other key does
+    /// nothing.
+    pub fn type_seed_key(&mut self, key: KeyCode) {
+        if key != KeyCode::Backspace && digit_of(key).is_none() {
+            return;
+        }
+        let base = if self.seed_typed || key == KeyCode::Backspace {
+            self.seed
+        } else {
+            0
+        };
+        self.seed = edit_seed(base, key);
+        self.seed_typed = true;
     }
 
     /// The match these settings build at `seed`: the local player against
@@ -180,7 +214,18 @@ pub fn bonus_caption(rules: &Rules, id: &str) -> String {
 /// [`SEED_DIGITS_MAX`] digits), Backspace drops the last; anything else is
 /// ignored.
 pub fn edit_seed(seed: u64, key: KeyCode) -> u64 {
-    let digit = match key {
+    match (key, digit_of(key)) {
+        (KeyCode::Backspace, _) => seed / 10,
+        (_, Some(d)) if seed.to_string().len() < SEED_DIGITS_MAX => {
+            seed.saturating_mul(10).saturating_add(d)
+        }
+        _ => seed,
+    }
+}
+
+/// The digit a key types (main row or numpad).
+fn digit_of(key: KeyCode) -> Option<u64> {
+    match key {
         KeyCode::Digit0 | KeyCode::Numpad0 => Some(0),
         KeyCode::Digit1 | KeyCode::Numpad1 => Some(1),
         KeyCode::Digit2 | KeyCode::Numpad2 => Some(2),
@@ -192,13 +237,6 @@ pub fn edit_seed(seed: u64, key: KeyCode) -> u64 {
         KeyCode::Digit8 | KeyCode::Numpad8 => Some(8),
         KeyCode::Digit9 | KeyCode::Numpad9 => Some(9),
         _ => None,
-    };
-    match (key, digit) {
-        (KeyCode::Backspace, _) => seed / 10,
-        (_, Some(d)) if seed.to_string().len() < SEED_DIGITS_MAX => {
-            seed.saturating_mul(10).saturating_add(d)
-        }
-        _ => seed,
     }
 }
 
@@ -220,6 +258,7 @@ mod tests {
             style: StyleChoice::Id("rush".into()),
             seed: 42,
             spectate: None,
+            seed_typed: false,
         };
         let setup = s.setup(&r, 42).unwrap();
         assert_eq!(setup, MatchSetup::vs_bot(&r, 42, "hard", "rush"));
@@ -282,5 +321,27 @@ mod tests {
         assert_eq!(edit_seed(0, KeyCode::Backspace), 0);
         let full = 1_234_567_890;
         assert_eq!(edit_seed(full, KeyCode::Digit9), full, "ten digits at most");
+        // Typed over a seed set for the player, the first digit replaces it.
+        for prefilled in [140_397_499, 2_707_532_408, 7] {
+            let mut s = NewGameSettings::default();
+            s.offer_seed(prefilled);
+            for k in [
+                KeyCode::Digit1,
+                KeyCode::KeyA,
+                KeyCode::Digit1,
+                KeyCode::Digit2,
+            ] {
+                s.type_seed_key(k);
+            }
+            assert_eq!(s.seed, 112, "{prefilled}");
+            s.type_seed_key(KeyCode::Backspace);
+            assert_eq!(s.seed, 11);
+        }
+        let mut s = NewGameSettings::default();
+        s.offer_seed(140_397_499);
+        s.type_seed_key(KeyCode::Backspace);
+        assert_eq!(s.seed, 14_039_749, "Backspace edits the prefilled seed");
+        s.type_seed_key(KeyCode::Digit0);
+        assert_eq!(s.seed, 140_397_490, "then digits append");
     }
 }

@@ -583,6 +583,171 @@ mod tests {
         );
     }
 
+    /// M6: the top bar of the windowed game fits 1280 px on one line at
+    /// stream size with four-digit stocks, two capped rates, a full pop,
+    /// the speed chip and the match clock at 45:00; and the match strip
+    /// under its left end (the longest opponent label any New Game or
+    /// `--spectate` seats give, every difficulty and style, plus the
+    /// tiebreak race at its widest) fits beside the widest age strip under
+    /// its right end.
+    #[test]
+    fn the_m6_top_bar_fits_1280_px_with_the_speed_chip_clock_and_longest_opponent() {
+        use crate::alert::{MatchClock, MatchStrip, OpponentLabel, TiebreakReadout};
+        use crate::economy_hud::{ResourceReadout, resource_text};
+        use crate::fonts::measure::text_width_px;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<crate::sim_driver::SimEventMsg>()
+            .insert_resource(strings())
+            .init_resource::<PendingCommands>()
+            .add_systems(Startup, spawn_hud)
+            .add_systems(
+                Startup,
+                (
+                    crate::speed::spawn_speed_ui.after(spawn_hud),
+                    crate::alert::spawn_readouts
+                        .after(crate::economy_hud::spawn_economy_hud)
+                        .after(crate::speed::spawn_speed_ui),
+                ),
+            )
+            .add_plugins((crate::economy_hud::EconomyHudPlugin, AgeHudPlugin));
+        app.world_mut().insert_non_send(standard());
+        app.update();
+        let world = app.world_mut();
+        let bar = world
+            .query_filtered::<Entity, With<crate::hud::TopBar>>()
+            .single(world)
+            .unwrap();
+        let strip = world
+            .query_filtered::<Entity, With<MatchStrip>>()
+            .single(world)
+            .unwrap();
+        let s = strings();
+        let rules = app.world().non_send::<SimHandle>().rules().clone();
+        // The longest opponent label: every pair of seats, spectated or
+        // against the human.
+        let mut seats = Vec::new();
+        for d in crate::menu::new_game::DIFFICULTIES {
+            for p in &rules.ai.personalities {
+                seats.push((d.to_string(), p.id.clone()));
+            }
+        }
+        let mut labels = Vec::new();
+        for a in &seats {
+            labels.push(crate::alert::opponent_label(
+                &sim::MatchSetup::vs_bot(&rules, 1, &a.0, &a.1),
+                &rules,
+                LOCAL_PLAYER,
+                false,
+            ));
+            for b in &seats {
+                labels.push(crate::alert::opponent_label(
+                    &sim::MatchSetup::bots(&rules, 1, (&a.0, &a.1), (&b.0, &b.1)),
+                    &rules,
+                    LOCAL_PLAYER,
+                    false,
+                ));
+            }
+        }
+        let w16 = |t: &String| text_width_px(t, 16.0);
+        let longest = labels
+            .iter()
+            .max_by(|a, b| w16(a).total_cmp(&w16(b)))
+            .unwrap()
+            .clone();
+        let race = ["top.tiebreak", "top.tiebreak_spectate"]
+            .map(|k| {
+                fill(
+                    s.hud(k),
+                    &[("time", "45:00"), ("count", "100"), ("cap", "100")],
+                )
+            })
+            .into_iter()
+            .max_by(|a, b| w16(a).total_cmp(&w16(b)))
+            .unwrap();
+        let text_of = |e: Entity| -> Option<String> {
+            let world = app.world();
+            if let Some(r) = world.get::<ResourceReadout>(e) {
+                let def = &rules.resources.resources[r.0];
+                let stock = def.stockpile_cap.map_or(1234, i64::from);
+                let rate = sim::RateInfo {
+                    raw: if r.0 < 2 { 150 } else { 100 },
+                    cap: Some(100),
+                    credited: 100,
+                };
+                return Some(resource_text(&s, &rules, r.0, stock, &rate));
+            }
+            if world.get::<MatchClock>(e).is_some() {
+                return Some("45:00".into());
+            }
+            if world.get::<OpponentLabel>(e).is_some() {
+                return Some(longest.clone());
+            }
+            if world.get::<TiebreakReadout>(e).is_some() {
+                return Some(race.clone());
+            }
+            world
+                .get::<PopReadout>(e)
+                .map(|_| fill(s.hud("pop"), &[("used", "100"), ("cap", "100")]))
+        };
+        let world = app.world();
+        let mut shown = Vec::new();
+        let mut stack = vec![bar];
+        while let Some(e) = stack.pop() {
+            if let Some(t) = text_of(e).or_else(|| world.get::<Text>(e).map(|t| t.0.clone())) {
+                shown.push(t);
+            }
+            if let Some(c) = world.get::<Children>(e) {
+                stack.extend(c.iter());
+            }
+        }
+        assert!(shown.iter().any(|t| t == "x1"), "the speed chip: {shown:?}");
+        assert!(shown.iter().any(|t| t == "45:00"), "the clock: {shown:?}");
+        assert!(!shown.contains(&longest), "the label is in the strip");
+        let width = laid_out_width(world, bar, &text_of);
+        assert!(
+            width <= crate::app::WINDOW_SIZE.0 as f32,
+            "the top bar needs {width} px: {shown:?}"
+        );
+        // The strip with the race shown (it is hidden before 35:00).
+        let node = world.get::<Node>(strip).unwrap();
+        let px = |v: Val| if let Val::Px(x) = v { x } else { 0.0 };
+        let strip_w = px(node.padding.left)
+            + px(node.padding.right)
+            + w16(&longest)
+            + px(node.column_gap)
+            + w16(&race);
+        // The widest age strip: each age's readout and its Advance label.
+        let age_node = world
+            .iter_entities()
+            .find(|e| e.contains::<AgeStrip>())
+            .and_then(|e| e.get::<Node>())
+            .unwrap();
+        let age_w = rules
+            .ages
+            .iter()
+            .zip(rules.ages.iter().skip(1))
+            .map(|(age, next)| {
+                let readout = fill(s.hud("age"), &[("name", &age.name)]);
+                let advance = fill(s.hud("button.advance"), &[("name", &next.name)]);
+                let label = format!(
+                    "{advance}: {}",
+                    cost_text(&rules, &rules.amounts(&next.cost))
+                );
+                px(age_node.padding.left)
+                    + px(age_node.padding.right)
+                    + text_width_px(&readout, HUD_FONT_PX)
+                    + px(age_node.column_gap)
+                    + 2.0 * ADVANCE_PADDING_PX
+                    + text_width_px(&label, CARD_FONT_PX)
+            })
+            .fold(0.0_f32, f32::max);
+        assert!(
+            strip_w + age_w <= crate::app::WINDOW_SIZE.0 as f32,
+            "the match strip ({strip_w} px: {longest:?}, {race:?}) and the age strip ({age_w} px) overlap"
+        );
+    }
+
     /// Greyed with the tech count at the start; greyed with the cost on
     /// its face when only the stockpile is short, as a card button is;
     /// enabled with the cost once the sim accepts `AdvanceAge`; and greyed

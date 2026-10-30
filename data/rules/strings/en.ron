@@ -96,6 +96,9 @@
     "outcome.victory": "Victory",
     "outcome.defeat": "Defeat",
     "outcome.draw": "Draw",
+    // Spectating: the winning seat instead of Victory or Defeat (M6).
+    "outcome.blue_wins": "Blue wins",
+    "outcome.red_wins": "Red wins",
     "outcome.seat_captured": "The Seat was captured",
     "outcome.all_towns_lost": "Every Town was lost",
     "outcome.surrender": "Surrender",
@@ -133,6 +136,9 @@
     "game_over.waves": "Waves · raids · retreats",
     "game_over.enemy_on_land": "Enemy first on your land",
     "game_over.lowest_town": "Your lowest Town",
+    // Spectating (both seats bots), the facts name the seats.
+    "game_over.red_on_blue_land": "Red first on Blue's land",
+    "game_over.blue_lowest_town": "Blue's lowest Town",
     "game_over.first_contact": "First contact",
     "game_over.annexed": "annexed",
     "game_over.never": "never",
@@ -143,6 +149,7 @@
     "alert.army": "Army under attack",
     "alert.building": "{building} under attack",
     "top.tiebreak": "Tiebreak {time} · You {count}% · Bot {cap}%",
+    "top.tiebreak_spectate": "Tiebreak {time} · Blue {count}% · Red {cap}%",
     "speed.paused": "PAUSED",
   },
 )

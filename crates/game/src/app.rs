@@ -291,6 +291,18 @@ pub fn speed_start(cli: &Cli) -> crate::speed::GameSpeed {
     speed
 }
 
+/// Whether the opponent's style starts hidden ("?" in the top bar, in the
+/// `match:` line) for a launch with `settings` (M6 owner decision 6): a
+/// Random style, on `--skip-menu` and on a plain launch alike. Under the
+/// menu the top bar follows the selector anyway, and New Game sets it
+/// again for the match it builds (`match_scope`).
+pub fn launch_style_hidden(
+    cli: &Cli,
+    settings: &crate::menu::new_game::NewGameSettings,
+) -> crate::alert::StyleHidden {
+    crate::alert::StyleHidden(settings.hides_style() && cli.scenario.is_none())
+}
+
 /// `--exit-after-seconds`: wall-clock deadline for smoke tests.
 #[derive(Resource)]
 struct ExitAfter(Duration);
@@ -400,9 +412,7 @@ pub fn run(cli: &Cli) -> AppExit {
     let replay_path = new_replay_path(&replay_dir(cli.replay_dir.as_deref()), handle.seed());
     // M6: what New Game and Play Again build, and where they record.
     let settings = crate::menu::new_game::NewGameSettings::from_cli(cli, handle.seed());
-    let style_hidden = crate::alert::StyleHidden(
-        settings.hides_style() && !cli.starts_in_menu() && cli.scenario.is_none(),
-    );
+    let style_hidden = launch_style_hidden(cli, &settings);
     let hud_click_check = cli.scenario.as_deref() == Some("hud_click");
     let present_mode = if cli.max_fps.is_some() {
         PresentMode::AutoNoVsync
@@ -619,8 +629,49 @@ pub fn run(cli: &Cli) -> AppExit {
         app.insert_resource(TickScreenshots(cli.screenshot_at.clone()))
             .add_systems(Update, take_tick_screenshots);
     }
+    if let Some(secs) = cli.exit_after_outcome_seconds {
+        app.insert_resource(ExitAfterOutcome::new(Duration::from_secs_f64(secs)))
+            .add_systems(Update, exit_after_outcome);
+    }
 
     app.run()
+}
+
+/// `--exit-after-outcome-seconds` (M6): exit this long (real time) after
+/// the match is decided, so an automated run ends with its outcome instead
+/// of waiting out `--exit-after-seconds`.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct ExitAfterOutcome {
+    /// The delay after the outcome.
+    pub after: Duration,
+    /// `Time<Real>` when the outcome was first seen.
+    pub at: Option<Duration>,
+}
+
+impl ExitAfterOutcome {
+    /// Exit `after` the outcome.
+    pub fn new(after: Duration) -> Self {
+        Self { after, at: None }
+    }
+}
+
+/// Write `AppExit::Success` once [`ExitAfterOutcome`]'s delay has passed
+/// since `MatchOver` appeared (printing why).
+pub fn exit_after_outcome(
+    time: Res<Time<Real>>,
+    over: Option<Res<crate::sim_driver::MatchOver>>,
+    mut state: ResMut<ExitAfterOutcome>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if over.is_none() {
+        return;
+    }
+    let now = time.elapsed();
+    let at = *state.at.get_or_insert(now);
+    if now.saturating_sub(at) >= state.after {
+        info!("exit-after-outcome-seconds reached");
+        exit.write(AppExit::Success);
+    }
 }
 
 fn exit_after(
@@ -1089,6 +1140,95 @@ mod tests {
             Ok(crate::cli::Parsed::Run(cli)) => cli,
             other => panic!("{args:?}: {other:?}"),
         }
+    }
+
+    /// `--speed 4 --pause-at-tick 600 --pause-seconds 3` (ROADMAP M6 line
+    /// 5's command) starts at x4 with the automatic pause; no `--speed` is
+    /// x1 (M6 owner decision 6).
+    #[test]
+    fn speed_start_follows_speed_and_the_pause_flags() {
+        use crate::speed::Speed;
+        let s = speed_start(&launch(&[
+            "--scenario",
+            "scripted_match",
+            "--speed",
+            "4",
+            "--pause-at-tick",
+            "600",
+            "--pause-seconds",
+            "3",
+        ]));
+        assert_eq!(s.speed, Speed::X4);
+        assert_eq!(s.pause_at, Some(600));
+        assert_eq!(s.pause_for, Some(Duration::from_secs(3)));
+        assert!(!s.is_paused());
+        for (factor, want) in [("1", Speed::X1), ("2", Speed::X2)] {
+            assert_eq!(speed_start(&launch(&["--speed", factor])).speed, want);
+        }
+        let plain = speed_start(&launch(&[]));
+        assert_eq!(plain.speed, Speed::X1);
+        assert_eq!((plain.pause_at, plain.pause_for), (None, None));
+    }
+
+    /// `--exit-after-outcome-seconds 2`: no exit before the outcome; once
+    /// `MatchOver` appears, `AppExit::Success` 2 s (real) later and not
+    /// before.
+    #[test]
+    fn exit_after_outcome_waits_for_the_outcome_then_its_delay() {
+        use bevy::time::TimeUpdateStrategy;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                500,
+            )))
+            .insert_resource(ExitAfterOutcome::new(Duration::from_secs(2)))
+            .add_systems(Update, exit_after_outcome);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(app.should_exit(), None, "no outcome yet");
+        app.insert_resource(crate::sim_driver::MatchOver {
+            result: sim::MatchResult {
+                outcome: sim::Outcome::Draw,
+                reason: sim::OutcomeReason::Surrender,
+                tick: 1,
+            },
+            hash: 0,
+            replay: None,
+        });
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(app.should_exit(), None, "1.5 s after the outcome");
+        app.update();
+        assert_eq!(app.should_exit(), Some(AppExit::Success));
+    }
+
+    /// A menu launch whose style is Random (`--personality random`, or no
+    /// `--personality`, the default) starts with the style hidden, so the
+    /// top bar under the menu never names it; an explicit style and a
+    /// scenario do not hide it.
+    #[test]
+    fn a_menu_launch_with_a_random_style_hides_it() {
+        use crate::menu::new_game::NewGameSettings;
+        let hidden = |args: &[&str]| {
+            let cli = launch(args);
+            let settings = NewGameSettings::from_cli(&cli, 42);
+            launch_style_hidden(&cli, &settings).0
+        };
+        assert!(hidden(&["--personality", "random", "--seed", "42"]));
+        assert!(hidden(&["--seed", "42"]), "no --personality: Random");
+        assert!(hidden(&["--skip-menu", "--personality", "random"]));
+        assert!(!hidden(&["--personality", "rush"]));
+        assert!(!hidden(&["--skip-menu"]), "--skip-menu keeps standard");
+        assert!(!hidden(&["--scenario", "scripted_match"]));
+        let rules =
+            Rules::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data"))
+                .unwrap();
+        let setup = sim::MatchSetup::vs_bot(&rules, 42, "standard", "standard");
+        let label =
+            crate::alert::opponent_label(&setup, &rules, crate::sim_driver::LOCAL_PLAYER, true);
+        assert!(label.ends_with("· ?"), "{label}");
     }
 
     /// M5b acceptance 4's New Game: a plain launch opens on the main menu

@@ -110,7 +110,8 @@ impl Speed {
 
 /// Why the game is paused. `Key` (Space, `--pause-at-tick`) is the active
 /// pause: world input stays on. `Menu` is M7's Esc pause menu, which also
-/// gates `hud::WorldInputSet` ([`world_input_allowed`]).
+/// gates `hud::WorldInputSet` ([`world_input_allowed`], wired into
+/// `hud::gate_world_input`); nothing sets it before M7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseReason {
     /// Space or the `--pause-at-tick` automation aid.
@@ -249,7 +250,10 @@ impl UiNow<'_> {
     }
 }
 
-/// What the `driver:` exit line reports beyond `DriverStats` (M6).
+/// What the `driver:` exit line reports beyond `DriverStats` (M6). Like
+/// `DriverStats` it covers the current match only: a rebuilt match (New
+/// Game, Play Again, Main Menu) resets both (`match_scope`), so each
+/// match's `match_log:` line carries its own speed and pause times.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
 pub struct SpeedStats {
     /// Real seconds of the running match spent at each speed, unpaused.
@@ -450,11 +454,16 @@ pub fn world_input_allowed(speed: Option<Res<GameSpeed>>) -> bool {
     speed.is_none_or(|s| s.paused != Some(PauseReason::Menu))
 }
 
-fn spawn_speed_ui(
+pub fn spawn_speed_ui(
     mut commands: Commands,
     top: Query<Entity, With<crate::hud::TopBar>>,
     root: Query<Entity, With<crate::hud::HudRoot>>,
+    strings: Option<Res<crate::economy_hud::UiStrings>>,
 ) {
+    let paused = strings.as_deref().map_or_else(
+        || "PAUSED".to_string(),
+        |s| s.hud("speed.paused").to_string(),
+    );
     if let Ok(bar) = top.single() {
         commands.entity(bar).with_children(|bar| {
             bar.spawn((
@@ -504,7 +513,7 @@ fn spawn_speed_ui(
             ))
             .with_children(|b| {
                 b.spawn((
-                    Text::new("PAUSED"),
+                    Text::new(paused),
                     crate::fonts::hud_font(PAUSED_FONT_PX),
                     TextColor(palette::HUD_TEXT),
                     Pickable::IGNORE,
@@ -800,6 +809,137 @@ mod tests {
         );
         let real = app.world().resource::<Time<Real>>().elapsed_secs_f64() - real0;
         assert!((real - 0.1).abs() < 1e-9);
+    }
+
+    /// The double-click window reads `Time<Real>` (M6 owner decision 7:
+    /// selection works during the active pause): two primary clicks on the
+    /// same unit 100 ms of real time apart are a double click while paused
+    /// (the game clock stands still) and at x4 (it runs 400 ms).
+    #[test]
+    fn double_click_works_paused_and_at_x4() {
+        use crate::selection::{DragBox, LastClick, Selection, on_unit_click};
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Click, Pointer};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        let mut paused = GameSpeed::at(Speed::X1);
+        paused.paused = Some(PauseReason::Key);
+        for (name, start) in [("paused", paused), ("x4", GameSpeed::at(Speed::X4))] {
+            let mut app = speed_app(skirmish(), start, None);
+            app.init_resource::<Selection>()
+                .init_resource::<LastClick>()
+                .init_resource::<crate::hud::PointerOverUi>()
+                .init_resource::<DragBox>()
+                .init_resource::<crate::orders::OrderMode>()
+                .add_observer(on_unit_click);
+            app.world_mut().spawn((
+                crate::camera::RtsCamera::default(),
+                Camera::default(),
+                GlobalTransform::default(),
+            ));
+            let unit = app
+                .world_mut()
+                .spawn(crate::present::UnitRef(sim::UnitId(1)))
+                .id();
+            let click = |app: &mut App| {
+                app.world_mut().trigger(Pointer::new(
+                    PointerId::Mouse,
+                    Location {
+                        target: NormalizedRenderTarget::None {
+                            width: 1,
+                            height: 1,
+                        },
+                        position: Vec2::ZERO,
+                    },
+                    Click {
+                        button: PointerButton::Primary,
+                        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+                        duration: Duration::ZERO,
+                        count: 1,
+                    },
+                    unit,
+                ));
+            };
+            frame(&mut app, Duration::from_millis(50));
+            click(&mut app);
+            assert_eq!(
+                app.world().resource::<LastClick>().previous.map(|(e, _)| e),
+                Some(unit),
+                "{name}: the first click is remembered"
+            );
+            assert!(
+                app.world()
+                    .resource::<Selection>()
+                    .units
+                    .contains(&sim::UnitId(1)),
+                "{name}"
+            );
+            frame(&mut app, Duration::from_millis(100));
+            click(&mut app);
+            assert_eq!(
+                app.world().resource::<LastClick>().previous,
+                None,
+                "{name}: the second click 100 ms later is a double click"
+            );
+        }
+    }
+
+    /// `hud::WorldInputSet` stops while M7's pause menu pauses the game
+    /// (`PauseReason::Menu`) and runs during the active `Key` pause.
+    #[test]
+    fn the_menu_pause_gates_world_input_and_the_key_pause_does_not() {
+        use crate::hud::WorldInputSet;
+        #[derive(Resource, Default)]
+        struct WorldInputRuns(u32);
+        for (reason, want) in [
+            (None, 1),
+            (Some(PauseReason::Key), 1),
+            (Some(PauseReason::Menu), 0),
+        ] {
+            let mut start = GameSpeed::at(Speed::X1);
+            start.paused = reason;
+            let mut app = speed_app(skirmish(), start, None);
+            app.init_resource::<WorldInputRuns>().add_systems(
+                Update,
+                (|mut runs: ResMut<WorldInputRuns>| runs.0 += 1).in_set(WorldInputSet),
+            );
+            crate::hud::gate_world_input(&mut app);
+            frame(&mut app, Duration::from_millis(50));
+            assert_eq!(
+                app.world().resource::<WorldInputRuns>().0,
+                want,
+                "{reason:?}"
+            );
+        }
+    }
+
+    /// The banner's text is the strings file's `speed.paused` (the
+    /// stream-legibility copy pass edits it there).
+    #[test]
+    fn the_paused_banner_reads_its_string() {
+        let mut strings = rules::strings::Strings::load(data(), "en").unwrap();
+        strings
+            .hud
+            .insert("speed.paused".into(), "PAUSE TEST".into());
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(crate::economy_hud::UiStrings(strings))
+            .add_plugins(SimPlugin::new(skirmish(), Box::new(LocalInput)))
+            .add_systems(Startup, crate::hud::spawn_hud)
+            .add_plugins(SpeedPlugin {
+                start: GameSpeed::default(),
+                ui: true,
+            });
+        app.update();
+        let mut q = app.world_mut().query::<(&PausedBanner, &Children)>();
+        let children: Vec<Entity> = q.iter(app.world()).flat_map(|(_, c)| c.to_vec()).collect();
+        let texts: Vec<String> = children
+            .iter()
+            .filter_map(|c| app.world().get::<Text>(*c).map(|t| t.0.clone()))
+            .collect();
+        assert_eq!(texts, ["PAUSE TEST"]);
     }
 
     /// A message shown before a 5 s pause is still shown after it, and goes

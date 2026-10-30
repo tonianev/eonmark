@@ -91,7 +91,7 @@ impl Plugin for GameOverPlugin {
                         // A `--screenshot-at` the deciding tick captures the
                         // frame that first shows the overlay.
                         .before(crate::app::take_tick_screenshots),
-                    game_over_button_colors,
+                    crate::menu::widgets::button_colors::<GameOverButton>,
                 ),
             );
         if let Some(after) = self.play_again_after {
@@ -207,29 +207,17 @@ pub fn spawn_outcome_overlay(mut commands: Commands) {
                         GameOverButton::MainMenu,
                         GameOverButton::Quit,
                     ] {
-                        row.spawn((
-                            Name::new(format!("Game-over {button:?}")),
+                        // The label is filled at the outcome (`show_outcome`).
+                        crate::menu::widgets::spawn_button(
+                            row,
+                            format!("Game-over {button:?}"),
                             button,
-                            Button,
-                            Node {
-                                width: Val::Px(crate::command_card::CARD_BUTTON_PX.x),
-                                height: Val::Px(crate::command_card::CARD_BUTTON_PX.y),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                ..default()
-                            },
-                            BackgroundColor(palette::HUD_BUTTON),
-                        ))
-                        .observe(on_game_over_click)
-                        .with_children(|b| {
-                            b.spawn((
+                            (
                                 GameOverButtonLabel(button),
-                                Text::new(""),
-                                crate::fonts::hud_font(GAME_OVER_FONT_PX),
-                                TextColor(palette::HUD_TEXT),
-                                Pickable::IGNORE,
-                            ));
-                        });
+                                crate::menu::widgets::label("", GAME_OVER_FONT_PX),
+                            ),
+                        )
+                        .observe(on_game_over_click);
                     }
                 });
         });
@@ -238,6 +226,7 @@ pub fn spawn_outcome_overlay(mut commands: Commands) {
 /// The overlay's five lines for `over`, as `local` sees it:
 ///
 /// 0. "Victory" when `local` won, "Defeat" when another player did, "Draw";
+///    spectating (`local`'s seat is a bot), "Blue wins" or "Red wins";
 /// 1. the reason: "The Seat was captured", "Every Town was lost",
 ///    "Surrender", or "Territory at the time limit: 1248 tiles to 1245"
 ///    (the local player's owned tiles first, then the most any other
@@ -254,7 +243,18 @@ pub fn overlay_texts(
     rules: &Rules,
     strings: &UiStrings,
 ) -> [String; 5] {
+    // Spectating (the local seat is a bot), nobody is "you": the title names
+    // the winning seat, Blue (P0) or Red (P1).
+    let spectating = view
+        .setup()
+        .players
+        .iter()
+        .any(|p| p.id == local && p.is_ai);
     let title = match over.result.outcome {
+        Outcome::Victory { player, .. } if spectating && player == PlayerId(0) => {
+            strings.hud("outcome.blue_wins")
+        }
+        Outcome::Victory { .. } if spectating => strings.hud("outcome.red_wins"),
         Outcome::Victory { player, .. } if player == local => strings.hud("outcome.victory"),
         Outcome::Victory { .. } => strings.hud("outcome.defeat"),
         Outcome::Draw => strings.hud("outcome.draw"),
@@ -356,19 +356,19 @@ pub fn show_outcome(
         commands.entity(grid).despawn_related::<Children>();
         commands.entity(grid).with_children(|g| {
             for (r, row) in rows.iter().enumerate() {
-                for (c, cell) in row.iter().enumerate() {
-                    let color = match (r, c) {
-                        (0, _) => palette::HUD_AMBER,
-                        (_, 0) => palette::GAME_OVER_LABEL,
-                        _ => palette::HUD_TEXT,
-                    };
-                    g.spawn((
-                        Text::new(cell.clone()),
-                        crate::fonts::hud_font(GAME_OVER_FONT_PX),
-                        TextColor(color),
-                        Pickable::IGNORE,
-                    ));
-                }
+                let cells: Vec<(String, Color)> = row
+                    .iter()
+                    .enumerate()
+                    .map(|(c, cell)| {
+                        let color = match (r, c) {
+                            (0, _) => palette::HUD_AMBER,
+                            (_, 0) => palette::GAME_OVER_LABEL,
+                            _ => palette::HUD_TEXT,
+                        };
+                        (cell.clone(), color)
+                    })
+                    .collect();
+                crate::menu::widgets::stat_row(g, &cells, GAME_OVER_FONT_PX);
             }
         });
     }
@@ -394,6 +394,11 @@ pub fn show_outcome(
     for mut visibility in &mut ghosts {
         *visibility = Visibility::Hidden;
     }
+    // The minimap sits under the label column; its outline would show
+    // through the scrim (`hide_game_over` brings it back).
+    for mut visibility in extra.minimap {
+        *visibility = Visibility::Hidden;
+    }
 }
 
 /// The game-over screen's extra parameters (M6).
@@ -402,6 +407,12 @@ pub struct GameOverExtra<'w, 's> {
     grid: Query<'w, 's, Entity, With<GameOverGrid>>,
     labels: Query<'w, 's, (&'static GameOverButtonLabel, &'static mut Text), Without<OutcomeLine>>,
     speed: Option<Res<'w, crate::speed::SpeedStats>>,
+    minimap: Query<
+        'w,
+        's,
+        &'static mut Visibility,
+        (With<crate::minimap::MinimapFrame>, Without<PlacementGhost>),
+    >,
 }
 
 /// A game-over button's label text.
@@ -482,6 +493,12 @@ fn seat_label(report: &ai::match_log::MatchReport, p: PlayerId) -> String {
     }
 }
 
+/// `text` with each space a no-break space (U+00A0): a count stays on the
+/// line of its kind or resource when a statistics cell wraps.
+fn nbsp(text: &str) -> String {
+    text.replace(' ', "\u{a0}")
+}
+
 fn kinds_text(
     report: &ai::match_log::MatchReport,
     m: &std::collections::BTreeMap<sim::UnitKindId, u32>,
@@ -495,7 +512,7 @@ fn kinds_text(
                 .rules
                 .unit_kind(k.0)
                 .map_or_else(|| format!("kind {}", k.0), |u| u.name.clone());
-            format!("{name} {n}")
+            nbsp(&format!("{name} {n}"))
         })
         .collect();
     if by.is_empty() {
@@ -512,7 +529,9 @@ fn kinds_text(
 /// bonus (total, share of its income, the bundle and its interval) and
 /// its waves, raids and retreats; then the match facts in the first
 /// column: decisive or the tiebreak's territory shares, the enemy first on
-/// your land, your lowest Town and first contact. `territory` is the
+/// your land, your lowest Town and first contact (spectating: Red first on
+/// Blue's land, Blue's lowest Town). A count and its kind are joined by a
+/// no-break space, so a wrapped cell never splits them. `territory` is the
 /// tiles `local` and the other player own at the end (the tiebreak's
 /// shares).
 pub fn game_over_rows(
@@ -571,15 +590,16 @@ pub fn game_over_rows(
                     .iter()
                     .filter_map(|r| {
                         let n = *d.income.get(&r.id)?;
-                        (n > 0).then(|| format!("{n} {}", r.name))
+                        (n > 0).then(|| nbsp(&format!("{n} {}", r.name)))
                     })
                     .collect()
             });
             format!(
-                "+{} ({}% of income), {} every {every} s",
+                "+{} ({}% of income), {} {}",
                 s.bonus_total(),
                 report.stats.bonus_share_permille(p) / 10,
-                bundle.join(", ")
+                bundle.join(", "),
+                nbsp(&format!("every {every} s"))
             )
         } else {
             "-".to_string()
@@ -641,8 +661,13 @@ pub fn game_over_rows(
     let mine = report.stats.player(me);
     let enemy = report.stats.player(them);
     let never = h("game_over.never");
+    let (on_land, lowest_town) = if spectating {
+        ("game_over.red_on_blue_land", "game_over.blue_lowest_town")
+    } else {
+        ("game_over.enemy_on_land", "game_over.lowest_town")
+    };
     rows.push([
-        h("game_over.enemy_on_land"),
+        h(on_land),
         enemy
             .first_on_land_tick
             .map_or_else(|| never.clone(), clock),
@@ -653,7 +678,7 @@ pub fn game_over_rows(
     } else {
         format!("{}%", mine.min_own_town_hp_permille / 10)
     };
-    rows.push([h("game_over.lowest_town"), lowest, String::new()]);
+    rows.push([h(lowest_town), lowest, String::new()]);
     rows.push([
         h("game_over.first_contact"),
         report.stats.first_contact_tick().map_or(never, clock),
@@ -662,11 +687,16 @@ pub fn game_over_rows(
     rows
 }
 
-/// Hide the game-over screen (a rebuilt match, `match_scope`).
+/// Hide the game-over screen (a rebuilt match, `match_scope`) and show the
+/// minimap again (it is not match-scoped, so it lasts the session).
 pub fn hide_game_over(world: &mut World) {
     let mut q = world.query_filtered::<&mut Node, With<OutcomeOverlay>>();
     for mut node in q.iter_mut(world) {
         node.display = Display::None;
+    }
+    let mut q = world.query_filtered::<&mut Visibility, With<crate::minimap::MinimapFrame>>();
+    for mut v in q.iter_mut(world) {
+        *v = Visibility::Inherited;
     }
 }
 
@@ -703,21 +733,6 @@ pub fn on_game_over_click(
             println!("game-over: quit");
             exit.write(bevy::app::AppExit::Success);
         }
-    }
-}
-
-fn game_over_button_colors(
-    mut buttons: Query<
-        (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, With<GameOverButton>),
-    >,
-) {
-    for (interaction, mut bg) in &mut buttons {
-        bg.0 = match interaction {
-            Interaction::Pressed => palette::HUD_BUTTON_PRESSED,
-            Interaction::Hovered => palette::HUD_BUTTON_HOVER,
-            Interaction::None => palette::HUD_BUTTON,
-        };
     }
 }
 
@@ -1138,7 +1153,8 @@ mod tests {
                 "First contact",
             ]
         );
-        assert!(rows[1][1].starts_with("2 (Yeoman 2)"), "{:?}", rows[1]);
+        // A count stays with its kind when the cell wraps (no-break space).
+        assert!(rows[1][1].starts_with("2 (Yeoman\u{a0}2)"), "{:?}", rows[1]);
         assert_eq!(rows[7][1], "-", "the human gets no bonus");
         assert_eq!(rows[8][2], "0 · 0 · 0", "no wave by tick 1203");
         assert_eq!(rows[9][1], "Decisive");
@@ -1174,7 +1190,73 @@ mod tests {
                 "Red · Standard · Balanced".into()
             ]
         );
+        // Nobody is "you": the facts name the seats.
+        assert_eq!(rows[10][0], "Red first on Blue's land");
+        assert_eq!(rows[11][0], "Blue's lowest Town");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Spectating, the title names the winning seat ("Blue wins", "Red
+    /// wins") instead of Victory or Defeat for P0.
+    #[test]
+    fn a_spectated_end_card_names_the_winning_seat() {
+        let rules = Rules::load(data()).unwrap();
+        let s = strings();
+        let setup = MatchSetup::bots(&rules, 1, ("passive", ""), ("passive", ""));
+        let sim = SimHandle::from_setup(setup, rules.clone());
+        let view = sim.view();
+        let won = |player| Outcome::Victory {
+            player,
+            decisive: true,
+        };
+        let title = |o| {
+            overlay_texts(
+                &over(o, OutcomeReason::SeatCaptured, 600),
+                LOCAL_PLAYER,
+                &view,
+                &rules,
+                &s,
+            )[0]
+            .clone()
+        };
+        assert_eq!(title(won(PlayerId(1))), "Red wins");
+        assert_eq!(title(won(PlayerId(0))), "Blue wins");
+        assert_eq!(title(Outcome::Draw), "Draw");
+    }
+
+    /// The minimap (not match-scoped, under the overlay) is hidden while
+    /// the game-over screen shows, so its outline does not show through
+    /// the label column, and comes back when the screen is hidden (Play
+    /// Again, Main Menu).
+    #[test]
+    fn the_minimap_is_hidden_under_the_game_over_screen_and_comes_back() {
+        use crate::minimap::MinimapFrame;
+        let rules = Rules::load(data()).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(strings())
+            .add_systems(Startup, spawn_outcome_overlay)
+            .add_systems(Update, show_outcome.run_if(resource_added::<MatchOver>));
+        app.world_mut().insert_non_send(SimHandle::from_setup(
+            MatchSetup::scenario(&rules, 1),
+            rules,
+        ));
+        let frame = app
+            .world_mut()
+            .spawn((MinimapFrame, Visibility::Inherited))
+            .id();
+        app.update();
+        app.insert_resource(over(Outcome::Draw, OutcomeReason::Surrender, 3));
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(frame),
+            Some(&Visibility::Hidden)
+        );
+        hide_game_over(app.world_mut());
+        assert_eq!(
+            app.world().get::<Visibility>(frame),
+            Some(&Visibility::Inherited)
+        );
     }
 
     /// The game-over screen of a long Hard-against-Hard match laid out at

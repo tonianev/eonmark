@@ -100,6 +100,8 @@ pub const HUD_KEYS: &[(&str, &[&str])] = &[
     ("outcome.victory", &[]),
     ("outcome.defeat", &[]),
     ("outcome.draw", &[]),
+    ("outcome.blue_wins", &[]),
+    ("outcome.red_wins", &[]),
     ("outcome.seat_captured", &[]),
     ("outcome.all_towns_lost", &[]),
     ("outcome.surrender", &[]),
@@ -135,6 +137,8 @@ pub const HUD_KEYS: &[(&str, &[&str])] = &[
     ("game_over.waves", &[]),
     ("game_over.enemy_on_land", &[]),
     ("game_over.lowest_town", &[]),
+    ("game_over.red_on_blue_land", &[]),
+    ("game_over.blue_lowest_town", &[]),
     ("game_over.first_contact", &[]),
     ("game_over.annexed", &[]),
     ("game_over.never", &[]),
@@ -145,8 +149,15 @@ pub const HUD_KEYS: &[(&str, &[&str])] = &[
     ("alert.army", &[]),
     ("alert.building", &["building"]),
     ("top.tiebreak", &["time", "count", "cap"]),
+    ("top.tiebreak_spectate", &["time", "count", "cap"]),
     ("speed.paused", &[]),
 ];
+
+/// The size of an alert on the message line, logical px (plan §6.7: no
+/// stream text under 16 px).
+pub const ALERT_FONT_PX: f32 = 16.0;
+/// Padding around an alert's panel, logical px.
+pub const ALERT_PADDING_PX: f32 = 4.0;
 
 /// How long the message line shows a message, in seconds.
 pub const MESSAGE_SECONDS: f64 = 4.0;
@@ -194,13 +205,24 @@ pub struct MessageState {
     /// `TownAnnexed` remove): a reset carries only the Town, and its
     /// "Annexation stopped" is for the attacker too (M5a).
     pub annexing: BTreeMap<BuildingId, PlayerId>,
+    /// The message is an under-attack alert (`alert.rs`, M6): drawn in
+    /// amber at [`ALERT_FONT_PX`] on the HUD panel, apart from routine
+    /// notices.
+    pub alert: bool,
 }
 
 impl MessageState {
-    /// Show `text` from `now` (`speed::UiNow::secs`).
+    /// Show the routine notice `text` from `now` (`speed::UiNow::secs`).
     pub fn set(&mut self, text: String, now: f64) {
         self.text = text;
         self.since = now;
+        self.alert = false;
+    }
+
+    /// Show the under-attack alert `text` from `now`.
+    pub fn set_alert(&mut self, text: String, now: f64) {
+        self.set(text, now);
+        self.alert = true;
     }
 }
 
@@ -380,7 +402,12 @@ pub fn spawn_economy_hud(
                 Pickable::IGNORE,
             ))
             .with_children(|line| {
-                line.spawn((MessageLine, hud_text(""), Pickable::IGNORE));
+                line.spawn((
+                    MessageLine,
+                    hud_text(""),
+                    BackgroundColor(Color::NONE),
+                    Pickable::IGNORE,
+                ));
             });
         });
     }
@@ -596,17 +623,53 @@ pub fn collect_messages(
     }
 }
 
-/// Mirror [`MessageState`] into the message line's text.
+/// Mirror [`MessageState`] into the message line: its text, and its look,
+/// a routine notice in [`HUD_FONT_PX`] HUD text with no backing, an alert
+/// at [`ALERT_FONT_PX`] in amber on the HUD panel.
+#[allow(clippy::type_complexity)]
 pub fn update_message_line(
     state: Res<MessageState>,
-    mut line: Query<&mut Text, With<MessageLine>>,
+    mut line: Query<
+        (
+            &mut Text,
+            &mut TextFont,
+            &mut TextColor,
+            &mut BackgroundColor,
+            &mut Node,
+        ),
+        With<MessageLine>,
+    >,
 ) {
     if !state.is_changed() {
         return;
     }
-    for mut text in &mut line {
+    let alert = state.alert && !state.text.is_empty();
+    let (px, color, bg, pad) = if alert {
+        (
+            ALERT_FONT_PX,
+            palette::HUD_AMBER,
+            palette::HUD_PANEL,
+            ALERT_PADDING_PX,
+        )
+    } else {
+        (HUD_FONT_PX, palette::HUD_TEXT, Color::NONE, 0.0)
+    };
+    for (mut text, mut font, mut text_color, mut background, mut node) in &mut line {
         if text.0 != state.text {
             text.0 = state.text.clone();
+        }
+        if font.font_size != bevy::text::FontSize::Px(px) {
+            font.font_size = bevy::text::FontSize::Px(px);
+        }
+        if text_color.0 != color {
+            text_color.0 = color;
+        }
+        if background.0 != bg {
+            background.0 = bg;
+        }
+        let padding = UiRect::axes(Val::Px(pad * 2.0), Val::Px(pad));
+        if node.padding != padding {
+            node.padding = padding;
         }
     }
 }

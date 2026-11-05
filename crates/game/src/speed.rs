@@ -1,4 +1,4 @@
-//! Game speed and pause (M6, ROADMAP M6 line 5; owner decision 7): x1, x2
+//! Game speed and pause (ROADMAP M6 line 5; M6 owner decision 7): x1, x2
 //! and x4, Space, `-` and `=` in every build, and an ACTIVE pause: the
 //! camera, selection, orders and the command card keep working while the
 //! sim stands still, and orders given while paused go out with the first
@@ -121,7 +121,7 @@ pub enum PauseReason {
 }
 
 /// The game speed and pause (M6). Speed persists across Play Again and New
-/// Game (owner decision 6); the pause does not.
+/// Game (M6 owner decision 6); the pause does not.
 #[derive(Resource, Debug, Clone, PartialEq, Default)]
 pub struct GameSpeed {
     /// The current speed.

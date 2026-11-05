@@ -1,6 +1,6 @@
 //! The match lifecycle (M6): New Game, Play Again and Main Menu rebuild
 //! the match in place, in the same window, so OBS's window capture
-//! survives them (owner decision 10).
+//! survives them (M6 owner decision 10).
 //!
 //! The first match is still built at launch (`app::build_match`), so
 //! `SimPlugin::build` and the start-up readers that need a `SimHandle`
@@ -22,7 +22,7 @@
 //! 2. insert a new `SimHandle` (`try_from_setup`), `LocalInput`,
 //!    `PendingCommands::for_setup`, `LocalSeat` and a `PendingRecording`
 //!    under the session's replay directory, discard the fixed clock's
-//!    overstep, unpause (the speed is kept, owner decision 6), remove
+//!    overstep, unpause (the speed is kept, M6 owner decision 6), remove
 //!    `MatchOver` and hide the game-over screen, point the camera at the
 //!    local player's first units, print the `match:` line and write
 //!    [`MatchStarted`] (an audio hook for M7).

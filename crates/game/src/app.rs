@@ -1291,7 +1291,7 @@ mod tests {
             1_792_000_000_123_456_789 & 0xffff_ffff
         );
         assert!(fresh_seed() <= u64::from(u32::MAX));
-        // Owner decision 6: without `--seed` a plain launch and `--spectate`
+        // M5b owner decision 6: without `--seed` a plain launch and `--spectate`
         // take the clock's seed, and `--seed` (even `--seed 1`, the
         // default's value) overrides it.
         let clock = || 0xabcd_u64;

@@ -511,23 +511,33 @@ jobs:
 
       # ROADMAP M6 line 5 in a window: `--scenario scripted_match` at x4
       # with a 3 s pause at tick 600, under Xvfb on lavapipe (about 18-21
-      # ticks/s at x4 there, so the outcome comes about 70-100 s in; the
-      # 240 s deadline is a margin). The pause must land on tick 600, the
+      # ticks/s at x4 there, so the outcome comes about 70-100 s in). The
+      # game exits 2 s after the outcome (`--exit-after-outcome-seconds`);
+      # 240 s is only the deadline of a run that never gets there. The
+      # pause must land on tick 600, the exit `driver:` line must show the
+      # whole run at x4 (no time at x1 or x2: the outcome hash is the same
+      # at any speed, so only this line shows `--speed 4` took effect), the
       # `outcome:` line's hash must be scripted_match.hash (the replay is
       # the same at any speed), and the game's own replay must re-simulate
       # to it through --headless-run. Lavapipe cannot show x4 throughput;
       # the headless rate test and the owner's Mac do (docs/PLAYTEST.md).
+      # The log, the replay and the re-simulation go under render-smoke/,
+      # which the step below uploads even on failure, and a failing command
+      # prints the log's tail first.
       - name: M6 line 5 (scripted_match at x4 with a pause, Xvfb, lavapipe)
         run: |
-          out="$RUNNER_TEMP/m6-x4"
+          out="$RUNNER_TEMP/render-smoke/m6-x4"
           mkdir -p "$out/replays"
+          trap 'echo "--- $out/x4.log (last 50 lines) ---"; tail -n 50 "$out/x4.log" || true' ERR
           icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
           xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd" \
             target/ci/eonmark --scenario scripted_match --speed 4 --pause-at-tick 600 --pause-seconds 3 \
-            --background --exit-after-seconds 240 --replay-dir "$out/replays" > "$out/x4.log" 2>&1
+            --background --exit-after-outcome-seconds 2 --exit-after-seconds 240 \
+            --replay-dir "$out/replays" > "$out/x4.log" 2>&1
           grep -E '^(speed|pause|outcome|replay|driver): ' "$out/x4.log"
           grep -q '^pause: on tick=600$' "$out/x4.log"
           grep -q '^pause: off tick=600 after_s=' "$out/x4.log"
+          grep -Eq '^driver: .* x1_s=0\.0 x2_s=0\.0 x4_s=[0-9]*[1-9][0-9]*\.[0-9] ' "$out/x4.log"
           golden="$(cat crates/sim/tests/fixtures/scripted_match.hash)"
           grep -q "^outcome: victory player=1 decisive=true reason=surrender tick=1203 hash=$golden\$" "$out/x4.log"
           replay="$(sed -n 's/^replay: //p' "$out/x4.log" | head -1)"

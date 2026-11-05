@@ -16,7 +16,7 @@
 //! `bevy_picking`), prints `new-game: clicked at (x, y) after <t> s` and
 //! puts the real cursor back (`hud::RealCursor`).
 //!
-//! M6 (owner decision 6): the menu is the New Game selector too
+//! Since M6 (M6 owner decision 6) the menu is the New Game selector too
 //! (`super::new_game`): a Difficulty row (Easy, Standard, Hard) with the
 //! chosen level's disclosed bonus under it, an Opponent style row
 //! (Random, Balanced, Rush, Boom, Tower), the seed readout with New seed

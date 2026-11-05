@@ -9,7 +9,7 @@
 //!
 //! M6 (slice 3) grows it into the game-over screen ([`GameOverPlugin`];
 //! `MatchOver` stays a resource, no new state): under the five lines, a
-//! table of the statistics of owner decision 8 in two columns, "You" and
+//! table of the statistics of M6 owner decision 8 in two columns, "You" and
 //! "Hard · Rush" (Blue and Red when spectating; [`game_over_rows`]), built
 //! from the live `MatchStats` and `ai::bot_stats` through
 //! `ai::match_log::MatchReport`, so it reads the same numbers as `sim-cli
@@ -45,7 +45,7 @@ pub const TITLE_FONT_PX: f32 = 32.0;
 /// The game-over title's font size (M6: the stream's end card), logical px.
 pub const GAME_OVER_TITLE_PX: f32 = 40.0;
 /// The game-over screen's text size: nothing on it is under 16 px
-/// logical, so it reads on a 1280 x 720 stream (owner decision 10).
+/// logical, so it reads on a 1280 x 720 stream (M6 owner decision 10).
 pub const GAME_OVER_FONT_PX: f32 = 16.0;
 
 /// The statistics table of the game-over screen (M6).
@@ -75,8 +75,9 @@ pub struct OutcomeLine(pub usize);
 /// The game-over screen (windowed app only; M5a's outcome overlay grown in
 /// M6).
 pub struct GameOverPlugin {
-    /// `--play-again-after-seconds`: press Play Again this long after the
-    /// screen first shows (once).
+    /// `--play-again-after-seconds`: ask for Play Again this long after the
+    /// screen first shows (once; the `PendingMatch` the button inserts, not
+    /// a picking click).
     pub play_again_after: Option<std::time::Duration>,
 }
 

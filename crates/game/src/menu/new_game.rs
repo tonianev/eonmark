@@ -69,7 +69,7 @@ impl Default for NewGameSettings {
 
 impl NewGameSettings {
     /// The settings a launch starts with: `--difficulty` (Standard),
-    /// `--personality` (`random` or none: Random on a plain launch, owner
+    /// `--personality` (`random` or none: Random on a plain launch, M6 owner
     /// decision 6; `--skip-menu` keeps M5b's `standard` when none is
     /// given), the match's seed, and `--spectate`'s seats.
     pub fn from_cli(cli: &crate::cli::Cli, seed: u64) -> Self {

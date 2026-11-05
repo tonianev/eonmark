@@ -3,7 +3,7 @@
 # line 6's automated proxy: the game-over statistics screenshot standing in
 # for ci_testing, M6 owner decision 9). `just m6-checks` builds both
 # binaries and runs it; a local, PR-pasted check like m5b_checks.sh. Every
-# run is 1280 x 720 (the stream's logical size, owner decision 10).
+# run is 1280 x 720 (the stream's logical size, M6 owner decision 10).
 #
 #   1. Line 5: `sim-cli verify` of the scripted_match golden, then
 #      `--scenario scripted_match` at x1, and at x4 with `--pause-at-tick
@@ -12,6 +12,11 @@
 #      decisive=true reason=surrender tick=T hash=H` with H the golden's,
 #      the x4 run `pause: on tick=600` and `pause: off tick=600 after_s=`,
 #      and both replays must `sim-cli verify` to `OK final_hash=H ticks=T`.
+#      Each run's exit `driver:` line must show it ran at its speed: the x1
+#      run all its time at x1 (`x1_s` > 0, `x2_s=0.0 x4_s=0.0`), the x4 run
+#      all at x4 (`x1_s=0.0 x2_s=0.0`, `x4_s` > 0). Both runs exit 2 s
+#      after the outcome (`--exit-after-outcome-seconds 2`); the deadlines
+#      only bound a run that never gets there.
 #   2. The New Game selector: a plain launch with `--difficulty hard
 #      --personality rush --seed 42`, first for 8 s with --screenshot (the
 #      menu, m6-new-game.png), then with `--new-game-after-seconds 3`: it
@@ -26,9 +31,11 @@
 #      must be T, it must print the `match_log:` line, and its replay
 #      (recorded from T-400, with no human order before it) must verify to
 #      the outcome's hash.
-#   4. Play Again: the same run's `--play-again-after-seconds 2` presses
-#      Play Again on that screen: a second `match:` line, a second replay,
-#      and both replays verify OK.
+#   4. Play Again: the same run's `--play-again-after-seconds 2` asks for
+#      Play Again on that screen (the `PendingMatch::PlayAgain` the button's
+#      click inserts; the button's picking path is the unit test
+#      `outcome::tests::game_over_buttons_rebuild_or_return_to_menu`): a
+#      second `match:` line, a second replay, and both replays verify OK.
 #   5. No eonmark (and no Xvfb) process is left.
 #
 # On Linux without a display every game runs under `xvfb-run` on lavapipe,
@@ -71,7 +78,11 @@ bad() { echo "FAIL  $*"; fail=1; }
 ok() { echo "PASS  $*"; }
 want_step() { case " $only " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-# Linux without a display: a virtual one on lavapipe.
+# Linux without a display: a virtual one on lavapipe. Xvfb starts the
+# pointer at the screen's centre and this Xvfb ignores XTEST warps, so the
+# screen is 1280x1600: the centre (640, 800) is below the 1280x720 window
+# (background mode opens it in the top-left corner), and no menu button
+# shows its hover colour in m6-new-game.png as a second selection.
 wrap=()
 if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ]; then
   icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1 || true)
@@ -79,7 +90,7 @@ if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ]; then
     echo "error: no display, and xvfb-run or lavapipe is missing (apt-get install xvfb mesa-vulkan-drivers)" >&2
     exit 1
   fi
-  wrap=(xvfb-run -a -s "-screen 0 1280x800x24" env VK_ICD_FILENAMES="$icd")
+  wrap=(xvfb-run -a -s "-screen 0 1280x1600x24" env VK_ICD_FILENAMES="$icd")
 fi
 
 # Run the game with "$@" into the log $1; sets `status`.
@@ -123,16 +134,30 @@ if want_step 1; then
     rm -rf "$dir"; mkdir -p "$dir"
     log="$out/$run.log"
     if [ "$run" = x1 ]; then
-      game "$log" --scenario scripted_match --speed 1 --replay-dir "$dir" --exit-after-seconds "$x1_seconds"
+      game "$log" --scenario scripted_match --speed 1 --replay-dir "$dir" \
+        --exit-after-outcome-seconds 2 --exit-after-seconds "$x1_seconds"
     else
       rm -f "$out/m6-paused.png"
       game "$log" --scenario scripted_match --speed 4 --pause-at-tick 600 --pause-seconds 3 \
-        --screenshot-at "600:$out/m6-paused.png" --replay-dir "$dir" --exit-after-seconds "$x4_seconds"
+        --screenshot-at "600:$out/m6-paused.png" --replay-dir "$dir" \
+        --exit-after-outcome-seconds 2 --exit-after-seconds "$x4_seconds"
     fi
     if [ "$status" -eq 0 ]; then ok "$run: the game exited 0"; else bad "$run: the game exited $status"; fi
     no_errors "$log"
     grep -E '^(speed|pause|outcome|driver): ' "$log" | sed 's/^/    /' || true
     if grep -qx "$want_outcome" "$log"; then ok "$run: $want_outcome"; else bad "$run: no '$want_outcome'"; fi
+    # The speed the run actually played at (the outcome hash is the same
+    # at any speed by design, so only the driver line shows it).
+    if [ "$run" = x1 ]; then
+      ran='^driver: .* x1_s=[0-9]*[1-9][0-9]*\.[0-9] x2_s=0\.0 x4_s=0\.0 '
+    else
+      ran='^driver: .* x1_s=0\.0 x2_s=0\.0 x4_s=[0-9]*[1-9][0-9]*\.[0-9] '
+    fi
+    if grep -Eq "$ran" "$log"; then
+      ok "$run: ran at $run: $(grep '^driver: ' "$log")"
+    else
+      bad "$run: the driver line does not show the run at $run only"
+    fi
     replay="$(sed -n 's/^replay: //p' "$log" | head -1)"
     if [ -n "$replay" ] && [ -f "$replay" ]; then
       verify_is "$replay" "OK final_hash=$golden ticks=$ticks"

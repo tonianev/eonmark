@@ -25,7 +25,7 @@
 #      line, and its --replay-dir stays empty (the lazy recorder).
 #   4. New Game: a plain launch with --seed 7 whose
 #      --new-game-after-seconds proxy clicks the real button. Since M6 the
-#      menu's style defaults to Random (owner decision 6), so the run
+#      menu's style defaults to Random (M6 owner decision 6), so the run
 #      passes --personality standard to keep M5b's Standard setup. It must
 #      print `new-game: clicked at`, `match: new game vs standard` and a
 #      `replay:` path, and `sim-cli verify` of that replay must print `OK`

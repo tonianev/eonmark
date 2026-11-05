@@ -507,6 +507,27 @@ pub struct Readouts<'w, 's> {
             Without<TiebreakReadout>,
         ),
     >,
+    strips: Query<'w, 's, &'static mut Node, (With<MatchStrip>, Without<TiebreakReadout>)>,
+}
+
+impl Readouts<'_, '_> {
+    /// Hide the match strip while it has nothing to show (a scenario has
+    /// no opponent and, before 35:00, no race), so no empty panel sits
+    /// under the top bar.
+    fn fit_strip(&mut self) {
+        let label = self.labels.iter().any(|t| !t.0.is_empty());
+        let race = self.race.iter().any(|(_, n)| n.display != Display::None);
+        let display = if label || race {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        for mut node in &mut self.strips {
+            if node.display != display {
+                node.display = display;
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
@@ -539,6 +560,7 @@ fn update_readouts(
     let view = sim.view();
     let second = view.tick / view.rules().tick_rate_hz.max(1);
     if *last_second == Some(second) {
+        readouts.fit_strip();
         return;
     }
     *last_second = Some(second);
@@ -562,6 +584,7 @@ fn update_readouts(
             node.display = display;
         }
     }
+    readouts.fit_strip();
 }
 
 #[cfg(test)]
@@ -728,6 +751,27 @@ mod tests {
         app.update();
         let texts = top_bar_texts(&mut app);
         assert!(texts.iter().any(|t| t == "1:05"), "{texts:?}");
+    }
+
+    /// A scenario has no opponent: the match strip is hidden rather than
+    /// drawn as an empty panel under the top bar; a match against a bot
+    /// shows it.
+    #[test]
+    fn the_match_strip_is_hidden_when_it_has_nothing_to_show() {
+        let strip = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<&Node, With<MatchStrip>>();
+            q.single(app.world()).unwrap().display
+        };
+        let mut app = alert_app(standard_start(), crate::menu::AppState::Skirmish);
+        app.update();
+        assert_eq!(strip(&mut app), Display::None, "scenario: no opponent");
+        let r = rules::Rules::load(data()).unwrap();
+        let mut app = alert_app(
+            SimHandle::vs_bot(r, 42, "standard", "rush"),
+            crate::menu::AppState::Skirmish,
+        );
+        app.update();
+        assert_eq!(strip(&mut app), Display::Flex, "vs a bot");
     }
 
     /// While the New Game menu is open the opponent label follows the

@@ -54,6 +54,8 @@ use crate::sim_driver::{
 pub const BOTTOM_BAR_HEIGHT_PX: f32 = 96.0;
 /// Top bar height, logical px.
 pub const TOP_BAR_HEIGHT_PX: f32 = 28.0;
+/// The least gap between two of the top bar's readouts, logical px.
+pub const TOP_BAR_GAP_PX: f32 = 16.0;
 /// Stop button size, logical px.
 pub const BUTTON_SIZE_PX: Vec2 = Vec2::new(72.0, 28.0);
 /// HUD padding, logical px.
@@ -228,14 +230,18 @@ pub struct HudPlugin {
 /// the frozen world (`outcome.rs` blocks picking under its overlay too).
 /// M5b: also while the main menu is open (`sim_driver::match_running`)
 /// and while the local slot is a bot (`--spectate`,
-/// `sim_driver::local_player_is_human`).
+/// `sim_driver::local_player_is_human`). M6: and while M7's pause menu
+/// pauses the game (`speed::PauseReason::Menu`,
+/// `speed::world_input_allowed`); the active `Key` pause leaves world
+/// input on.
 pub fn gate_world_input(app: &mut App) {
     app.configure_sets(
         Update,
         WorldInputSet
             .run_if(not(resource_exists::<MatchOver>))
             .run_if(match_running)
-            .run_if(local_player_is_human),
+            .run_if(local_player_is_human)
+            .run_if(crate::speed::world_input_allowed),
     );
 }
 
@@ -302,6 +308,9 @@ pub fn spawn_hud(mut commands: Commands) {
                     height: Val::Px(TOP_BAR_HEIGHT_PX),
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::SpaceBetween,
+                    // M6: a gap, so a full bar never runs its readouts
+                    // into each other.
+                    column_gap: Val::Px(TOP_BAR_GAP_PX),
                     padding: UiRect::horizontal(Val::Px(PADDING_PX)),
                     ..default()
                 },

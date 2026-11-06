@@ -15,6 +15,15 @@
 //! (`hud::SyntheticMouse`, the `hud_click` check's path through
 //! `bevy_picking`), prints `new-game: clicked at (x, y) after <t> s` and
 //! puts the real cursor back (`hud::RealCursor`).
+//!
+//! Since M6 (M6 owner decision 6) the menu is the New Game selector too
+//! (`super::new_game`): a Difficulty row (Easy, Standard, Hard) with the
+//! chosen level's disclosed bonus under it, an Opponent style row
+//! (Random, Balanced, Rush, Boom, Tower), the seed readout with New seed
+//! (digits typed while the menu is open edit it, the first one replacing
+//! the seed shown, Backspace deletes), and
+//! the disclosure "The bot knows where your Seat is". New Game then asks
+//! `match_scope` for the chosen match ([`PendingMatch::NewGame`]).
 
 use std::time::Duration;
 
@@ -27,7 +36,7 @@ use bevy::window::{PrimaryWindow, WindowRef};
 use rules::strings::fill;
 
 use super::AppState;
-use crate::command_card::{CARD_BUTTON_PX, CARD_GAP_PX};
+use crate::command_card::CARD_GAP_PX;
 use crate::economy_hud::UiStrings;
 use crate::hud::{
     HUD_CLICK_STEP_FRAMES, HUD_FONT_PX, PADDING_PX, RealCursor, SyntheticMouse, node_centre_logical,
@@ -56,6 +65,35 @@ pub enum MenuButton {
     NewGame,
     /// Quit the game.
     Quit,
+    /// A fresh wall-clock seed (M6).
+    NewSeed,
+}
+
+/// The New Game selector's option buttons (M6): an index into
+/// `new_game::DIFFICULTIES` or `new_game::STYLES`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuOption {
+    /// A difficulty.
+    Difficulty(usize),
+    /// An opponent style.
+    Style(usize),
+}
+
+/// The disclosed bonus caption under the Difficulty row (M6).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct BonusCaption;
+
+/// What the lifecycle should build next (M6), set by the menu's New Game
+/// and the game-over screen's Play Again and Main Menu; taken by
+/// `match_scope::apply_match_request`.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingMatch {
+    /// New Game: the menu's settings at the menu's seed.
+    NewGame,
+    /// Play Again: the same settings at a fresh seed.
+    PlayAgain,
+    /// Main Menu: a fresh, unstarted match the menu shows.
+    MainMenu,
 }
 
 /// The menu's three lines for a match on `map` with `seed`: "Eonmark",
@@ -73,17 +111,13 @@ pub fn button_label(button: MenuButton, strings: &UiStrings) -> String {
     match button {
         MenuButton::NewGame => strings.hud("menu.new_game"),
         MenuButton::Quit => strings.hud("menu.quit"),
+        MenuButton::NewSeed => strings.hud("menu.new_seed"),
     }
     .to_string()
 }
 
 fn text(value: &str, size: f32) -> impl Bundle {
-    (
-        Text::new(value),
-        crate::fonts::hud_font(size),
-        TextColor(palette::HUD_TEXT),
-        Pickable::IGNORE,
-    )
+    super::widgets::label(value, size)
 }
 
 /// `OnEnter(AppState::Menu)`: spawn the menu, a full-window column (all
@@ -97,10 +131,15 @@ pub fn spawn_main_menu(
     mut commands: Commands,
     sim: NonSend<SimHandle>,
     strings: Option<Res<UiStrings>>,
+    settings: Option<ResMut<super::new_game::NewGameSettings>>,
 ) {
     let Some(strings) = strings else {
         return;
     };
+    // The seed shown is one set for the player: typing replaces it.
+    if let Some(mut settings) = settings {
+        settings.seed_typed = false;
+    }
     let lines = menu_texts(&sim.setup().map, sim.seed(), &strings);
     commands
         .spawn((
@@ -127,6 +166,42 @@ pub fn spawn_main_menu(
                 let size = if i == 0 { TITLE_FONT_PX } else { HUD_FONT_PX };
                 menu.spawn((MenuLine(i), text(line, size)));
             }
+            // M6: the New Game selector.
+            let rules = sim.rules();
+            super::widgets::option_row(
+                menu,
+                strings.hud("menu.difficulty"),
+                HUD_FONT_PX,
+                super::new_game::DIFFICULTIES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| {
+                        (
+                            MenuOption::Difficulty(i),
+                            super::new_game::difficulty_label(rules, id),
+                        )
+                    })
+                    .collect(),
+                on_option_click,
+            );
+            menu.spawn((BonusCaption, text("", HUD_FONT_PX)));
+            super::widgets::option_row(
+                menu,
+                strings.hud("menu.style"),
+                HUD_FONT_PX,
+                super::new_game::STYLES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| {
+                        (
+                            MenuOption::Style(i),
+                            super::new_game::style_label(rules, id),
+                        )
+                    })
+                    .collect(),
+                on_option_click,
+            );
+            menu.spawn(text(strings.hud("menu.disclosure"), HUD_FONT_PX));
             menu.spawn((
                 Name::new("Menu buttons"),
                 Node {
@@ -138,28 +213,19 @@ pub fn spawn_main_menu(
                 Pickable::IGNORE,
             ))
             .with_children(|row| {
-                for button in [MenuButton::NewGame, MenuButton::Quit] {
+                for button in [MenuButton::NewGame, MenuButton::NewSeed, MenuButton::Quit] {
                     let label = button_label(button, &strings);
-                    let mut entity = row.spawn((
-                        Name::new(format!("Menu button {label}")),
+                    let mut entity = super::widgets::spawn_button(
+                        row,
+                        format!("Menu button {label}"),
                         button,
-                        Button,
-                        Node {
-                            width: Val::Px(CARD_BUTTON_PX.x),
-                            height: Val::Px(CARD_BUTTON_PX.y),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
-                        BackgroundColor(palette::HUD_BUTTON),
-                    ));
+                        text(&label, HUD_FONT_PX),
+                    );
                     match button {
                         MenuButton::NewGame => entity.observe(on_new_game_click),
                         MenuButton::Quit => entity.observe(on_quit_click),
+                        MenuButton::NewSeed => entity.observe(on_new_seed_click),
                     };
-                    entity.with_children(|b| {
-                        b.spawn(text(&label, HUD_FONT_PX));
-                    });
                 }
             });
         });
@@ -167,12 +233,123 @@ pub fn spawn_main_menu(
 
 /// A primary click on New Game: enter [`AppState::Skirmish`]; the sim
 /// starts stepping, and the recorder starts, in that frame's fixed update.
-pub fn on_new_game_click(click: On<Pointer<Click>>, mut next: ResMut<NextState<AppState>>) {
+/// M6: with the selector's settings present, the match is first rebuilt
+/// from them ([`PendingMatch::NewGame`], applied on entering `Skirmish`).
+pub fn on_new_game_click(
+    click: On<Pointer<Click>>,
+    mut next: ResMut<NextState<AppState>>,
+    settings: Option<Res<super::new_game::NewGameSettings>>,
+    mut commands: Commands,
+) {
     if click.event().event.button != PointerButton::Primary {
         return;
     }
     info!("menu: New Game");
+    if settings.is_some() {
+        commands.insert_resource(PendingMatch::NewGame);
+    }
     next.set(AppState::Skirmish);
+}
+
+/// A primary click on New seed: a fresh wall-clock seed.
+pub fn on_new_seed_click(
+    click: On<Pointer<Click>>,
+    settings: Option<ResMut<super::new_game::NewGameSettings>>,
+) {
+    if click.event().event.button != PointerButton::Primary {
+        return;
+    }
+    if let Some(mut settings) = settings {
+        settings.offer_seed(crate::app::fresh_seed());
+    }
+}
+
+/// A primary click on a difficulty or style option.
+pub fn on_option_click(
+    click: On<Pointer<Click>>,
+    options: Query<&MenuOption>,
+    settings: Option<ResMut<super::new_game::NewGameSettings>>,
+) {
+    if click.event().event.button != PointerButton::Primary {
+        return;
+    }
+    let (Ok(option), Some(mut settings)) = (options.get(click.event().entity), settings) else {
+        return;
+    };
+    match *option {
+        MenuOption::Difficulty(i) => {
+            if let Some(id) = super::new_game::DIFFICULTIES.get(i) {
+                settings.difficulty = (*id).to_string();
+            }
+        }
+        MenuOption::Style(i) => {
+            settings.style = match super::new_game::STYLES.get(i) {
+                Some(&"random") | None => super::new_game::StyleChoice::Random,
+                Some(id) => super::new_game::StyleChoice::Id((*id).to_string()),
+            };
+        }
+    }
+}
+
+/// Whether `option` is the chosen one in `settings`.
+pub fn option_selected(option: MenuOption, settings: &super::new_game::NewGameSettings) -> bool {
+    match option {
+        MenuOption::Difficulty(i) => {
+            super::new_game::DIFFICULTIES.get(i) == Some(&settings.difficulty.as_str())
+        }
+        MenuOption::Style(i) => match (&settings.style, super::new_game::STYLES.get(i)) {
+            (super::new_game::StyleChoice::Random, Some(&"random")) => true,
+            (super::new_game::StyleChoice::Id(id), Some(s)) => id == s,
+            _ => false,
+        },
+    }
+}
+
+/// The selector follows [`super::new_game::NewGameSettings`]: the chosen
+/// options in amber, the bonus caption, the seed line; and digits typed
+/// while the menu is open edit the seed.
+#[allow(clippy::type_complexity)]
+pub fn update_selector(
+    settings: Option<ResMut<super::new_game::NewGameSettings>>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
+    sim: NonSend<SimHandle>,
+    strings: Option<Res<UiStrings>>,
+    mut options: Query<(&MenuOption, &mut BackgroundColor, &Interaction)>,
+    mut caption: Query<&mut Text, (With<BonusCaption>, Without<MenuLine>)>,
+    mut lines: Query<(&MenuLine, &mut Text), Without<BonusCaption>>,
+) {
+    let (Some(mut settings), Some(strings)) = (settings, strings) else {
+        return;
+    };
+    if let Some(keys) = keys {
+        for key in keys.get_just_pressed() {
+            settings.type_seed_key(*key);
+        }
+    }
+    for (option, mut bg, interaction) in &mut options {
+        bg.0 = if option_selected(*option, &settings) {
+            palette::HUD_AMBER
+        } else if *interaction == Interaction::Hovered {
+            palette::HUD_BUTTON_HOVER
+        } else {
+            palette::HUD_BUTTON
+        };
+    }
+    let want = super::new_game::bonus_caption(sim.rules(), &settings.difficulty);
+    for mut t in &mut caption {
+        if t.0 != want {
+            t.0.clone_from(&want);
+        }
+    }
+    let seed = fill(
+        strings.hud("menu.seed"),
+        &[("seed", &settings.seed.to_string())],
+    );
+    for (line, mut t) in &mut lines {
+        if line.0 == 2 && t.0 != seed {
+            t.0.clone_from(&seed);
+        }
+    }
 }
 
 /// A primary click on Quit: `AppExit::Success`. Nothing has been recorded.
@@ -184,20 +361,12 @@ pub fn on_quit_click(click: On<Pointer<Click>>, mut exit: MessageWriter<AppExit>
     exit.write(AppExit::Success);
 }
 
-/// Hover and pressed colours for the menu's buttons (`palette::HUD_BUTTON*`).
+/// Hover and pressed colours for the menu's buttons (`palette::HUD_BUTTON*`,
+/// `widgets::button_colors`).
 pub fn menu_button_colors(
-    mut buttons: Query<
-        (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, With<MenuButton>),
-    >,
+    buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<MenuButton>)>,
 ) {
-    for (interaction, mut background) in &mut buttons {
-        background.0 = match interaction {
-            Interaction::Pressed => palette::HUD_BUTTON_PRESSED,
-            Interaction::Hovered => palette::HUD_BUTTON_HOVER,
-            Interaction::None => palette::HUD_BUTTON,
-        };
-    }
+    super::widgets::button_colors::<MenuButton>(buttons);
 }
 
 /// The New Game click proxy's state (`--new-game-after-seconds`).

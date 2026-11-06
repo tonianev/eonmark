@@ -13,15 +13,21 @@
 //! state: while the menu is open the sim does not step
 //! (`sim_driver::match_running`), world input is off, and the replay
 //! recorder has not started (`sim_driver::PendingRecording`), so quitting
-//! from the menu writes no replay. New Game only switches the state; M6's
-//! Play Again will rebuild the match on entering `Skirmish` instead.
+//! from the menu writes no replay. In M5b New Game only switched the state;
+//! since M6 it rebuilds the match from the selector (below).
+//!
+//! M6 (slice 3): the menu is also the New Game selector
+//! ([`new_game`]), and the match lifecycle (`crate::match_scope`) rebuilds
+//! the match in place for New Game, Play Again and Main Menu.
 //!
 //! On entering `Skirmish` the game prints one line naming the match
 //! ([`match_line`]): `match: new game vs standard personality=standard
-//! seed=<s> map=plains_1v1` against the bot, `match: spectate ...` with
-//! both slots bots.
+//! seed=<s> map=plains_1v1` against the bot (`personality=?` while a Random
+//! style is hidden), `match: spectate ...` with both slots bots.
 
 pub mod main_menu;
+pub mod new_game;
+pub mod widgets;
 
 use std::time::Duration;
 
@@ -58,8 +64,20 @@ pub fn initial_state(cli: &Cli) -> AppState {
 /// personality=<id> seed=<s> map=<map>`; for a match of bots only
 /// (`--spectate`), `match: spectate <bot> personality=<id> vs <bot>
 /// personality=<id> seed=<s> map=<map>`. `None` for a scenario (no bot).
-pub fn match_line(setup: &MatchSetup) -> Option<String> {
-    let seat = |s: &sim::AiSeat| format!("{} personality={}", s.bot, s.personality);
+/// With `hide_style` (New Game's Random, `alert::StyleHidden`) the
+/// opponent's style prints as `personality=?`: the terminal beside the
+/// window must not give away a blind match before the game-over screen
+/// reveals it (M6 owner decision 6); the replay header and the
+/// `match_log:` row keep the resolved style.
+pub fn match_line(setup: &MatchSetup, hide_style: bool) -> Option<String> {
+    let seat = |s: &sim::AiSeat| {
+        let style = if hide_style && !s.personality.is_empty() {
+            "?"
+        } else {
+            s.personality.as_str()
+        };
+        format!("{} personality={style}", s.bot)
+    };
     let tail = format!("seed={} map={}", setup.seed, setup.map);
     let local_is_ai = setup
         .players
@@ -75,9 +93,10 @@ pub fn match_line(setup: &MatchSetup) -> Option<String> {
     }
 }
 
-/// Print [`match_line`] once the match starts (`OnEnter(Skirmish)`).
-fn announce_match(sim: NonSend<SimHandle>) {
-    if let Some(line) = match_line(sim.setup()) {
+/// Print [`match_line`] once the match starts (`OnEnter(Skirmish)`), a
+/// hidden style as `?`.
+pub fn announce_match(sim: NonSend<SimHandle>, hidden: Option<Res<crate::alert::StyleHidden>>) {
+    if let Some(line) = match_line(sim.setup(), hidden.is_some_and(|h| h.0)) {
         println!("{line}");
     }
 }
@@ -96,7 +115,8 @@ impl Plugin for MenuPlugin {
         app.add_systems(OnEnter(AppState::Menu), main_menu::spawn_main_menu)
             .add_systems(
                 Update,
-                main_menu::menu_button_colors.run_if(in_state(AppState::Menu)),
+                (main_menu::menu_button_colors, main_menu::update_selector)
+                    .run_if(in_state(AppState::Menu)),
             )
             .add_systems(OnEnter(AppState::Skirmish), announce_match);
         if let Some(after) = self.new_game_after {
@@ -242,14 +262,7 @@ mod tests {
             .collect();
         lines.sort();
         let lines: Vec<String> = lines.into_iter().map(|(_, t)| t).collect();
-        assert_eq!(
-            lines,
-            [
-                "Eonmark",
-                "Skirmish against the Standard bot on plains_1v1",
-                "Seed 1234"
-            ]
-        );
+        assert_eq!(lines, ["Eonmark", "Skirmish on plains_1v1", "Seed 1234"]);
         assert!(app.world().resource::<ReplayRecorder>().0.is_none());
         assert_eq!(
             app.world().resource::<PendingRecording>().0.as_deref(),
@@ -325,6 +338,76 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// The owner's checklist types a blind seed into the menu's prefilled
+    /// fresh seed: the first digit typed replaces it (a 9- or 10-digit
+    /// wall-clock seed, or one New seed just drew), the next ones append,
+    /// and Backspace edits what was typed.
+    #[test]
+    fn a_seed_typed_over_the_prefilled_fresh_seed_replaces_it() {
+        use super::new_game::NewGameSettings;
+        let path = temp("seed_typed.eonreplay");
+        let mut app = menu_app(&path);
+        app.init_resource::<ButtonInput<KeyCode>>();
+        let typed = |app: &mut App, keys: &[KeyCode]| {
+            for k in keys {
+                let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+                input.release_all();
+                input.clear();
+                input.press(*k);
+                app.update();
+            }
+            let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            input.release_all();
+            input.clear();
+            app.update();
+            app.world().resource::<NewGameSettings>().seed
+        };
+        use KeyCode::{Backspace, Digit0, Digit1, Digit2, Digit7};
+        for prefilled in [140_397_499, 2_707_532_408] {
+            app.insert_resource(NewGameSettings {
+                seed: prefilled,
+                ..NewGameSettings::default()
+            });
+            app.update();
+            assert_eq!(
+                typed(&mut app, &[Digit1, Digit1, Digit2]),
+                112,
+                "{prefilled}"
+            );
+            assert_eq!(typed(&mut app, &[Backspace, Digit7]), 117);
+        }
+        click(&mut app, MenuButton::NewSeed);
+        app.update();
+        assert_ne!(app.world().resource::<NewGameSettings>().seed, 117);
+        assert_eq!(typed(&mut app, &[Digit1, Digit0, Digit7]), 107);
+        let mut q = app.world_mut().query::<(&MenuLine, &Text)>();
+        let seed_line: Vec<String> = q
+            .iter(app.world())
+            .filter(|(l, _)| l.0 == 2)
+            .map(|(_, t)| t.0.clone())
+            .collect();
+        assert_eq!(seed_line, ["Seed 107"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// With a Random style hidden, the `match:` line names no style
+    /// (`personality=?`): the terminal next to the window would otherwise
+    /// give away the blind match before the game-over screen reveals it.
+    /// The replay header and the `match_log:` row keep the resolved style.
+    #[test]
+    fn the_match_line_hides_a_random_style() {
+        let rules = Rules::load(data()).unwrap();
+        let setup = MatchSetup::vs_bot(&rules, 7, "standard", "tower");
+        assert_eq!(
+            match_line(&setup, true).as_deref(),
+            Some("match: new game vs standard personality=? seed=7 map=plains_1v1")
+        );
+        assert_eq!(
+            match_line(&setup, false).as_deref(),
+            Some("match: new game vs standard personality=tower seed=7 map=plains_1v1")
+        );
+    }
+
     /// The line printed on entering `Skirmish` names the bot, its
     /// personality, the seed and the map; a spectated match names both
     /// bots; a scenario prints nothing.
@@ -332,21 +415,28 @@ mod tests {
     fn match_lines_name_the_bots_the_seed_and_the_map() {
         let rules = Rules::load(data()).unwrap();
         assert_eq!(
-            match_line(&MatchSetup::vs_bot(&rules, 7, "standard", "standard")).as_deref(),
+            match_line(
+                &MatchSetup::vs_bot(&rules, 7, "standard", "standard"),
+                false
+            )
+            .as_deref(),
             Some("match: new game vs standard personality=standard seed=7 map=plains_1v1")
         );
         assert_eq!(
-            match_line(&MatchSetup::bots(
-                &rules,
-                1,
-                ("standard", "standard"),
-                ("standard", "standard")
-            ))
+            match_line(
+                &MatchSetup::bots(
+                    &rules,
+                    1,
+                    ("standard", "standard"),
+                    ("standard", "standard")
+                ),
+                false
+            )
             .as_deref(),
             Some(
                 "match: spectate standard personality=standard vs standard personality=standard seed=1 map=plains_1v1"
             )
         );
-        assert_eq!(match_line(&MatchSetup::scenario(&rules, 1)), None);
+        assert_eq!(match_line(&MatchSetup::scenario(&rules, 1), false), None);
     }
 }

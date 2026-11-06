@@ -731,7 +731,9 @@ pub struct MinimapOrders<'w> {
     seat: Option<Res<'w, LocalSeat>>,
     over: Option<Res<'w, MatchOver>>,
     ring_assets: Option<Res<'w, RingAssets>>,
-    time: Res<'w, Time>,
+    /// The marker's clock: `speed::UiClock`, the one
+    /// `selection::expire_move_markers` expires it on.
+    time: crate::speed::UiNow<'w>,
 }
 
 /// A primary click in attack-move mode issues `AttackMove` to the tile and
@@ -774,7 +776,7 @@ pub fn on_minimap_click(
     info!("minimap: seq {seq} to tile ({x}, {y})");
     if let Some(assets) = orders.ring_assets.as_deref() {
         let at = world_from_sim(target, 0.0);
-        let now = orders.time.elapsed_secs();
+        let now = orders.time.secs_f32();
         if attack {
             spawn_attack_marker(&mut commands, assets, at, now);
         } else {
@@ -1566,6 +1568,38 @@ mod tests {
         *app.world_mut().resource_mut::<OrderMode>() = OrderMode::AttackMove;
         click(&mut app, minimap, Vec2::ZERO, PointerButton::Secondary);
         assert!(queued(&mut app).is_empty());
+    }
+
+    /// A minimap order's marker is stamped on the `speed::UiClock`, the
+    /// clock `selection::expire_move_markers` expires it on (M6): with
+    /// the UI clock at 100 s and the game clock near 0 (x4 runs the
+    /// virtual clock ahead, a clamped long frame behind), the marker
+    /// still lasts `MOVE_MARKER_SECS` of UI time.
+    #[test]
+    fn a_minimap_order_marker_is_stamped_on_the_ui_clock() {
+        use crate::selection::{MOVE_MARKER_SECS, MoveMarker, RingAssets};
+        let sim = walkthrough();
+        let own = own_units(&sim);
+        let (mut app, minimap) = input_app(sim);
+        let mut clock = crate::speed::UiClock::default();
+        clock.advance(Duration::from_secs(100));
+        app.insert_resource(clock).insert_resource(RingAssets {
+            marker: Handle::default(),
+            attack: Handle::default(),
+        });
+        app.world_mut()
+            .resource_mut::<Selection>()
+            .set(own.iter().copied());
+        click(&mut app, minimap, Vec2::ZERO, PointerButton::Secondary);
+        app.update();
+        let mut q = app.world_mut().query::<&MoveMarker>();
+        let markers: Vec<f32> = q.iter(app.world()).map(|m| m.expires_at).collect();
+        assert_eq!(markers.len(), 1, "one marker for the order");
+        assert!(
+            (markers[0] - (100.0 + MOVE_MARKER_SECS)).abs() < 1e-3,
+            "expires {} s on the UI clock, not the game clock",
+            markers[0]
+        );
     }
 
     /// With an own building selected a right click sets its rally point at

@@ -8,9 +8,10 @@
 #   2. sim-cli verify <file>, which re-simulates from the header
 #   3. <name>.hash gets the final_hash from verify's OK line, so the hash
 #      comes from an independent re-simulation, not from the recorder.
-# Then it checks the fixture policy on the working tree: if any fixture now
-# differs from the merge base with origin/main (or main), the working-tree
-# rules_version must be larger than the base's. (CI's
+# Then it checks the fixture policy on the working tree: if any existing
+# fixture now differs from the merge base with origin/main (or main), the
+# working-tree rules_version must be larger than the base's (a fixture new
+# since the base needs no bump). (CI's
 # scripts/check_fixture_policy.sh checks the same on commits.)
 #
 # Usage: scripts/rerecord_fixtures.sh [name ...]   (default: every fixture)
@@ -50,8 +51,11 @@ base="$(git merge-base origin/main HEAD 2>/dev/null || git merge-base main HEAD)
 version() { sed -nE 's/^[[:space:]]*rules_version:[[:space:]]*([0-9]+),?.*/\1/p' | head -n 1; }
 old="$(git show "$base:data/rules/rules.ron" | version)"
 new="$(version < data/rules/rules.ron)"
-if git diff --quiet "$base" -- "$dir"; then
-  echo "rerecord: no fixture differs from ${base:0:12}"
+# Only an existing fixture that changed needs the bump; a newly added one is
+# a first recording (as in check_fixture_policy.sh), and README.md is prose.
+changed="$(git diff --name-only --diff-filter=M "$base" -- "$dir" | grep -E '\.(eonreplay|hash)$' || true)"
+if [ -z "$changed" ]; then
+  echo "rerecord: no existing fixture differs from ${base:0:12}"
 elif [ -n "$old" ] && [ -n "$new" ] && [ "$new" -gt "$old" ]; then
   echo "rerecord: fixtures differ from ${base:0:12} with rules_version $old -> $new"
 else

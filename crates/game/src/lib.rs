@@ -66,6 +66,7 @@
 #![forbid(unsafe_code)]
 
 pub mod age_hud;
+pub mod alert;
 pub mod app;
 pub mod background;
 pub mod buildings;
@@ -89,6 +90,7 @@ pub mod hud;
 #[cfg(target_os = "macos")]
 pub mod macos_menu;
 pub mod markers;
+pub mod match_scope;
 pub mod menu;
 pub mod minimap;
 pub mod minimap_check;
@@ -102,6 +104,7 @@ pub mod present;
 pub mod render_watchdog;
 pub mod selection;
 pub mod sim_driver;
+pub mod speed;
 pub mod terrain_props;
 #[cfg(test)]
 mod ui_test;

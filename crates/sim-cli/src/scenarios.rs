@@ -64,6 +64,12 @@ pub enum Scenario {
     /// Standard-vs-Standard seed. Outside [`sim::scenarios::NAMES`]: the
     /// sim cannot build bots.
     FirstMatch,
+    /// One of [`sim::scenarios::BOT_NAMES`] (M6): a scripted human stream
+    /// against a bot seat, built with `ai::controller_for` (the sim's own
+    /// `run` has no bots). Stream, seed and recording bound come from
+    /// [`sim::scenarios::by_name`]; the recording stops at the outcome.
+    /// `scripted_match` is the line-5 golden.
+    Bot(&'static str),
 }
 
 /// The `m5_first_match` fixture's seed.
@@ -78,6 +84,7 @@ impl Scenario {
         let mut names = sim::scenarios::NAMES.to_vec();
         names.push("selftest");
         names.push("m5_first_match");
+        names.extend(sim::scenarios::BOT_NAMES);
         names
     }
 
@@ -88,6 +95,9 @@ impl Scenario {
         }
         if name == "m5_first_match" {
             return Some(Scenario::FirstMatch);
+        }
+        if let Some(n) = sim::scenarios::BOT_NAMES.iter().find(|n| **n == name) {
+            return Some(Scenario::Bot(n));
         }
         sim::scenarios::NAMES
             .iter()
@@ -106,6 +116,11 @@ impl Scenario {
             Scenario::Selftest => SELFTEST_TICKS,
             Scenario::Crossing { .. } => sim::scenarios::MOVE_500_TICKS,
             Scenario::FirstMatch => rules.match_cap_ticks(),
+            Scenario::Bot(name) => {
+                sim::scenarios::by_name(name, rules)
+                    .expect("Bot names come from sim::scenarios::BOT_NAMES")
+                    .2
+            }
         }
     }
 
@@ -126,11 +141,12 @@ impl Scenario {
     /// decides the match (M5a): `capture_seat`, whose by-name length is
     /// only an upper bound, and `m5_first_match` (M5b). Its fixture then
     /// ends at the deciding tick, so its final hash is the one the game
-    /// shows on the outcome overlay.
+    /// shows on the outcome overlay. Every [`Scenario::Bot`] (M6) stops
+    /// there too.
     pub fn stops_at_outcome(self) -> bool {
         matches!(
             self,
-            Scenario::Fixture("capture_seat") | Scenario::FirstMatch
+            Scenario::Fixture("capture_seat") | Scenario::FirstMatch | Scenario::Bot(_)
         )
     }
 
@@ -156,9 +172,9 @@ impl Scenario {
         ticks: u32,
     ) -> (MatchSetup, Stream) {
         match self {
-            Scenario::Fixture(name) => {
+            Scenario::Fixture(name) | Scenario::Bot(name) => {
                 let (mut setup, stream, _) = sim::scenarios::by_name(name, rules)
-                    .expect("Fixture names come from sim::scenarios::NAMES");
+                    .expect("Fixture and Bot names come from sim::scenarios");
                 if let Some(seed) = seed {
                     setup.seed = seed;
                 }

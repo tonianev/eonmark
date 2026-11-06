@@ -261,6 +261,9 @@ pub struct DriverStats {
     pub ticks_this_frame: u32,
     /// Ticks stepped in the previous frame.
     pub ticks_last_frame: u32,
+    /// The most ticks stepped in one frame so far (M6: the `driver:` exit
+    /// line). Cumulative.
+    pub ticks_frame_max: u32,
     /// Commands handed to the recorder so far.
     pub commands_recorded: u64,
     /// Ticks after which the recorder was asked to flush (every
@@ -1029,7 +1032,7 @@ pub fn sim_stepped(stepped: Res<SimStepped>) -> bool {
 }
 
 #[derive(Resource, Default)]
-struct FrameBudget {
+pub(crate) struct FrameBudget {
     used: u32,
     /// `ReplayFinished` already written this run.
     finished: bool,
@@ -1134,6 +1137,7 @@ fn configure_virtual_time(mut time: ResMut<Time<Virtual>>) {
 
 fn reset_frame_budget(mut budget: ResMut<FrameBudget>, mut stats: ResMut<DriverStats>) {
     budget.used = 0;
+    stats.ticks_frame_max = stats.ticks_frame_max.max(stats.ticks_this_frame);
     stats.ticks_last_frame = stats.ticks_this_frame;
     stats.ticks_this_frame = 0;
 }
@@ -1256,9 +1260,26 @@ fn step_sim(
     mut finished: MessageWriter<ReplayFinished>,
     mut events: MessageWriter<SimEventMsg>,
     mut stepped: ResMut<SimStepped>,
+    speed: Option<ResMut<crate::speed::GameSpeed>>,
     mut commands: Commands,
 ) {
     stepped.0 = false;
+    // A decided live match never steps again: its fixed steps are neither
+    // run nor dropped (M6: x4 would otherwise count every one of them as
+    // dropped in `DriverStats`).
+    if !will_ask(&sim, input.0.as_ref()) && input.0.end_of_input().is_none() {
+        fixed.discard_overstep(Duration::MAX);
+        return;
+    }
+    // M6: while paused nothing steps, and the overstep is discarded so the
+    // pause holds an exact tick and the unpause does not burst.
+    if let Some(mut speed) = speed
+        && (speed.is_paused() || speed.pause_at == Some(sim.tick()))
+        && speed.hold(sim.tick())
+    {
+        fixed.discard_overstep(Duration::MAX);
+        return;
+    }
     if budget.used >= MAX_TICKS_PER_FRAME {
         // This step plus every further one the overstep would ask for are
         // dropped as time dilation; discarding the overstep ends the loop.

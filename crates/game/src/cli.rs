@@ -20,6 +20,12 @@
 //! M6 adds `--difficulty <id>` and `--personality <id>`: the opponent of a
 //! plain launch or `--skip-menu` (`app::build_match`), validated against
 //! the rules at start-up.
+//! M6 slice 3 adds `--speed <1|2|4>`, `--pause-at-tick <T>` and
+//! `--pause-seconds <S>` (`crate::speed`), `--play-again-after-seconds
+//! <S>` (the game-over screen's Play Again proxy), `--spectate-a/-b
+//! <difficulty>:<personality>` (the spectated seats) and
+//! `--fast-forward-to` with `--skip-menu` too (a human seat that gave no
+//! orders, so the replay still verifies).
 //! Parsing is complete and tested here.
 
 use std::path::{Path, PathBuf};
@@ -54,6 +60,10 @@ Options:
                                path the red close button takes (bevy_window despawns
                                it, exit_on_all_closed writes AppExit::Success).
   --exit-after-seconds <S>     Send AppExit::Success after S seconds (smoke tests).
+  --exit-after-outcome-seconds <S>
+                               Send AppExit::Success S seconds after the match is
+                               decided (automated runs; --exit-after-seconds stays the
+                               deadline).
   --camera <X>,<Y>,<ZOOM>      Start the camera over sim tile (X, Y) at ZOOM metres
                                (15 to 60) instead of jumping to the first units
                                (screenshots, stream framing).
@@ -76,9 +86,21 @@ Options:
                                --seed 1 it is the m5_first_match setup, otherwise a
                                fresh seed). You can select units and move the camera
                                but give no orders. No menu.
-  --fast-forward-to <TICK>     With --spectate: simulate up to TICK before the window
-                               opens (refused if the match is decided by then); the
-                               replay is recorded from there and still verifies.
+  --spectate-a <BOT>:<STYLE>   With --spectate: seat A (P0), e.g. hard:rush (default
+                               standard:standard, the m5_first_match setup).
+  --spectate-b <BOT>:<STYLE>   With --spectate: seat B (P1).
+  --fast-forward-to <TICK>     With --spectate or --skip-menu: simulate up to TICK
+                               before the window opens (refused if the match is decided
+                               by then); the replay is recorded from there and still
+                               verifies, since no human order came before it.
+  --speed <1|2|4>              Start at game speed x1 (default), x2 or x4 (- and = step
+                               it, Space pauses; the replay is the same at any speed).
+  --pause-at-tick <TICK>       Pause when the sim reaches TICK (exactly), as Space does.
+  --pause-seconds <S>          With --pause-at-tick: unpause after S real seconds.
+  --play-again-after-seconds <S>
+                               The Play Again proxy: S seconds after the game-over
+                               screen appears, ask for Play Again directly (what the
+                               button's click asks for; no picking path).
   --new-game-after-seconds <S>
                                The New Game proxy: after S seconds click the menu's real
                                New Game button with a synthetic mouse (picking path).
@@ -186,6 +208,10 @@ pub struct Cli {
     pub headless_run: Option<HeadlessRun>,
     /// `--exit-after-seconds <s>`.
     pub exit_after_seconds: Option<f64>,
+    /// `--exit-after-outcome-seconds <s>` (M6): exit `s` real seconds
+    /// after the match is decided; `--exit-after-seconds` stays the hard
+    /// deadline.
+    pub exit_after_outcome_seconds: Option<f64>,
     /// `--seed <u64>`; defaults to 1 so `--headless-run` is reproducible.
     pub seed: u64,
     /// `true` when `--seed` was given (M5b): a scenario's own seed and a
@@ -223,8 +249,21 @@ pub struct Cli {
     pub skip_menu: bool,
     /// `--spectate` (M5b): the Standard bot in both slots, no local input.
     pub spectate: bool,
-    /// `--fast-forward-to <tick>` (M5b, with `--spectate` only).
+    /// `--fast-forward-to <tick>` (M5b with `--spectate`; M6 also with
+    /// `--skip-menu`).
     pub fast_forward_to: Option<u32>,
+    /// `--spectate-a <bot>:<personality>` (M6).
+    pub spectate_a: Option<(String, String)>,
+    /// `--spectate-b <bot>:<personality>` (M6).
+    pub spectate_b: Option<(String, String)>,
+    /// `--speed <1|2|4>` (M6); `None` is x1.
+    pub speed: Option<u32>,
+    /// `--pause-at-tick <tick>` (M6).
+    pub pause_at_tick: Option<u32>,
+    /// `--pause-seconds <s>` (M6, with `--pause-at-tick`).
+    pub pause_seconds: Option<f64>,
+    /// `--play-again-after-seconds <s>` (M6): the Play Again proxy.
+    pub play_again_after_seconds: Option<f64>,
     /// `--new-game-after-seconds <s>` (M5b): the menu's New Game click proxy.
     pub new_game_after_seconds: Option<f64>,
     /// `--difficulty <id>` (M6): the opponent's bot id; `None` is
@@ -256,6 +295,7 @@ impl Default for Cli {
         Self {
             headless_run: None,
             exit_after_seconds: None,
+            exit_after_outcome_seconds: None,
             seed: 1,
             seed_explicit: false,
             data_dir: None,
@@ -272,6 +312,12 @@ impl Default for Cli {
             skip_menu: false,
             spectate: false,
             fast_forward_to: None,
+            spectate_a: None,
+            spectate_b: None,
+            speed: None,
+            pause_at_tick: None,
+            pause_seconds: None,
+            play_again_after_seconds: None,
             new_game_after_seconds: None,
             difficulty: None,
             personality: None,
@@ -283,6 +329,18 @@ impl Default for Cli {
             minimap_check: false,
         }
     }
+}
+
+/// Parse `--spectate-a/-b`'s `<bot>:<personality>` (M6): two non-empty
+/// ids; the rules check them when the match is built.
+pub fn parse_seat(value: &str) -> Result<(String, String), String> {
+    let (bot, personality) = value
+        .split_once(':')
+        .ok_or_else(|| format!("expected <bot>:<personality>, got `{value}`"))?;
+    if bot.is_empty() || personality.is_empty() {
+        return Err(format!("expected <bot>:<personality>, got `{value}`"));
+    }
+    Ok((bot.to_string(), personality.to_string()))
 }
 
 /// Smallest `--window-size` side, logical pixels.
@@ -339,12 +397,16 @@ impl Cli {
                     cli.headless_run =
                         Some(HeadlessRun::parse(&value).map_err(|e| format!("{arg}: {e}"))?);
                 }
-                "--exit-after-seconds" => {
+                "--exit-after-seconds" | "--exit-after-outcome-seconds" => {
                     let secs: f64 = parse_value(&arg, args.next())?;
                     if !secs.is_finite() || secs < 0.0 {
                         return Err(format!("{arg}: expected a non-negative number"));
                     }
-                    cli.exit_after_seconds = Some(secs);
+                    if arg == "--exit-after-seconds" {
+                        cli.exit_after_seconds = Some(secs);
+                    } else {
+                        cli.exit_after_outcome_seconds = Some(secs);
+                    }
                 }
                 "--seed" => {
                     cli.seed = parse_value(&arg, args.next())?;
@@ -353,6 +415,34 @@ impl Cli {
                 "--skip-menu" => cli.skip_menu = true,
                 "--spectate" => cli.spectate = true,
                 "--fast-forward-to" => cli.fast_forward_to = Some(parse_value(&arg, args.next())?),
+                "--spectate-a" | "--spectate-b" => {
+                    let value = args.next().ok_or_else(|| format!("{arg}: missing value"))?;
+                    let seat = parse_seat(&value).map_err(|e| format!("{arg}: {e}"))?;
+                    if arg == "--spectate-a" {
+                        cli.spectate_a = Some(seat);
+                    } else {
+                        cli.spectate_b = Some(seat);
+                    }
+                }
+                "--speed" => {
+                    let n: u32 = parse_value(&arg, args.next())?;
+                    if !matches!(n, 1 | 2 | 4) {
+                        return Err(format!("{arg}: expected 1, 2 or 4, got {n}"));
+                    }
+                    cli.speed = Some(n);
+                }
+                "--pause-at-tick" => cli.pause_at_tick = Some(parse_value(&arg, args.next())?),
+                "--pause-seconds" | "--play-again-after-seconds" => {
+                    let secs: f64 = parse_value(&arg, args.next())?;
+                    if !secs.is_finite() || secs < 0.0 {
+                        return Err(format!("{arg}: expected a non-negative number"));
+                    }
+                    if arg == "--pause-seconds" {
+                        cli.pause_seconds = Some(secs);
+                    } else {
+                        cli.play_again_after_seconds = Some(secs);
+                    }
+                }
                 "--new-game-after-seconds" => {
                     let secs: f64 = parse_value(&arg, args.next())?;
                     if !secs.is_finite() || secs < 0.0 {
@@ -473,6 +563,16 @@ impl Cli {
                 ),
                 (cli.difficulty.is_some(), "--difficulty"),
                 (cli.personality.is_some(), "--personality"),
+                (cli.speed.is_some(), "--speed"),
+                (cli.pause_at_tick.is_some(), "--pause-at-tick"),
+                (
+                    cli.play_again_after_seconds.is_some(),
+                    "--play-again-after-seconds",
+                ),
+                (
+                    cli.exit_after_outcome_seconds.is_some(),
+                    "--exit-after-outcome-seconds",
+                ),
             ] {
                 if given {
                     return Err(format!("{flag} needs a window; drop --headless-run"));
@@ -502,10 +602,20 @@ impl Cli {
         if cli.spectate && cli.scenario.is_some() {
             return Err("--spectate builds its own match; drop --scenario".into());
         }
-        if cli.fast_forward_to.is_some() && !cli.spectate {
+        if cli.fast_forward_to.is_some() && !cli.spectate && !cli.skip_menu {
             return Err(
-                "--fast-forward-to needs --spectate (only a match without human input can skip ahead and still record a replay that verifies)"
+                "--fast-forward-to needs --spectate or --skip-menu (only a match with no human order before the target can skip ahead and still record a replay that verifies)"
                     .into(),
+            );
+        }
+        if (cli.spectate_a.is_some() || cli.spectate_b.is_some()) && !cli.spectate {
+            return Err(
+                "--spectate-a and --spectate-b choose the seats of --spectate; add it".into(),
+            );
+        }
+        if cli.pause_seconds.is_some() && cli.pause_at_tick.is_none() {
+            return Err(
+                "--pause-seconds ends the --pause-at-tick pause; add --pause-at-tick".into(),
             );
         }
         if cli.new_game_after_seconds.is_some() && !cli.starts_in_menu() {
@@ -730,6 +840,7 @@ mod tests {
             Parsed::Run(Cli {
                 headless_run: Some(HeadlessRun::Ticks(200)),
                 exit_after_seconds: Some(6.0),
+                exit_after_outcome_seconds: None,
                 seed: 42,
                 seed_explicit: true,
                 data_dir: Some(PathBuf::from("/tmp/data")),
@@ -746,6 +857,12 @@ mod tests {
                 skip_menu: false,
                 spectate: false,
                 fast_forward_to: None,
+                spectate_a: None,
+                spectate_b: None,
+                speed: None,
+                pause_at_tick: None,
+                pause_seconds: None,
+                play_again_after_seconds: None,
                 new_game_after_seconds: None,
                 difficulty: None,
                 personality: None,
@@ -780,6 +897,7 @@ mod tests {
                 scenario: Some("units200".into()),
                 screenshot: Some(PathBuf::from("/tmp/shot.png")),
                 exit_after_seconds: Some(4.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             })
         );
@@ -799,6 +917,7 @@ mod tests {
             Parsed::Run(Cli {
                 quit_via_menu_after_seconds: Some(3.0),
                 exit_after_seconds: Some(20.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             })
         );
@@ -830,6 +949,7 @@ mod tests {
             Ok(Parsed::Run(Cli {
                 background: true,
                 exit_after_seconds: Some(6.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             }))
         );
@@ -914,6 +1034,7 @@ mod tests {
             Ok(Parsed::Run(Cli {
                 new_game_after_seconds: Some(3.0),
                 exit_after_seconds: Some(45.0),
+                exit_after_outcome_seconds: None,
                 ..Cli::default()
             }))
         );
@@ -933,9 +1054,10 @@ mod tests {
                 "{with_proxy:?}: no menu to click"
             );
         }
-        // Fast-forward only skips a match nobody plays.
+        // Fast-forward only skips a match whose human gave no order yet:
+        // spectated, or (M6) a --skip-menu match before any input.
         assert!(parse(&["--fast-forward-to", "100"]).is_err());
-        assert!(parse(&["--skip-menu", "--fast-forward-to", "100"]).is_err());
+        assert!(parse(&["--scenario", "units200", "--fast-forward-to", "100"]).is_err());
         assert!(parse(&["--spectate", "--fast-forward-to"]).is_err());
         assert!(parse(&["--spectate", "--fast-forward-to", "-5"]).is_err());
         assert!(parse(&["--spectate", "--scenario", "units200"]).is_err());
@@ -1152,5 +1274,102 @@ mod tests {
             ..Cli::default()
         };
         assert_eq!(cli.resolve_data_dir(), PathBuf::from("/x/data"));
+    }
+
+    /// M6 slice 3: speed, pause, Play Again, spectated seats, and
+    /// `--fast-forward-to` with `--skip-menu`.
+    #[test]
+    fn m6_speed_pause_play_again_and_seat_flags_parse() {
+        assert_eq!(
+            parse(&[
+                "--scenario",
+                "scripted_match",
+                "--speed",
+                "4",
+                "--pause-at-tick",
+                "600",
+                "--pause-seconds",
+                "3"
+            ]),
+            Ok(Parsed::Run(Cli {
+                scenario: Some("scripted_match".into()),
+                speed: Some(4),
+                pause_at_tick: Some(600),
+                pause_seconds: Some(3.0),
+                ..Cli::default()
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "--scenario",
+                "scripted_match",
+                "--exit-after-outcome-seconds",
+                "2",
+                "--exit-after-seconds",
+                "240"
+            ]),
+            Ok(Parsed::Run(Cli {
+                scenario: Some("scripted_match".into()),
+                exit_after_outcome_seconds: Some(2.0),
+                exit_after_seconds: Some(240.0),
+                ..Cli::default()
+            }))
+        );
+        assert!(parse(&["--exit-after-outcome-seconds", "-1"]).is_err());
+        assert!(parse(&["--speed", "3"]).is_err(), "x1, x2 or x4 only");
+        assert!(parse(&["--speed", "0"]).is_err());
+        assert!(
+            parse(&["--pause-seconds", "3"]).is_err(),
+            "needs --pause-at-tick"
+        );
+        assert_eq!(
+            parse(&[
+                "--skip-menu",
+                "--seed",
+                "3",
+                "--fast-forward-to",
+                "900",
+                "--play-again-after-seconds",
+                "2"
+            ]),
+            Ok(Parsed::Run(Cli {
+                skip_menu: true,
+                seed: 3,
+                seed_explicit: true,
+                fast_forward_to: Some(900),
+                play_again_after_seconds: Some(2.0),
+                ..Cli::default()
+            }))
+        );
+        assert_eq!(
+            parse(&[
+                "--spectate",
+                "--spectate-a",
+                "hard:rush",
+                "--spectate-b",
+                "easy:tower"
+            ]),
+            Ok(Parsed::Run(Cli {
+                spectate: true,
+                spectate_a: Some(("hard".into(), "rush".into())),
+                spectate_b: Some(("easy".into(), "tower".into())),
+                ..Cli::default()
+            }))
+        );
+        assert!(
+            parse(&["--spectate-a", "hard:rush"]).is_err(),
+            "needs --spectate"
+        );
+        assert!(parse(&["--spectate", "--spectate-a", "hard"]).is_err());
+        assert!(parse(&["--spectate", "--spectate-b", ":rush"]).is_err());
+        for flag in [
+            vec!["--speed", "2"],
+            vec!["--pause-at-tick", "5"],
+            vec!["--play-again-after-seconds", "1"],
+        ] {
+            let mut args = vec!["--headless-run", "10"];
+            args.extend(flag.iter().copied());
+            assert!(parse(&args).is_err(), "{args:?} needs a window");
+        }
     }
 }

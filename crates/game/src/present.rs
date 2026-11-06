@@ -758,7 +758,8 @@ pub fn settle_at_outcome(mut interps: Query<&mut Interp>) {
 /// interpolated pose.
 pub fn sync_transforms(
     fixed: Res<Time<Fixed>>,
-    time: Res<Time>,
+    // M6: world presentation runs on virtual time, frozen while paused.
+    time: Res<Time<Virtual>>,
     mut units: Query<
         (
             &Interp,

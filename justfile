@@ -113,6 +113,12 @@ m5b-checks OUT="":
     cargo build -p sim-cli --locked --release
     scripts/m5b_checks.sh target/ci/eonmark target/release/sim-cli "{{OUT}}"
 
+# M6 slice 3 windowed proxies, local only: line 5 (scripted_match at x1 and at x4 with a pause at tick 600, both outcome hashes and replays against the golden, the paused screenshot), the New Game selector (Hard, rush, seed 42: menu screenshot, the match: line and the replay header), the game-over statistics screen from the human seat at play-bots' tick (line 6's ci_testing-substitute screenshot, m6-game-over.png, and the match_log: line), Play Again (a second match and replay), and no game process left; every run at 1280x720 in background mode. On Linux without a display it runs under xvfb-run on lavapipe; M6_SECONDS (x1 deadline, default 360) is the slowest step. See scripts/m6_checks.sh.
+m6-checks OUT="":
+    cargo build -p game --locked --profile ci
+    cargo build -p sim-cli --locked --release
+    scripts/m6_checks.sh target/ci/eonmark target/release/sim-cli "{{OUT}}"
+
 # Art pass acceptance proxies, local only (ROADMAP "Art pass (pre-stream)"): data-check, the Yeoman swap walkthrough on a scratch copy of data/ (AP2), `inspect_gltf check` (AP3), check_assets and its self-test (AP1), then five windowed runs in background mode at 1280x720 that save art-units-40m.png, art-town-40m.png, art-battle-60m.png (with AP4's draw-call gate), art-match-minimap.png and, from a dev build, art-dev-panel.png (AP7), each verifying its replay; see scripts/art_checks.sh. On Linux without a display it runs under xvfb-run on lavapipe, about 9 minutes. The dev binary is kept as target/ci/eonmark-dev, since the plain build writes target/ci/eonmark.
 art-checks OUT="":
     cargo build -p game --locked --profile ci --features dev

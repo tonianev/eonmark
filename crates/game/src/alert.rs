@@ -1,0 +1,865 @@
+//! The under-attack alert and the top bar's match readouts (M6 slice 3).
+//!
+//! **Alert** (game-design note 8: raids on Yeomen went unreported until
+//! "Lumber Yard lost"): a `SimEvent::Hit` whose target is the local
+//! player's and whose attacker is another player's shows "Yeomen under
+//! attack" (a civilian unit), "Army under attack" (any other unit) or
+//! "`<Building>` under attack" on the message line, at most once per
+//! [`ALERT_THROTTLE_SECS`] of `speed::UiClock` per [`ALERT_AREA_TILES`]
+//! square area, with a [`PING_SECS`] amber ping on the minimap at the hit.
+//! Backspace centres the camera on the last alert.
+//!
+//! The alert is drawn apart from routine notices (plan §6.7, M6 owner
+//! decision 10: it must read on a 1280 x 720 stream): 16 px amber text on
+//! the HUD panel (`economy_hud::MessageState::set_alert`), and a 16 px ping
+//! with a 3 px border, larger than the Seat's minimap marker.
+//!
+//! **Readouts**: the top bar's match clock ([`MatchClock`], "12:34",
+//! `markers::clock`, once a second), and the match strip under the left
+//! end of the top bar ([`MatchStrip`], opposite the age strip): "vs
+//! Standard · ?" (the opponent's difficulty; a Random style stays "?" until
+//! the game-over screen reveals it, M6 owner decision 6; while the New
+//! Game menu is open it follows the selector, not the launch match), or
+//! both seats when spectating, and from 35:00 the tiebreak race, "Tiebreak
+//! 45:00 · You 51% · Bot 49%" ("Blue" and "Red" when spectating; territory
+//! shares of the two players, sampled once a second from
+//! `SimView::territory`). The race has its own place in the strip, so a
+//! full top bar (four-digit stocks, two capped rates, the speed chip and
+//! the clock) still fits 1280 px.
+
+use std::collections::BTreeMap;
+
+use bevy::prelude::*;
+use rules::strings::fill;
+use sim::{PlayerId, SimEvent, SimView, TargetId};
+
+use crate::camera::RtsCamera;
+use crate::economy_hud::{MessageState, UiStrings};
+use crate::palette;
+use crate::sim_driver::{LOCAL_PLAYER, MatchOver, SimEventMsg, SimHandle, match_running};
+use crate::speed::UiNow;
+
+/// The side of an alert area, tiles.
+pub const ALERT_AREA_TILES: u16 = 16;
+/// One alert per area per this many seconds of `UiClock`.
+pub const ALERT_THROTTLE_SECS: f64 = 20.0;
+/// How long a minimap ping shows, seconds of `UiClock`.
+pub const PING_SECS: f64 = 3.0;
+/// The ping's side on the minimap, logical px: larger than the Seat's
+/// marker there, so a hit at the Seat still shows.
+pub const PING_PX: f32 = 16.0;
+/// The ping's border, logical px.
+pub const PING_BORDER_PX: f32 = 3.0;
+/// The size of the readouts' text, logical px (plan §6.7: nothing under
+/// 16 px on the stream).
+pub const READOUT_FONT_PX: f32 = 16.0;
+/// From this match time on the top bar shows the tiebreak race (35:00).
+pub const TIEBREAK_READOUT_FROM_SECS: u32 = 35 * 60;
+
+/// The alerts raised so far: when each area last raised one, and where the
+/// last one was (Backspace).
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub struct Alerts {
+    /// `UiClock` seconds of the last alert per area `(x, y) /
+    /// ALERT_AREA_TILES`.
+    pub last_by_area: BTreeMap<(u16, u16), f64>,
+    /// Sim tile coordinates of the last alert.
+    pub last_at: Option<Vec2>,
+}
+
+/// A minimap ping; despawned at `until` (`UiClock` seconds).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct AlertPing {
+    /// When it goes.
+    pub until: f64,
+}
+
+/// The match strip's opponent label.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct OpponentLabel;
+
+/// The match strip's tiebreak race readout (hidden before 35:00).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TiebreakReadout;
+
+/// The top bar's match clock.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MatchClock;
+
+/// The panel under the left end of the top bar holding the opponent label
+/// and the tiebreak race.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct MatchStrip;
+
+/// What a hit on the local player is, for the alert text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlertKind {
+    /// A civilian unit (Yeoman, Scribe).
+    Civilian,
+    /// Any other unit.
+    Army,
+    /// A building, by display name.
+    Building(String),
+}
+
+/// The alert for `event` as `local` sees it: what was hit and where (sim
+/// tile coordinates), or `None` when it is not an enemy's hit on `local`.
+pub fn alert_for(
+    view: &SimView<'_>,
+    event: &SimEvent,
+    local: PlayerId,
+) -> Option<(AlertKind, Vec2)> {
+    let SimEvent::Hit {
+        attacker, target, ..
+    } = event
+    else {
+        return None;
+    };
+    let owner = |t: &TargetId| match t {
+        TargetId::Unit(u) => view.unit(*u).map(|u| u.owner),
+        TargetId::Building(b) => view.building(*b).map(|b| b.owner),
+    };
+    if owner(target)? != local || owner(attacker)? == local {
+        return None;
+    }
+    let rules = view.rules();
+    let fx = crate::present::fx_to_f32;
+    match target {
+        TargetId::Unit(id) => {
+            let u = view.unit(*id)?;
+            let civilian = rules
+                .unit_kind(u.kind.0)
+                .is_some_and(|k| k.class == rules::units::UnitClass::Civilian);
+            let kind = if civilian {
+                AlertKind::Civilian
+            } else {
+                AlertKind::Army
+            };
+            Some((kind, Vec2::new(fx(u.pos.x), fx(u.pos.y))))
+        }
+        TargetId::Building(id) => {
+            let b = view.building(*id)?;
+            let kind = rules.building_kind(b.kind.0);
+            let name = kind.map_or_else(String::new, |k| k.name.clone());
+            let (w, h) = kind.map_or((1, 1), |k| (k.width_tiles, k.height_tiles));
+            // The footprint's centre (`tile` is its north-west corner).
+            let c = Vec2::new(
+                f32::from(b.tile.x) + w as f32 / 2.0,
+                f32::from(b.tile.y) + h as f32 / 2.0,
+            );
+            Some((AlertKind::Building(name), c))
+        }
+    }
+}
+
+/// The message-line text of an alert.
+pub fn alert_text(kind: &AlertKind, strings: &UiStrings) -> String {
+    match kind {
+        AlertKind::Civilian => strings.hud("alert.civilian").to_string(),
+        AlertKind::Army => strings.hud("alert.army").to_string(),
+        AlertKind::Building(name) => fill(strings.hud("alert.building"), &[("building", name)]),
+    }
+}
+
+/// The area key of a sim position.
+pub fn area_of(at: Vec2) -> (u16, u16) {
+    let cell = |v: f32| (v.max(0.0) as u16) / ALERT_AREA_TILES;
+    (cell(at.x), cell(at.y))
+}
+
+impl Alerts {
+    /// Whether an alert at `at` may show now, recording it if so.
+    pub fn admit(&mut self, at: Vec2, now: f64) -> bool {
+        let key = area_of(at);
+        if self
+            .last_by_area
+            .get(&key)
+            .is_some_and(|t| now - t < ALERT_THROTTLE_SECS)
+        {
+            return false;
+        }
+        self.last_by_area.insert(key, now);
+        self.last_at = Some(at);
+        true
+    }
+}
+
+/// The alert, the ping, Backspace and the top bar readouts (windowed app).
+pub struct AlertPlugin;
+
+impl Plugin for AlertPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Alerts>()
+            .add_systems(
+                Startup,
+                // After the speed chip, so the clock follows it in the bar.
+                spawn_readouts
+                    .after(crate::economy_hud::spawn_economy_hud)
+                    .after(crate::speed::spawn_speed_ui),
+            )
+            .add_systems(
+                Update,
+                (
+                    raise_alerts
+                        .after(crate::economy_hud::collect_messages)
+                        .before(crate::economy_hud::update_message_line),
+                    expire_pings,
+                    jump_to_alert
+                        .run_if(match_running)
+                        .run_if(not(resource_exists::<MatchOver>)),
+                    update_readouts,
+                ),
+            );
+    }
+}
+
+/// Raise the alert of every enemy hit on the local player this frame
+/// (throttled per area), ping the minimap there.
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
+pub fn raise_alerts(
+    mut events: MessageReader<SimEventMsg>,
+    sim: NonSend<SimHandle>,
+    strings: Option<Res<UiStrings>>,
+    now: UiNow,
+    mut alerts: ResMut<Alerts>,
+    mut message: ResMut<MessageState>,
+    minimap: Query<Entity, With<crate::minimap::Minimap>>,
+    mut commands: Commands,
+) {
+    let Some(strings) = strings else {
+        events.clear();
+        return;
+    };
+    let view = sim.view();
+    let now = now.secs();
+    for msg in events.read() {
+        let Some((kind, at)) = alert_for(&view, &msg.event, LOCAL_PLAYER) else {
+            continue;
+        };
+        if !alerts.admit(at, now) {
+            continue;
+        }
+        message.set_alert(alert_text(&kind, &strings), now);
+        let (w, h) = (
+            f32::from(view.map().width()).max(1.0),
+            f32::from(view.map().height()).max(1.0),
+        );
+        if let Ok(map) = minimap.single() {
+            let px = crate::minimap::MINIMAP_PX;
+            commands.entity(map).with_children(|m| {
+                m.spawn((
+                    Name::new("Alert ping"),
+                    AlertPing {
+                        until: now + PING_SECS,
+                    },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(at.x / w * px - PING_PX / 2.0),
+                        top: Val::Px(at.y / h * px - PING_PX / 2.0),
+                        width: Val::Px(PING_PX),
+                        height: Val::Px(PING_PX),
+                        border: UiRect::all(Val::Px(PING_BORDER_PX)),
+                        ..default()
+                    },
+                    BorderColor::all(palette::HUD_AMBER),
+                    Pickable::IGNORE,
+                ));
+            });
+        }
+    }
+}
+
+fn expire_pings(now: UiNow, pings: Query<(Entity, &AlertPing)>, mut commands: Commands) {
+    let now = now.secs();
+    for (e, ping) in &pings {
+        if now >= ping.until {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
+/// Backspace: centre the camera on the last alert.
+pub fn jump_to_alert(
+    keys: Res<ButtonInput<KeyCode>>,
+    alerts: Res<Alerts>,
+    mut cameras: Query<&mut RtsCamera>,
+) {
+    if !keys.just_pressed(KeyCode::Backspace) {
+        return;
+    }
+    let Some(at) = alerts.last_at else {
+        return;
+    };
+    let focus = Vec3::new(
+        at.x - crate::ground::HALF_EXTENT,
+        0.0,
+        at.y - crate::ground::HALF_EXTENT,
+    );
+    for mut cam in &mut cameras {
+        cam.focus = focus;
+    }
+}
+
+/// The match strip's "vs `<Difficulty>` · `<style>`" for `setup` as `local`
+/// sees it before the outcome: a Random style is "?" (M6 owner decision 6),
+/// which the game-over screen reveals. Spectating, both seats, Blue (P0)
+/// first: "`<a>` vs `<b>`".
+pub fn opponent_label(
+    setup: &sim::MatchSetup,
+    rules: &rules::Rules,
+    local: PlayerId,
+    hidden: bool,
+) -> String {
+    let name = |bot: &str| {
+        rules
+            .ai
+            .difficulty(bot)
+            .map_or_else(|| title_case(bot), |d| d.name.clone())
+    };
+    let local_is_ai = setup.players.iter().any(|p| p.id == local && p.is_ai);
+    if local_is_ai {
+        let seats: Vec<String> = setup
+            .ai_seats
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} · {}",
+                    name(&s.bot),
+                    crate::menu::new_game::style_label(rules, &s.personality)
+                )
+            })
+            .collect();
+        return seats.join(" vs ");
+    }
+    let Some(seat) = setup.ai_seats.iter().find(|s| s.player != local) else {
+        return String::new();
+    };
+    if seat.personality.is_empty() {
+        return format!("vs {}", name(&seat.bot));
+    }
+    let style = if hidden {
+        "?".to_string()
+    } else {
+        crate::menu::new_game::style_label(rules, &seat.personality)
+    };
+    format!("vs {} · {style}", name(&seat.bot))
+}
+
+/// `rush` -> `Rush`.
+pub fn title_case(id: &str) -> String {
+    let mut c = id.chars();
+    c.next().map_or_else(String::new, |f| {
+        f.to_uppercase().collect::<String>() + c.as_str()
+    })
+}
+
+/// Whether the opponent's style is hidden in this match: New Game's Random
+/// (`menu::new_game::StyleHidden`) until the outcome.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StyleHidden(pub bool);
+
+/// The tiebreak readout for `view` from 35:00, else `None`: "Tiebreak
+/// 45:00 · You 51% · Bot 49%" (the two players' shares of the land they
+/// own between them), "Blue" and "Red" when `local`'s seat is a bot
+/// (spectating).
+pub fn tiebreak_text(view: &SimView<'_>, strings: &UiStrings, local: PlayerId) -> Option<String> {
+    let rate = view.rules().tick_rate_hz.max(1);
+    if view.tick / rate < TIEBREAK_READOUT_FROM_SECS {
+        return None;
+    }
+    let mine = view.territory().owned_tile_count(local);
+    let theirs = view
+        .players()
+        .iter()
+        .filter(|p| p.id != local)
+        .map(|p| view.territory().owned_tile_count(p.id))
+        .max()
+        .unwrap_or(0);
+    let total = (mine + theirs).max(1);
+    let pct = |n: u32| (u64::from(n) * 100 / u64::from(total)).to_string();
+    let cap = view.rules().match_cap_ticks() / rate;
+    let spectating = view
+        .setup()
+        .players
+        .iter()
+        .any(|p| p.id == local && p.is_ai);
+    let key = if spectating {
+        strings.hud("top.tiebreak_spectate")
+    } else {
+        strings.hud("top.tiebreak")
+    };
+    Some(fill(
+        key,
+        &[
+            ("time", &crate::markers::clock(cap)),
+            ("count", &pct(mine)),
+            ("cap", &pct(theirs)),
+        ],
+    ))
+}
+
+fn hud_text(size: f32) -> impl Bundle {
+    (
+        Text::new(""),
+        crate::fonts::hud_font(size),
+        TextColor(palette::HUD_TEXT),
+        TextLayout::no_wrap(),
+    )
+}
+
+/// Spawn the top bar's [`MatchClock`] and, under the left end of the top
+/// bar, the [`MatchStrip`] with the opponent label and the (hidden)
+/// tiebreak race.
+pub fn spawn_readouts(
+    mut commands: Commands,
+    top: Query<Entity, With<crate::hud::TopBar>>,
+    root: Query<Entity, With<crate::hud::HudRoot>>,
+) {
+    if let Ok(bar) = top.single() {
+        commands.entity(bar).with_children(|bar| {
+            bar.spawn((
+                Name::new("Match clock"),
+                MatchClock,
+                hud_text(READOUT_FONT_PX),
+            ));
+        });
+    }
+    let Ok(root) = root.single() else {
+        return;
+    };
+    commands.entity(root).with_children(|root| {
+        root.spawn((
+            Name::new("Match strip"),
+            MatchStrip,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(crate::hud::TOP_BAR_HEIGHT_PX),
+                left: Val::Px(0.0),
+                height: Val::Px(crate::hud::TOP_BAR_HEIGHT_PX),
+                padding: UiRect::horizontal(Val::Px(crate::hud::PADDING_PX)),
+                column_gap: Val::Px(crate::hud::PADDING_PX * 2.0),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(palette::HUD_PANEL),
+        ))
+        .with_children(|strip| {
+            strip.spawn((
+                Name::new("Opponent"),
+                OpponentLabel,
+                hud_text(READOUT_FONT_PX),
+            ));
+            strip.spawn((
+                Name::new("Tiebreak race"),
+                TiebreakReadout,
+                hud_text(READOUT_FONT_PX),
+                Node {
+                    display: Display::None,
+                    ..default()
+                },
+            ));
+        });
+    });
+}
+
+/// The opponent label while the New Game menu is open: the selector's
+/// difficulty and style (a Random style "?"), not the launch match's.
+pub fn selector_label(
+    settings: &crate::menu::new_game::NewGameSettings,
+    rules: &rules::Rules,
+) -> String {
+    settings
+        .setup(rules, settings.seed)
+        .map(|setup| opponent_label(&setup, rules, LOCAL_PLAYER, settings.hides_style()))
+        .unwrap_or_default()
+}
+
+/// The readouts' text nodes.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Readouts<'w, 's> {
+    labels: Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            With<OpponentLabel>,
+            Without<TiebreakReadout>,
+            Without<MatchClock>,
+        ),
+    >,
+    race: Query<
+        'w,
+        's,
+        (&'static mut Text, &'static mut Node),
+        (
+            With<TiebreakReadout>,
+            Without<OpponentLabel>,
+            Without<MatchClock>,
+        ),
+    >,
+    clocks: Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            With<MatchClock>,
+            Without<OpponentLabel>,
+            Without<TiebreakReadout>,
+        ),
+    >,
+    strips: Query<'w, 's, &'static mut Node, (With<MatchStrip>, Without<TiebreakReadout>)>,
+}
+
+impl Readouts<'_, '_> {
+    /// Hide the match strip while it has nothing to show (a scenario has
+    /// no opponent and, before 35:00, no race), so no empty panel sits
+    /// under the top bar.
+    fn fit_strip(&mut self) {
+        let label = self.labels.iter().any(|t| !t.0.is_empty());
+        let race = self.race.iter().any(|(_, n)| n.display != Display::None);
+        let display = if label || race {
+            Display::Flex
+        } else {
+            Display::None
+        };
+        for mut node in &mut self.strips {
+            if node.display != display {
+                node.display = display;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Bevy system: each parameter is one resource or query
+fn update_readouts(
+    sim: NonSend<SimHandle>,
+    strings: Option<Res<UiStrings>>,
+    hidden: Option<Res<StyleHidden>>,
+    over: Option<Res<MatchOver>>,
+    state: Option<Res<State<crate::menu::AppState>>>,
+    settings: Option<Res<crate::menu::new_game::NewGameSettings>>,
+    mut readouts: Readouts,
+    mut last_second: Local<Option<u32>>,
+) {
+    let Some(strings) = strings else {
+        return;
+    };
+    let in_menu = state.is_some_and(|s| *s.get() == crate::menu::AppState::Menu);
+    let want = match settings.as_deref() {
+        Some(settings) if in_menu => selector_label(settings, sim.rules()),
+        _ => {
+            let hide = hidden.is_some_and(|h| h.0) && over.is_none();
+            opponent_label(sim.setup(), sim.rules(), LOCAL_PLAYER, hide)
+        }
+    };
+    for mut t in &mut readouts.labels {
+        if t.0 != want {
+            t.0.clone_from(&want);
+        }
+    }
+    let view = sim.view();
+    let second = view.tick / view.rules().tick_rate_hz.max(1);
+    if *last_second == Some(second) {
+        readouts.fit_strip();
+        return;
+    }
+    *last_second = Some(second);
+    let clock = crate::markers::clock(second);
+    for mut t in &mut readouts.clocks {
+        if t.0 != clock {
+            t.0.clone_from(&clock);
+        }
+    }
+    let text = tiebreak_text(&view, &strings, LOCAL_PLAYER).unwrap_or_default();
+    let display = if text.is_empty() {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for (mut t, mut node) in &mut readouts.race {
+        if t.0 != text {
+            t.0.clone_from(&text);
+        }
+        if node.display != display {
+            node.display = display;
+        }
+    }
+    readouts.fit_strip();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn data() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+    }
+
+    fn strings() -> UiStrings {
+        UiStrings(rules::strings::Strings::load(data(), "en").unwrap())
+    }
+
+    /// An enemy Bowman shooting P0's Yeomen raises "Yeomen under attack"
+    /// with a ping, once per area per 20 s; a hit on a building names it;
+    /// P0's own hits and P1's losses raise nothing.
+    #[test]
+    fn under_attack_notice_is_throttled_per_area_and_names_the_target() {
+        let r = rules::Rules::load(data()).unwrap();
+        let mut setup = sim::MatchSetup::scenario(&r, 1);
+        setup.start = sim::StartKind::Standard;
+        let sim = SimHandle::from_setup(setup, r);
+        let view = sim.view();
+        let s = strings();
+        let yeoman = TargetId::Unit(sim::UnitId(1));
+        let enemy = TargetId::Unit(sim::UnitId(6));
+        let seat = TargetId::Building(sim::BuildingId(1));
+        let hit = |attacker, target| SimEvent::Hit {
+            attacker,
+            target,
+            damage: 3,
+        };
+        let (kind, at) = alert_for(&view, &hit(enemy, yeoman), LOCAL_PLAYER).unwrap();
+        assert_eq!(kind, AlertKind::Civilian);
+        assert_eq!(alert_text(&kind, &s), "Yeomen under attack");
+        let (kind, seat_at) = alert_for(&view, &hit(enemy, seat), LOCAL_PLAYER).unwrap();
+        assert_eq!(alert_text(&kind, &s), "Town under attack");
+        assert_eq!(alert_text(&AlertKind::Army, &s), "Army under attack");
+        assert_eq!(alert_for(&view, &hit(yeoman, enemy), LOCAL_PLAYER), None);
+        assert_eq!(
+            alert_for(&view, &hit(yeoman, seat), LOCAL_PLAYER),
+            None,
+            "own fire"
+        );
+        assert_eq!(seat_at, Vec2::new(24.5, 64.5), "the Seat's centre");
+        assert_eq!(area_of(seat_at), (1, 4));
+        let mut alerts = Alerts::default();
+        assert!(alerts.admit(at, 0.0));
+        assert!(!alerts.admit(at, 5.0), "same area within 20 s");
+        let (a, b) = (Vec2::new(17.0, 65.0), Vec2::new(31.0, 79.0));
+        assert_eq!(area_of(a), area_of(b));
+        assert!(alerts.admit(a, 30.0));
+        assert!(!alerts.admit(b, 49.9), "same 16-tile area");
+        assert!(
+            alerts.admit(Vec2::new(33.0, 79.0), 40.0),
+            "the next area east"
+        );
+        assert!(alerts.admit(b, 50.0), "20 s later");
+        assert_eq!(alerts.last_at, Some(b));
+    }
+
+    /// The HUD with the economy bar, the message line and this plugin's
+    /// readouts and alerts, on `sim`, after start-up (states, so the menu
+    /// can be open).
+    fn alert_app(sim: SimHandle, state: crate::menu::AppState) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .add_message::<SimEventMsg>()
+            .insert_resource(strings())
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<crate::sim_driver::PendingCommands>()
+            .insert_state(state)
+            .add_systems(Startup, crate::hud::spawn_hud)
+            .add_plugins((crate::economy_hud::EconomyHudPlugin, AlertPlugin));
+        app.world_mut().insert_non_send(sim);
+        app.update();
+        app
+    }
+
+    fn standard_start() -> SimHandle {
+        let r = rules::Rules::load(data()).unwrap();
+        let mut setup = sim::MatchSetup::scenario(&r, 1);
+        setup.start = sim::StartKind::Standard;
+        SimHandle::from_setup(setup, r)
+    }
+
+    /// Every text under the top bar.
+    fn top_bar_texts(app: &mut App) -> Vec<String> {
+        let world = app.world_mut();
+        let bar = world
+            .query_filtered::<Entity, With<crate::hud::TopBar>>()
+            .single(world)
+            .unwrap();
+        let mut out = Vec::new();
+        let mut stack = vec![bar];
+        while let Some(e) = stack.pop() {
+            if let Some(t) = world.get::<Text>(e) {
+                out.push(t.0.clone());
+            }
+            if let Some(c) = world.get::<Children>(e) {
+                stack.extend(c.iter());
+            }
+        }
+        out
+    }
+
+    /// An alert stands apart from routine notices on a 1280 x 720 stream
+    /// (plan §6.7, M6 owner decision 10): 16 px or more, amber, on the HUD
+    /// panel; the next routine notice is back to the plain line.
+    #[test]
+    fn an_alert_is_amber_16_px_on_a_panel_and_a_notice_is_not() {
+        use crate::economy_hud::MessageLine;
+        let mut app = alert_app(standard_start(), crate::menu::AppState::Skirmish);
+        app.world_mut().write_message(SimEventMsg {
+            tick: 1,
+            event: SimEvent::Hit {
+                attacker: TargetId::Unit(sim::UnitId(6)),
+                target: TargetId::Unit(sim::UnitId(1)),
+                damage: 3,
+            },
+        });
+        app.update();
+        app.update();
+        let style = |app: &mut App| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(&Text, &TextFont, &TextColor, Option<&BackgroundColor>), With<MessageLine>>();
+            let (t, f, c, bg) = q.single(app.world()).unwrap();
+            let bevy::text::FontSize::Px(px) = f.font_size else {
+                panic!("px");
+            };
+            (t.0.clone(), px, c.0, bg.map(|b| b.0))
+        };
+        let (text, px, color, bg) = style(&mut app);
+        assert_eq!(text, "Yeomen under attack");
+        assert!(px >= 16.0, "{px} px");
+        assert_eq!(color, palette::HUD_AMBER);
+        assert_eq!(bg, Some(palette::HUD_PANEL));
+        // The ping clears the Seat's minimap marker.
+        const { assert!(PING_PX >= 16.0) };
+        let now = app.world().resource::<MessageState>().since;
+        app.world_mut()
+            .resource_mut::<MessageState>()
+            .set("Lumber Yard complete".into(), now);
+        app.update();
+        let (text, px, color, bg) = style(&mut app);
+        assert_eq!(text, "Lumber Yard complete");
+        assert_eq!(px, crate::hud::HUD_FONT_PX);
+        assert_eq!(color, palette::HUD_TEXT);
+        assert!(bg.is_none_or(|c| c.alpha() == 0.0), "{bg:?}");
+    }
+
+    /// The top bar shows the match clock (plan §6.7), updated once a second.
+    #[test]
+    fn the_top_bar_shows_the_match_clock() {
+        let mut sim = standard_start();
+        while sim.tick() < 65 * sim.tick_rate_hz() {
+            sim.step_once();
+            let _ = sim.drain_events();
+        }
+        let mut app = alert_app(sim, crate::menu::AppState::Skirmish);
+        app.update();
+        let texts = top_bar_texts(&mut app);
+        assert!(texts.iter().any(|t| t == "1:05"), "{texts:?}");
+    }
+
+    /// A scenario has no opponent: the match strip is hidden rather than
+    /// drawn as an empty panel under the top bar; a match against a bot
+    /// shows it.
+    #[test]
+    fn the_match_strip_is_hidden_when_it_has_nothing_to_show() {
+        let strip = |app: &mut App| {
+            let mut q = app.world_mut().query_filtered::<&Node, With<MatchStrip>>();
+            q.single(app.world()).unwrap().display
+        };
+        let mut app = alert_app(standard_start(), crate::menu::AppState::Skirmish);
+        app.update();
+        assert_eq!(strip(&mut app), Display::None, "scenario: no opponent");
+        let r = rules::Rules::load(data()).unwrap();
+        let mut app = alert_app(
+            SimHandle::vs_bot(r, 42, "standard", "rush"),
+            crate::menu::AppState::Skirmish,
+        );
+        app.update();
+        assert_eq!(strip(&mut app), Display::Flex, "vs a bot");
+    }
+
+    /// While the New Game menu is open the opponent label follows the
+    /// selector, not the launch match: the chosen difficulty and style,
+    /// "?" for Random (M6 owner decision 6).
+    #[test]
+    fn the_opponent_label_under_the_menu_follows_the_selector() {
+        use crate::menu::new_game::{NewGameSettings, StyleChoice};
+        let r = rules::Rules::load(data()).unwrap();
+        let launch = SimHandle::vs_bot(r, 42, "standard", "standard");
+        let mut app = alert_app(launch, crate::menu::AppState::Menu);
+        let label = |app: &mut App| {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Text, With<OpponentLabel>>();
+            q.single(app.world()).unwrap().0.clone()
+        };
+        for (style, want) in [
+            (StyleChoice::Id("rush".into()), "vs Hard · Rush"),
+            (StyleChoice::Random, "vs Hard · ?"),
+        ] {
+            app.insert_resource(NewGameSettings {
+                difficulty: "hard".into(),
+                style,
+                seed: 42,
+                ..NewGameSettings::default()
+            });
+            app.update();
+            assert_eq!(label(&mut app), want);
+        }
+    }
+
+    /// Spectating, the tiebreak race names the seats Blue and Red (nobody
+    /// is "You").
+    #[test]
+    fn the_spectated_tiebreak_race_names_blue_and_red() {
+        let r = rules::Rules::load(data()).unwrap();
+        let setup = sim::MatchSetup::bots(&r, 1, ("passive", ""), ("passive", ""));
+        let mut sim = SimHandle::from_setup(setup, r);
+        let target = TIEBREAK_READOUT_FROM_SECS * sim.tick_rate_hz();
+        while sim.tick() < target {
+            sim.step_once();
+            let _ = sim.drain_events();
+        }
+        assert_eq!(
+            tiebreak_text(&sim.view(), &strings(), LOCAL_PLAYER).as_deref(),
+            Some("Tiebreak 45:00 · Blue 50% · Red 50%")
+        );
+    }
+
+    /// The opponent label hides a Random style until the outcome and names
+    /// the difficulty; spectating names both seats.
+    #[test]
+    fn opponent_label_hides_the_style_until_revealed() {
+        let r = rules::Rules::load(data()).unwrap();
+        let setup = sim::MatchSetup::vs_bot(&r, 1, "hard", "rush");
+        assert_eq!(
+            opponent_label(&setup, &r, LOCAL_PLAYER, true),
+            "vs Hard · ?"
+        );
+        assert_eq!(
+            opponent_label(&setup, &r, LOCAL_PLAYER, false),
+            "vs Hard · Rush"
+        );
+        let both = sim::MatchSetup::bots(&r, 1, ("easy", "boom"), ("standard", "tower"));
+        assert_eq!(
+            opponent_label(&both, &r, LOCAL_PLAYER, true),
+            "Easy · Boom vs Standard · Tower"
+        );
+    }
+
+    /// The tiebreak race shows from 35:00 only, the local share first.
+    #[test]
+    fn tiebreak_readout_from_35_minutes_with_shares() {
+        let r = rules::Rules::load(data()).unwrap();
+        let mut setup = sim::MatchSetup::scenario(&r, 1);
+        setup.start = sim::StartKind::Standard;
+        let mut sim = SimHandle::from_setup(setup, r);
+        let s = strings();
+        assert_eq!(tiebreak_text(&sim.view(), &s, LOCAL_PLAYER), None);
+        let target = TIEBREAK_READOUT_FROM_SECS * sim.tick_rate_hz();
+        while sim.tick() < target {
+            sim.step_once();
+            let _ = sim.drain_events();
+        }
+        assert_eq!(
+            tiebreak_text(&sim.view(), &s, LOCAL_PLAYER).as_deref(),
+            Some("Tiebreak 45:00 · You 50% · Bot 50%")
+        );
+    }
+}

@@ -169,7 +169,7 @@ pub fn update_placement(
     mut pending: ResMut<PendingCommands>,
     strings: Option<Res<UiStrings>>,
     mut message: ResMut<MessageState>,
-    time: Res<Time>,
+    time: crate::speed::UiNow,
     mut gizmos: Gizmos,
 ) {
     let Some(mut ghost) = ghost else {
@@ -268,7 +268,8 @@ pub fn update_placement(
         if message.text != text {
             message.text = text;
         }
-        message.since = time.elapsed_secs_f64();
+        message.since = time.secs();
+        message.alert = false;
     }
 
     if !buttons.just_released(MouseButton::Left) {

@@ -2084,6 +2084,43 @@ mod tests {
         );
     }
 
+    /// M6: `scripted_match` is a `Scenario::Bot` (a human stream against
+    /// the Standard bot): it records to the step the surrender decides,
+    /// and its replay verifies with the bot rebuilt from the header, as
+    /// `just rerecord` and `sim-cli verify` do for its golden.
+    #[test]
+    fn scripted_match_records_through_the_bot_to_its_outcome() {
+        let rules = Rules::load(data()).unwrap();
+        let scenario = Scenario::parse("scripted_match").unwrap();
+        assert_eq!(scenario, Scenario::Bot("scripted_match"));
+        assert!(scenario.stops_at_outcome());
+        assert!(Scenario::names().contains(&"scripted_match"));
+        let cap = scenario.default_ticks(&rules);
+        let out = temp("scripted_match.eonreplay");
+        let rec = record_scenario(&rules, scenario, cap, &out, 20, None, 0).unwrap();
+        let result = rec.result.expect("the surrender decides it");
+        assert_eq!(rec.ticks, result.tick);
+        assert_eq!(
+            result.tick,
+            sim::scenarios::SCRIPTED_MATCH_SURRENDER_TICK + rules.cmd_delay_ticks + 1
+        );
+        let outcome = sim::replay::verify_with(
+            &out,
+            &data(),
+            Box::new(|setup: &MatchSetup, rules: &Rules| {
+                ai::controller_for(setup, rules).map_err(|e| e.to_string())
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Ok {
+                final_hash: rec.final_hash,
+                ticks: rec.ticks
+            }
+        );
+    }
+
     #[test]
     fn hash_dump_line_has_every_subsystem() {
         let line = hash_dump_line(7, 1, &SubHashes::default());

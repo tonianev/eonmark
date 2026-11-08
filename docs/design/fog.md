@@ -37,6 +37,8 @@ Cost. Two passes over 16 KiB per player plus one disc per source. With 200 units
 
 ## What the AI is allowed to know
 
+**v0.1 (owner decision of 2026-11-08, [ADR 0004](../adr/0004-bot-reads-the-unfiltered-view.md)):** the bot reads the unfiltered view, and the seam described below stays unfiltered. M7 ships the grid and `SimView`'s filtered queries, which the game uses to draw fog for the human player and which M7's first acceptance line tests. The rest of this section is the design of the fog-obeying bot, a v0.2 candidate.
+
 The scripted bot in [ai.md](ai.md) runs inside `Sim::step` and reads the world only through `SimView`. `SimView` applies the viewing player's grid before handing out anything about other players:
 
 | Query | Rule |
@@ -63,7 +65,7 @@ Enemy units. `present.rs` mirrors `UnitId` to `Entity`. Each frame it sets `Visi
 
 Enemy buildings. A building in a state 1 or 2 tile is drawn with its current model, HP bar and owner colour. In v0.1 there is no ghosting: the game does not remember what a building looked like when last seen, it shows the live state whenever the tile has been explored. Buildings in state 0 tiles are hidden. Ghosting is listed as out of scope in [../ROADMAP.md](../ROADMAP.md).
 
-Own units and buildings are always drawn.
+Own units and buildings are always drawn. Spectating (`--spectate`) draws the whole map with no fog (ADR 0004).
 
 ## Minimap
 
@@ -86,7 +88,7 @@ The art pass built this minimap without fog (`crates/game/src/minimap.rs`, [ui.m
 | Territory ([territory.md](territory.md)) | shares the field texture; fog multiplies after tint and isoline |
 | Combat ([combat.md](combat.md)) | auto-acquire uses weapon range, which the data should keep at or below vision radius so units never shoot what their owner cannot see (see open questions) |
 | Attrition ([attrition.md](attrition.md)) | independent of fog; the supply coverage channel (A) is the same texture |
-| AI ([ai.md](ai.md)) | reads only the filtered `SimView`; influence maps inherit the filter |
+| AI ([ai.md](ai.md)) | v0.1: reads the unfiltered view (ADR 0004); the v0.2 design reads only the filtered `SimView`, and its influence maps inherit the filter |
 | Replays | the grid is replayed, not recorded; verifying a replay reproduces it tick for tick |
 | Snapshot | serialised as plain state; nothing to rebuild in `restore()` |
 

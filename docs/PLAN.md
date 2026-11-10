@@ -18,9 +18,9 @@ Written 2026-11-08 at `main` 3095228 and finished 2026-11-10 for sessions on cos
 
 | Item | State |
 |---|---|
-| `main` | 3095228 (PR #57, 2026-11-05); this plan is PR "plan" on `claude/confident-hopper-ho6dz1` |
+| `main` | 3095228 (PR #57, 2026-11-05); this plan is PR #59 on `claude/confident-hopper-ho6dz1` |
 | `SIM_VERSION` / `rules_version` | 18 / 31 (M7-5 is the only planned bump: 19 / 32) |
-| Golden fixtures | 12 in the top-level `fixtures/` (moved there from crates/sim/tests/fixtures by this plan's PR) |
+| Golden fixtures | 12 in the top-level `fixtures/` (moved there from crates/sim/tests/fixtures by PR #59) |
 | CI jobs | check (macos-26), headless (ubuntu-24.04), game compiles on Linux, cargo-deny, hash parity (macOS vs Linux), fun-gate (ubuntu-24.04) |
 | Merged | M0 to M5b; the art pass; M6 lines 1 to 5 |
 | Open agent lines | M7 lines 1, 2, 5; M8; M9 (`scripts/roadmap.sh open`) |
@@ -33,17 +33,17 @@ Lanes: **G** game and UI (`crates/game`), **S** sim, bot and data, **A** assets,
 
 | WP | Lane | Title | Size | Risk | Status |
 |---|---|---|---|---|---|
-| E1 | R | Dev tools in every container (`scripts/dev_setup.sh`) | S | low | done (plan PR) |
-| X1 | S | Fixtures to `fixtures/`, faction-agnostic tests, rename-aware fixture policy | S | low | done (plan PR) |
-| T1 | R | Guard and speed tools (`roadmap.sh`, `check_roadmap_ticks.py`, `quick_check.sh`, `check_plan_refs.py`, `check_doc_links.py`) | S | low | done (plan PR) |
-| H2 | S | The fun gate as one command (`fun_gate_all.sh`, `same_outcomes.sh`) | S | low | done (plan PR) |
+| E1 | R | Dev tools in every container (`scripts/dev_setup.sh`) | S | low | done (#59) |
+| X1 | S | Fixtures to `fixtures/`, faction-agnostic tests, rename-aware fixture policy | S | low | done (#59) |
+| T1 | R | Guard and speed tools (`roadmap.sh`, `check_roadmap_ticks.py`, `quick_check.sh`, `check_plan_refs.py`, `check_doc_links.py`) | S | low | done (#59) |
+| H2 | S | The fun gate as one command (`fun_gate_all.sh`, `same_outcomes.sh`) | S | low | done (#59) |
 | [M7-1](wp/M7-1.md) | G | Esc pause menu and settings | M | low | ready |
 | [M7-2](wp/M7-2.md) | A | Vendor the Kenney UI, icons and audio | S to M | medium | ready (needs kenney.nl, else O3) |
-| [H1](wp/H1.md) | R | File the unfiled good first issues | S | low | ready |
+| H1 | R | File the unfiled good first issues (#60 to #64) | S | low | done (#59) |
 | [M8-1](wp/M8-1.md) | R | CI hygiene: pinned actions, Dependabot | S | low | ready |
 | [M6-1](wp/M6-1.md) | S | Ingest the fun-gate matches | S | low | waiting (O1) |
 | [M6-2](wp/M6-2.md) | S | Tuning round, 0 to 3 of them | M | high | conditional (M6-1 finds a failure) |
-| [M6-3](wp/M6-3.md) | S | Close M6 | S | low | waiting (M6-1, H1) |
+| [M6-3](wp/M6-3.md) | S | Close M6 | S | low | waiting (M6-1) |
 | [M7-3](wp/M7-3.md) | G | Audio | M | low | waiting (M7-1, M7-2) |
 | [M7-4](wp/M7-4.md) | G | Kenney panels and icons | M | medium | waiting (M7-2) |
 | [M7-5](wp/M7-5.md) | S | Fog in the sim and the faction choice (the one bump) | L | medium | waiting (M6-3) |
@@ -65,7 +65,7 @@ Lanes: **G** game and UI (`crates/game`), **S** sim, bot and data, **A** assets,
 Now, in parallel:
   lane G: M7-1 pause menu ---------------------------------------> M7-3 audio -> M7-4 panels
   lane A: M7-2 assets (needs kenney.nl or O3) ------------------------^
-  lane R: H1 issues, M8-1 CI hygiene
+  lane R: M8-1 CI hygiene
   owner : O1 three streamed matches (any time; nothing else waits on it except M6 and, behind it, fog)
 
 Then:

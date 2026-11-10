@@ -12,7 +12,8 @@ Written 2026-11-08 at `main` 3095228 and finished 2026-11-10 for sessions on cos
 2. One WP per session and one PR per WP; an L-size WP may take two sessions on one draft PR (say so in the PR). Different lanes may run in parallel: they touch disjoint files, and each PR edits only its own board row.
 3. The PR that finishes a WP sets its row to `done (#PR)` and updates the rows that waited on it, in the same PR.
 4. If no row is `ready` in your lane, say what each waits on and stop; do not invent work.
-5. Tools: `scripts/quick_check.sh` (the checks your diff needs), `scripts/roadmap.sh` (read the ROADMAP by piece), `scripts/fun_gate_all.sh` and `scripts/same_outcomes.sh` (the bot lines and the "no game changed" proof). PLAYBOOK P14 has the cost rules.
+5. Start sessions on the **`eonmark` environment** (created 2026-11-10; the user's environment menu): its setup script runs `scripts/dev_setup.sh`, so `just`, `typos`, `cargo-machete`, `cargo-deny`, Xvfb, lavapipe and xdotool are there at start (unproven until a fresh session uses it; if `just` is missing, run the script, about 6 minutes). It also allows the host kenney.nl, which does not help: see O3.
+6. Tools: `scripts/quick_check.sh` (the checks your diff needs), `scripts/roadmap.sh` (read the ROADMAP by piece), `scripts/fun_gate_all.sh` and `scripts/same_outcomes.sh` (the bot lines and the "no game changed" proof). PLAYBOOK P14 has the cost rules.
 
 ## Status at 2026-11-10
 
@@ -38,7 +39,7 @@ Lanes: **G** game and UI (`crates/game`), **S** sim, bot and data, **A** assets,
 | T1 | R | Guard and speed tools (`roadmap.sh`, `check_roadmap_ticks.py`, `quick_check.sh`, `check_plan_refs.py`, `check_doc_links.py`) | S | low | done (#59) |
 | H2 | S | The fun gate as one command (`fun_gate_all.sh`, `same_outcomes.sh`) | S | low | done (#59) |
 | [M7-1](wp/M7-1.md) | G | Esc pause menu and settings | M | low | ready |
-| [M7-2](wp/M7-2.md) | A | Vendor the Kenney UI, icons and audio | S to M | medium | ready (needs kenney.nl, else O3) |
+| [M7-2](wp/M7-2.md) | A | Vendor the Kenney UI, icons and audio | S to M | medium | waiting (O3: kenney.nl rejects scripted clients) |
 | H1 | R | File the unfiled good first issues (#60 to #64) | S | low | done (#59) |
 | [M8-1](wp/M8-1.md) | R | CI hygiene: pinned actions, Dependabot | S | low | ready |
 | [M6-1](wp/M6-1.md) | S | Ingest the fun-gate matches | S | low | waiting (O1) |
@@ -64,9 +65,10 @@ Lanes: **G** game and UI (`crates/game`), **S** sim, bot and data, **A** assets,
 ```text
 Now, in parallel:
   lane G: M7-1 pause menu ---------------------------------------> M7-3 audio -> M7-4 panels
-  lane A: M7-2 assets (needs kenney.nl or O3) ------------------------^
+  lane A: M7-2 assets (needs the owner's O3 drop) ---------------------^
   lane R: M8-1 CI hygiene
   owner : O1 three streamed matches (any time; nothing else waits on it except M6 and, behind it, fog)
+          O3 Kenney drop, 15 minutes (lane G's audio and panels wait on it)
 
 Then:
   M6-1 ingest O1 -> [M6-2 tuning, 0 to 3 rounds, each replayed by O1] -> M6-3 close M6
@@ -95,8 +97,13 @@ Play on any build of `main` at `rules_version` 31 (game-only PRs do not change i
 ### O2. The Mac batch (60 to 90 minutes, can be split; before the tag)
 From `main` on the dev Mac, in this order: (1) PLAYTEST "Owner's Mac checklist (art pass)" steps 1 to 8: AP5's fps and headroom runs, AP7 on Metal, AP8's sign-off of the four screenshots on the P3 display and as sRGB, AP6 by hand, AP4's `mode=` re-read, and M3b's and M4b's fps lines with the models; (2) "Owner's Mac checklist (M5b)" steps 4 and 5; (3) "Owner's Mac checklist (M4b)" steps 1 to 10 with M5a's line 3; (4) the controls checklists (M2, M3b, M4b, M5a), "Cmd-Q (M2)", M0's window line and M3b's border screenshot.
 
-### O3. Asset drop (15 minutes, only if M7-2 asks)
-Only if this environment cannot reach kenney.nl and you decline adding the host: download the zips M7-2 lists, unchanged, and push them to a branch `owner/kenney-inbox` under `inbox/`.
+### O3. Kenney drop (15 minutes; lane G's audio and panels wait on it)
+kenney.nl answers HTTP 403 to scripted clients even with the host allowed (verified 2026-11-10), and agents do not work around that. In a browser, download these CC0 packs unchanged: kenney.nl/assets/`ui-pack` (or `ui-pack-rpg-expansion`), `game-icons`, `interface-sounds`, `impact-sounds` and `music-jingles` (or `rpg-audio`). Then:
+```bash
+git fetch origin && git switch -c owner/kenney-inbox origin/main && mkdir inbox
+cp ~/Downloads/kenney_*.zip inbox/ && git add inbox && git commit -m "Kenney packs, unchanged" && git push -u origin owner/kenney-inbox
+```
+M7-2 reads the zips from that branch, checks each pack's licence file says CC0, vendors a chosen subset with pins, and never merges the inbox.
 
 ### O4. M7 on the Mac (about 20 minutes, after M7-7)
 The commands M7-7 writes into PLAYTEST "Owner's Mac checklist (M7)": M7 line 5's fps at 1440p with fog and draw calls, and line 6's sign-off of the new `docs/screenshots/m7_town.png`. (M7's lines in order: 1 `cargo test -p sim fog`, 2 fog in the game, 3 `check_assets` and 4 `data-check` (both ticked by the art pass), 5 fps at 1440p, 6 the screenshot.)
@@ -149,7 +156,7 @@ M9 is already post-release, so it is not a lever.
 | Tuning loops (M6-2, M9-1) burn sessions | the six-variant budget (P6), `fun_gate_all.sh` with a `DATA` override, the line's three-round limit, and stopping to ask |
 | M7-5's hash churn hides a behaviour change | `same_outcomes.sh` proves no game changed; one bump on one draft PR across both sessions |
 | The grid breaks the 10 s `cargo test -p sim` budget | measured in M7-5; stamp cadence as a data field inside the same bump |
-| Blocked asset hosts | one environment approval for kenney.nl, or O3 |
+| kenney.nl rejects scripted clients | O3: the owner's browser download; agents do not work around the block |
 | A cheaper agent judging looks (M7-4, M7-6) | the ART_STYLE checklist written into the PR for every screenshot; the owner signs AP8 and M7 line 6 |
 | Mac-only failures in M8 | release-check on macOS runners by `workflow_dispatch`; Mac clauses go to O5 |
 | A reworded acceptance line | CI fails the PR (`check_roadmap_ticks.py`) |

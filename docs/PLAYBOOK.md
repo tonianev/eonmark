@@ -136,7 +136,7 @@ Take the first seed of each style above every seed used before, order the three 
 - **Licences:** only CC0-1.0, CC-BY-4.0 or OFL-1.1. Nothing AI-generated ([AI_CONTRIBUTIONS.md](../AI_CONTRIBUTIONS.md)).
 - **Records:** every file gets an `assets/ATTRIBUTION.md` row and a sha256 pin in `tools/assets/sources.tsv`.
 - **Checks:** `scripts/check_assets.sh` and `scripts/check_assets.sh --self-test` before every commit that touches `assets/`.
-- **Hosts:** from this environment `raw.githubusercontent.com` works; kenney.nl, itch.io, opengameart.org and freesound.org are blocked. For a blocked host, call `get_environment`, then propose adding exactly that host with the environment tools; the owner approves a prompt. If the owner declines, use their inbox branch (PLAN O3).
+- **Hosts:** from this environment `raw.githubusercontent.com` and the package registries work; itch.io, opengameart.org and freesound.org are refused by the proxy. For a refused host, call `get_environment`, then propose adding exactly that host with the environment tools; the owner approves a prompt. kenney.nl is different: allowing it only lets the tunnel through, and the site itself answers HTTP 403 to scripted clients (2026-11-10). Never spoof a browser to get past a site's bot check (the auto-mode classifier denies it); use the owner's inbox branch (PLAN O3).
 
 ## P11. Owner sessions and their ingest
 

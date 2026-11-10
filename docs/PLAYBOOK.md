@@ -33,7 +33,7 @@ Then read your WP's brief, `docs/wp/<id>.md` ([CLAUDE.md](../CLAUDE.md) is alrea
 - Tick only after CI is green on the PR's head, and only the lines this PR proves.
 - Run `python3 -I scripts/check_roadmap_ticks.py origin/main` (CI runs it on every PR): it fails a reworded line and a tick without an evidence suffix.
 - Change `- [ ]` to `- [x]` and append ` (Observed on PR #N, YYYY-MM-DD: <commands and their key output lines, verbatim>)`. For a CI clause, name the job, the step and the run id (`Actions run <id>`).
-- Never reword, shorten or reorder the line's own text.
+- Never reword, shorten or reorder the line's own text. The owner may write ` (Owner-confirmed YYYY-MM-DD: ...)` instead of `(Observed on PR #N ...)`; `scripts/check_roadmap_ticks.py` accepts both.
 - [owner] lines follow PLAN D6. M6 line 6 is ticked by the owner only: put the exact tick text in the PR description for the owner to apply.
 - Commit as `Tick M<n> line <k> with the PR #N evidence`. CI runs again (docs only).
 

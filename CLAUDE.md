@@ -5,7 +5,7 @@ Eonmark is an open-source, deterministic real-time strategy game in Rust: a fixe
 This file is loaded into every session, so it holds only the loop and the rules that bite. Everything else:
 
 - [docs/PLAN.md](docs/PLAN.md): what to do next: the board of work packages (WPs) by lane, the owner's queue, the decisions and the merge policy. Each WP has its own brief in [docs/wp/](docs/wp/README.md).
-- [docs/PLAYBOOK.md](docs/PLAYBOOK.md): how to do the recurring chores (setup, PRs, ticks, fixtures, fun gate, tuning, windowed runs, CI triage, assets). PLAN cites its sections as P1 to P14.
+- [docs/PLAYBOOK.md](docs/PLAYBOOK.md): how to do the recurring chores (setup, PRs, ticks, fixtures, fun gate, tuning, windowed runs, CI triage, assets). PLAN and the briefs cite its sections as P1 to P15.
 - [docs/IMPLEMENTER_NOTES.md](docs/IMPLEMENTER_NOTES.md): the binding rules (numbered 1 to 25), the known traps and the definition of done.
 - [docs/ROADMAP.md](docs/ROADMAP.md): scope and acceptance. Read only the milestone section you need.
 

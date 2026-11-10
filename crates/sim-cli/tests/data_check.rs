@@ -62,6 +62,19 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// The number after ` <key>=` in the `OK` line.
+fn count_after(stdout: &str, key: &str) -> u32 {
+    let pat = format!(" {key}=");
+    let at = stdout
+        .find(&pat)
+        .unwrap_or_else(|| panic!("no `{key}=` in {stdout}"));
+    stdout[at + pat.len()..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("`{key}=` is not a number in {stdout}"))
+}
+
 #[test]
 fn repo_data_passes_with_three_ages_eight_kinds_and_twelve_techs() {
     let out = data_check(&repo_data());
@@ -74,15 +87,18 @@ fn repo_data_passes_with_three_ages_eight_kinds_and_twelve_techs() {
     );
     // M5a: `techs` counts the techs that count toward an age; the
     // Watchtower's Harrying I and II are the two side techs.
+    // The faction count is not pinned: a second faction added as data (M9)
+    // changes only `factions=` and `rules_hash=`, and must not need an edit
+    // under crates/.
     assert!(
-        stdout.contains(" techs=12 side_techs=2 factions=1 "),
+        stdout.contains(" techs=12 side_techs=2 factions="),
         "{stdout}"
     );
+    assert!(count_after(&stdout, "factions") >= 1, "{stdout}");
     // M5b: the bot data under data/ai; M6: its three difficulty levels.
     assert!(
-        stdout.contains(
-            " factions=1 personalities=4 build_orders=4 difficulties=3 maps=plains_1v1 strings=en"
-        ),
+        stdout
+            .contains(" personalities=4 build_orders=4 difficulties=3 maps=plains_1v1 strings=en"),
         "{stdout}"
     );
     // Art pass: the visuals counts and the Scene files found under assets/.

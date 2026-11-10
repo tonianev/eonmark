@@ -16,6 +16,8 @@ in a game that runs and a command that proves it.
 
 ## State of the repository
 
+The live status, the work queue and the owner's queue are in [PLAN.md](PLAN.md) (written 2026-11-08 for the rest of the roadmap, M6 to M9); this section is the history that led there.
+
 The repository was planned and scaffolded on 2026-10-05 with AI assistance.
 M0, M1, M2, M3a and M3b are merged (M3a as PR #26, M3b as PR #31). M4a, the
 simulation half of tech, ages and combat, is merged as PR #35, and M4b, its
@@ -131,6 +133,16 @@ itself follows [STREAMING.md](STREAMING.md): the two commands, the window
 and focus settings that bite, OBS, a five-minute pre-flight and what to
 keep afterwards. M6 follows the art pass.
 
+M6, the fun gate, merged in two PRs. PR #56 (`651e26b`, `SIM_VERSION` 18,
+`rules_version` 31) brought the three difficulties with their disclosed
+bonus, the rush, boom and tower personalities, retreat, influence maps and
+counters, `play-bots` pairings, `sim-cli match-log` and the `fun-gate` CI
+job, and ticked lines 1 to 4. PR #57 (`3095228`) brought game speed x1, x2
+and x4 with the active pause, the `scripted_match` golden (twelve golden
+fixtures now), New Game with difficulty, style and seed, the game-over stats
+screen, Play Again and the under-attack alert, and ticked line 5. Line 6, the
+fun gate itself, waits for the owner's three streamed matches (PLAN.md, O1).
+
 Open owner checks on the dev Mac, batched into one session under the owner's
 decision 3 in the ROADMAP's M4b Notes, which M5b's decision 9 extends to
 M5b (an exception to rule 1 in `docs/IMPLEMENTER_NOTES.md`; accepted risk:
@@ -188,6 +200,10 @@ ticked with pasted command output in a merged PR.
 
 ## Read these first, in this order
 
+0. `CLAUDE.md` (the session loop and the rules that bite), then `docs/PLAN.md`
+   (the status and the next work package) and `docs/PLAYBOOK.md` (the
+   procedures). An agent session reads the items below by section, as its
+   work package cites them, not whole.
 1. `docs/ROADMAP.md`: milestone order, acceptance checklists, how a milestone closes.
 2. `docs/IMPLEMENTER_NOTES.md`: the rules and known traps. Non-negotiable.
 3. `docs/ARCHITECTURE.md` and `docs/DETERMINISM.md`: the four invariants and why.
@@ -225,7 +241,7 @@ ticked with pasted command output in a merged PR.
 ```bash
 cargo run -p game --features dev                      # the main menu; New Game plays the Standard bot
 cargo run -p sim-cli -- selftest                      # two identical hashes
-cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
+cargo run -p game --profile ci -- --headless-run fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
 just ci                                               # everything CI runs
 ```
 
@@ -233,17 +249,19 @@ Optional tools that `just ci` uses when present: `brew install just cargo-nextes
 
 ## Starting prompt for the implementing agent
 
-Paste this into a fresh session opened at the repository root:
+Paste this into a fresh session opened at the repository root (since
+2026-11-08; the earlier prompt read every document in full, which a session
+can no longer afford):
 
-> Read docs/HANDOFF.md, then docs/ROADMAP.md and docs/IMPLEMENTER_NOTES.md in
-> full. Identify the first unchecked acceptance line of the lowest open
-> milestone in docs/ROADMAP.md (start with M0). Work in a branch named after
-> the milestone, keep the public API stable unless the roadmap says otherwise,
-> run `just ci` before every push, and open a PR against main whose
-> description pastes the command output for each acceptance line you closed.
-> Tick the boxes in docs/ROADMAP.md in the same PR. Stop when the milestone's
-> non-owner lines are all green, or when you are blocked; in that case paste the
-> failing output into the PR and open an issue labelled needs-design.
+> Follow CLAUDE.md. Do the first ready work package of lane G on the board in
+> docs/PLAN.md (or the one I name here): read only its brief in docs/wp/, do
+> only that package, verify it with its commands, open one PR, get CI green,
+> apply its ticks and update the board, then stop. If its Stop if fires,
+> follow docs/PLAYBOOK.md P13.
+
+Name a lane (G game, S sim and bot, A assets, R repository, CI and docs) or a
+work package (`M7-1`); lanes may run in parallel. To ingest an owner session,
+name it: "Ingest the owner session in issue #N (docs/wp/M6-1.md)".
 
 ## Owner decisions still open
 

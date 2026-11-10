@@ -66,13 +66,25 @@ ci:
       echo "skip: on main (fixture policy compares a branch against its base)"
     fi
 
+    scripts/check_fixture_policy.sh --self-test
+
+    step roadmap guard and plan docs
+    # CLAUDE.md rule 5: acceptance lines are only ticked, never reworded.
+    scripts/same_outcomes.sh --self-test
+    python3 -I scripts/check_roadmap_ticks.py --self-test
+    if git rev-parse --verify -q main >/dev/null && [ "$(git rev-parse HEAD)" != "$(git rev-parse main)" ]; then
+      python3 -I scripts/check_roadmap_ticks.py "$(git merge-base main HEAD)"
+    fi
+    python3 -I scripts/check_plan_refs.py
+    python3 -I scripts/check_doc_links.py
+
     step exactly one Bevy
     test "$(cargo tree -i bevy_ecs --depth 0 | wc -l | tr -d ' ')" -eq 1
 
     step headless replay
     # The game re-simulates the golden through its own driver; the last line
     # is `tick=1200 hash=0x...` and the exit code is 0 only on a hash match.
-    cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1
+    cargo run -p game --locked --profile ci -- --headless-run fixtures/move_500.eonreplay | tail -n 1
 
     echo; echo "ci: all steps passed"
 
@@ -155,6 +167,19 @@ art-bake *ARGS:
 bots *ARGS:
     cargo run -p sim-cli --locked --release -- play-bots {{ARGS}}
 
+
+# CI's whole fun-gate job as one command (scripts/fun_gate_all.sh: M6 lines 1, 2 and 4 and the ignored m6_ tests; about 10 minutes on 4 vCPUs). DATA=<dir> plays a scratch copy of data/ for tuning (docs/PLAYBOOK.md, P6).
+fun-gate-all OUT="":
+    scripts/fun_gate_all.sh all "{{OUT}}"
+
+# Only the checks the current diff needs (scripts/quick_check.sh; --list, --all, --no-game); `just ci` stays the gate before a push.
+quick *ARGS:
+    scripts/quick_check.sh {{ARGS}}
+
+# The ROADMAP by piece (scripts/roadmap.sh): open | lines M7 | section M7 | full N.
+roadmap *ARGS:
+    scripts/roadmap.sh {{ARGS}}
+
 # ROADMAP M6 acceptance 1 (M6): the literal 20-game line with distinct rush/boom/tower pairs, then scripts/fun_gate.sh on its CSV and stderr (winners, decisive before 48000, median, past 24000, per-pair diagnostics). The files stay under OUT (default a fresh scratch directory); see docs/design/ai.md, "The M6 fun gate".
 fun-gate OUT="":
     #!/usr/bin/env bash
@@ -185,11 +210,11 @@ match-log REPLAY:
 bench *ARGS:
     cargo run -p sim-cli --locked --release -- bench {{ARGS}}
 
-# Verify replay fixtures in release: every golden under crates/sim/tests/fixtures/, or the files given.
+# Verify replay fixtures in release: every golden under fixtures/, or the files given.
 verify *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ $# -eq 0 ]; then set -- crates/sim/tests/fixtures/*.eonreplay; fi
+    if [ $# -eq 0 ]; then set -- fixtures/*.eonreplay; fi
     for f in "$@"; do
       printf '%s: ' "$f"
       cargo run -q -p sim-cli --locked --release -- verify "$f"

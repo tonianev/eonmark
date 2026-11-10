@@ -69,7 +69,7 @@ fn load_rules() -> Rules {
 }
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 fn tech(rules: &Rules, id: &str) -> TechId {

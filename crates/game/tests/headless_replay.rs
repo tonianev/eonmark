@@ -34,7 +34,7 @@ fn capture_finished(mut finished: MessageReader<ReplayFinished>, mut outcome: Re
 }
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 fn data_dir() -> PathBuf {

@@ -1786,7 +1786,11 @@ mod tests {
         // (M5a) are side techs.
         assert_eq!(rules.techs.len(), 14);
         assert_eq!(rules.counting_techs(), 12);
-        assert_eq!(rules.factions.len(), 1);
+        // Freeholders is the first (default) faction and has no rows. The
+        // count is not pinned: a second faction added as data (M9) must not
+        // need an edit under crates/.
+        assert!(!rules.factions.is_empty());
+        assert_eq!(rules.factions[0].id, "freeholders");
         assert!(rules.factions[0].modifiers.is_empty());
         assert_eq!(rules.yield_cap_base, 70);
         assert_eq!(rules.pop_cap_base, 25);

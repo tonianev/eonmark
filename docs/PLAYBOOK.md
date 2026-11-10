@@ -15,12 +15,13 @@ df -h . | tail -1                                      # under 10 GB free: P12
 cargo build -p game -p sim-cli --profile ci --locked > /tmp/build.log 2>&1 &
 ```
 
-Then read [CLAUDE.md](../CLAUDE.md) (loaded already), PLAN.md section 1 and your WP, and the doc sections the WP names, by section (P14).
+Then read your WP's brief, `docs/wp/<id>.md` ([CLAUDE.md](../CLAUDE.md) is already loaded), and the doc sections it names, by section (P14). `python3 -I scripts/check_plan_refs.py` tells you at once if a brief's paths or symbols have gone stale; if it fails, correct the brief first.
 
 ## P2. Branch, commits, PR and CI
 
 - **Commits:** an imperative subject under 72 characters and a body that says why. No AI attribution trailers ([CONTRIBUTING.md](../CONTRIBUTING.md)). Commit every green step: a container restart loses uncommitted work.
 - **Push:** `git push -u origin <branch>`. Never force-push and never amend a pushed commit; fix forward with a new commit.
+- **GitHub tools:** the GitHub MCP tools sometimes disconnect for a minute. Retry `ToolSearch` (`select:mcp__github__<name>`) before concluding they are gone. `gh api` works unauthenticated for public reads (job logs: `gh api repos/tonianev/eonmark/actions/jobs/<id>/logs`).
 - **PR:**
   - Use [.github/PULL_REQUEST_TEMPLATE.md](../.github/PULL_REQUEST_TEMPLATE.md). "What and why" names the WP.
   - "How to verify" lists each command with its key output lines, never whole logs.
@@ -30,6 +31,7 @@ Then read [CLAUDE.md](../CLAUDE.md) (loaded already), PLAN.md section 1 and your
 ## P3. Ticking a ROADMAP acceptance line
 
 - Tick only after CI is green on the PR's head, and only the lines this PR proves.
+- Run `python3 -I scripts/check_roadmap_ticks.py origin/main` (CI runs it on every PR): it fails a reworded line and a tick without an evidence suffix.
 - Change `- [ ]` to `- [x]` and append ` (Observed on PR #N, YYYY-MM-DD: <commands and their key output lines, verbatim>)`. For a CI clause, name the job, the step and the run id (`Actions run <id>`).
 - Never reword, shorten or reorder the line's own text.
 - [owner] lines follow PLAN D6. M6 line 6 is ticked by the owner only: put the exact tick text in the PR description for the owner to apply.
@@ -47,6 +49,7 @@ Then read [CLAUDE.md](../CLAUDE.md) (loaded already), PLAN.md section 1 and your
 | a new scenario fixture | none for the new file | only the new one: `just rerecord <name>` | the other fixtures unchanged |
 
 ```bash
+# fixtures live in the top-level fixtures/ directory
 # in the same commit as the bump, with its one-line reason next to it:
 just rerecord                       # rewrites the fixtures and prints which changed
 just verify                         # every fixture: OK final_hash=...
@@ -58,7 +61,7 @@ A `.hash` change without a bump is a bug, never a fixture update. M7 has exactly
 
 ## P5. The fun gate locally
 
-- **The whole CI job:** `just fun-gate-all <out>` (PLAN H2; about 10 minutes on 4 vCPUs). Until H2 lands, run the commands of the `fun-gate` job in `.github/workflows/ci.yml`, or `just fun-gate <out>` for line 1 alone (about 20 s).
+- **The whole CI job:** `just fun-gate-all <out>` (`scripts/fun_gate_all.sh all`; about 10 minutes on 4 vCPUs; CI's steps call the same script's sections `line1`, `line2`, `line4a`, `line4b`, `tests`). `just fun-gate <out>` runs line 1 alone (about 20 s). `DATA=/tmp/td scripts/fun_gate_all.sh all` plays a scratch copy of `data/` (P6).
 - **When to run it:** before pushing any change under `data/rules`, `data/ai` or `crates/ai`.
 - **Same outcomes**, for a change that must not change any game (M7-5):
 
@@ -75,7 +78,7 @@ for f in l1 es sh; do scripts/same_outcomes.sh before/$f.csv after/$f.csv; done 
 ## P6. Bot and balance tuning (bounded)
 
 1. Write the hypothesis into the PR before measuring: the criterion, the lever, the expected direction.
-2. Experiment on a copy: `cp -r data /tmp/td`, edit the copy, then `target/release/sim-cli --data /tmp/td play-bots ...`. `--data` is global and never touches `data/`.
+2. Experiment on a copy: `cp -r data /tmp/td`, edit the copy, then `DATA=/tmp/td scripts/fun_gate_all.sh all /tmp/fg_<variant>` (or `target/release/sim-cli --data /tmp/td play-bots ...` for one line). `--data` is global and never touches `data/`.
 3. Measure the failing criterion's proxy and M6 lines 1, 2 and 4 on seeds 1..20. Confirm on 21..40 only for the variant you mean to ship.
 4. Measure at most six variants per session, each one a row in the tuning table of [design/ai.md](design/ai.md), committed with the PR: `/tmp` does not survive a restart.
 5. Ship the best variant that passes every fun-gate line, with one `rules_version` bump (P4).
@@ -180,6 +183,9 @@ Never cut, weaken or reword an acceptance criterion to get unblocked (IMPLEMENTE
 
 ## P14. Cost checklist
 
+The tools that make the rules below cheap: `scripts/quick_check.sh` (checks by diff), `scripts/roadmap.sh` (the ROADMAP by piece), `scripts/fun_gate_all.sh` and `scripts/same_outcomes.sh` (bot lines and the no-behaviour-change proof), `scripts/check_plan_refs.py` and `scripts/check_doc_links.py` (docs lint).
+
+
 - Read by section, never whole files. `grep -n '^#' <doc>` finds the headings; `sed -n '<a>,<b>p' <doc>` reads one section. The large docs are ROADMAP (130 KB), DETERMINISM, ARCHITECTURE and design/ai.md (about 105 KB each), PLAYTEST (100 KB) and design/ui.md (76 KB).
 - Pipe long output through `tail -n 40` or `grep`, and never paste a whole log into the conversation or a PR.
 - Iterate with the narrowest command (`cargo test -p <crate> --profile ci <name>`). Run `just ci` once, before the push. Run windowed checks only when the WP asks for them.
@@ -187,3 +193,11 @@ Never cut, weaken or reword an acceptance criterion to get unblocked (IMPLEMENTE
 - Wait for CI through the PR subscription, never by polling.
 - One WP per session: stop when its Done when holds.
 - Write down in the repository (the PR description, a doc, a committed table) anything a later session needs: `/tmp` and the scratchpad do not survive a restart.
+
+## P15. Environment gotchas
+
+- **Restarts.** The worker restarts without warning and kills background commands; a result file from a killed run is not a result (a `just ci` killed mid-build ends `terminated by signal 15`). Commit and push every green step, and re-run what was killed.
+- **Long builds.** The first game build in a fresh container takes 15 to 25 minutes. Start it in the background (P1), keep reading, and let the completion notification wake you; never `sleep`.
+- **Tools.** A fresh container lacks `just`, `typos`, `cargo-machete` and `cargo-deny`: `scripts/dev_setup.sh` (about 6 minutes of compiling the first time).
+- **Branches.** Develop and push on the branch the harness gives you; a merged PR's branch is deleted, so start the next change from `origin/main` under the same name.
+- **Windowed runs on the VM** measure lavapipe, not Metal: never quote their fps as an owner result.

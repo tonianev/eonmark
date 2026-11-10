@@ -1,7 +1,7 @@
 //! Scripted scenarios: pure, deterministic command streams shared by the
 //! acceptance tests (`crates/sim/tests/m1.rs`, `m2.rs`), the criterion
 //! benches, `sim-cli record` / `bench`, the golden fixtures under
-//! `crates/sim/tests/fixtures/`, and (M2) the game's `--scenario <name>`
+//! `fixtures/`, and (M2) the game's `--scenario <name>`
 //! flag, which feeds a stream through `game::sim_driver::ScenarioInput`
 //! alongside the player's own commands.
 //!

@@ -1,5 +1,13 @@
 # Golden replay fixtures
 
+Moved on 2026-11-08 from `crates/sim/tests/fixtures/` to this top-level
+directory (a pure `git mv`: no byte changed, no hash, `rules_version` or
+`SIM_VERSION` moved). A faction added as data changes `rules_hash`, which
+every fixture header embeds, so the re-record would have been a change under
+`crates/` and ROADMAP M9 line 1 requires the faction commit to leave `crates/`
+untouched. Older docs and the evidence pasted in ROADMAP acceptance lines use
+the old path.
+
 Each fixture is `<name>.eonreplay` (written by `sim-cli record --scenario <name>`)
 with a sibling `<name>.hash` holding the final state hash as `0x<16 hex>` and a
 newline. `crates/sim/tests/m1.rs::golden(name)` (and its copies in `m3a.rs`
@@ -280,7 +288,7 @@ no arrival). Earlier recordings the same day: 1/1 (first creation) and 2/2
 (movement constants moved into `rules.ron` and `units.ron`, replay clean-exit
 trailer, `Pathing::service` no longer parks a zero-expansion search; final
 hashes unchanged from 1/1). Command:
-`cargo run -p sim-cli --release -- record --scenario <name> --out crates/sim/tests/fixtures/<name>.eonreplay`,
+`cargo run -p sim-cli --release -- record --scenario <name> --out fixtures/<name>.eonreplay`,
 then the printed `final_hash` goes into `<name>.hash`.
 
 To regenerate after a `rules_version` bump, run `just rerecord` (every

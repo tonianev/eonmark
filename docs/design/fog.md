@@ -104,7 +104,7 @@ Commands:
 
 ```bash
 cargo test -p sim fog
-cargo run -p sim-cli --release -- verify crates/sim/tests/fixtures/move_500.eonreplay
+cargo run -p sim-cli --release -- verify fixtures/move_500.eonreplay
 cargo run --release -p game -- --scenario fog_walkthrough
 ```
 

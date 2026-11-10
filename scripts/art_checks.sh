@@ -224,7 +224,7 @@ else
 fi
 verified=0
 total=0
-for f in crates/sim/tests/fixtures/*.eonreplay; do
+for f in fixtures/*.eonreplay; do
   total=$((total + 1))
   v=$("$simcli" verify --data "$w/data" "$f" 2>&1 || true)
   echo "    $(basename "$f"): $v"
@@ -282,7 +282,7 @@ verify_run
 
 echo
 echo "==> 8. art-match-minimap.png: --spectate --seed 1, fast-forwarded to T/2"
-fixture_line=$("$simcli" verify crates/sim/tests/fixtures/m5_first_match.eonreplay 2>&1 || true)
+fixture_line=$("$simcli" verify fixtures/m5_first_match.eonreplay 2>&1 || true)
 echo "    m5_first_match: $fixture_line"
 case "$fixture_line" in
   "OK final_hash="*" ticks="*)

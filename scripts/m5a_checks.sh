@@ -6,7 +6,7 @@
 # PR-pasted check, not a CI job (M5a owner decision 14).
 #
 #   1. `sim-cli verify` of the committed golden
-#      crates/sim/tests/fixtures/capture_seat.eonreplay prints
+#      fixtures/capture_seat.eonreplay prints
 #      `OK final_hash=H ticks=T`, and H is capture_seat.hash.
 #   2. The game runs `--scenario capture_seat` in background mode
 #      (docs/IMPLEMENTER_NOTES.md rule 25) with a screenshot at tick T. It
@@ -58,8 +58,8 @@ fail=0
 bad() { echo "FAIL  $*"; fail=1; }
 ok() { echo "PASS  $*"; }
 
-fixture=crates/sim/tests/fixtures/capture_seat.eonreplay
-golden="$(tr -d '[:space:]' < crates/sim/tests/fixtures/capture_seat.hash)"
+fixture=fixtures/capture_seat.eonreplay
+golden="$(tr -d '[:space:]' < fixtures/capture_seat.hash)"
 
 echo "==> 1. sim-cli verify $fixture"
 fixture_line="$("$simcli" verify "$fixture" 2>&1)"

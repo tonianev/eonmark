@@ -241,7 +241,7 @@ ticked with pasted command output in a merged PR.
 ```bash
 cargo run -p game --features dev                      # the main menu; New Game plays the Standard bot
 cargo run -p sim-cli -- selftest                      # two identical hashes
-cargo run -p game --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
+cargo run -p game --profile ci -- --headless-run fixtures/move_500.eonreplay  # tick=1200 hash=... line, exit 0
 just ci                                               # everything CI runs
 ```
 
@@ -253,13 +253,15 @@ Paste this into a fresh session opened at the repository root (since
 2026-11-08; the earlier prompt read every document in full, which a session
 can no longer afford):
 
-> Follow CLAUDE.md. Take the work package marked next on the board in
-> docs/PLAN.md (or the one I name here), do only that package, verify it with
-> its commands, open one PR, get CI green, apply its ticks and update the
-> board, then stop. If its Stop if fires, follow docs/PLAYBOOK.md P13.
+> Follow CLAUDE.md. Do the first ready work package of lane G on the board in
+> docs/PLAN.md (or the one I name here): read only its brief in docs/wp/, do
+> only that package, verify it with its commands, open one PR, get CI green,
+> apply its ticks and update the board, then stop. If its Stop if fires,
+> follow docs/PLAYBOOK.md P13.
 
-To ingest an owner session, name it: "Ingest the owner session in issue #N
-(PLAN.md M6-1)".
+Name a lane (G game, S sim and bot, A assets, R repository, CI and docs) or a
+work package (`M7-1`); lanes may run in parallel. To ingest an owner session,
+name it: "Ingest the owner session in issue #N (docs/wp/M6-1.md)".
 
 ## Owner decisions still open
 

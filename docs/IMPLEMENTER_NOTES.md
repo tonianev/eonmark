@@ -124,7 +124,7 @@ scripts/check_assets.sh --self-test
 cargo run -p inspect_gltf --locked --release -- check data assets   # art pass: every Scene of data/visuals.ron
 scripts/check_trademark.sh
 test "$(cargo tree -i bevy_ecs --depth 0 | wc -l)" -eq 1
-cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay   # M2: the hash-parity fixture
+cargo run -p game --locked --profile ci -- --headless-run fixtures/move_500.eonreplay   # M2: the hash-parity fixture
 ```
 
 Plus, when the PR touches the sim boundary:

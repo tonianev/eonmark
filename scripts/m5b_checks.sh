@@ -10,7 +10,7 @@
 # scripts/m5a_checks.sh, not a CI job.
 #
 #   1. `sim-cli verify` of the committed golden
-#      crates/sim/tests/fixtures/m5_first_match.eonreplay prints
+#      fixtures/m5_first_match.eonreplay prints
 #      `OK final_hash=H ticks=T`, and H is m5_first_match.hash.
 #   2. The overlay: the game runs `--spectate --seed 1` (the Standard bot
 #      against itself, m5_first_match's setup) fast-forwarded to T-400
@@ -106,8 +106,8 @@ no_errors() {
   if [ -z "$errors" ]; then ok "no ERROR line in $1"; else bad "ERROR lines in $1:"; echo "$errors"; fi
 }
 
-fixture=crates/sim/tests/fixtures/m5_first_match.eonreplay
-golden="$(tr -d '[:space:]' < crates/sim/tests/fixtures/m5_first_match.hash)"
+fixture=fixtures/m5_first_match.eonreplay
+golden="$(tr -d '[:space:]' < fixtures/m5_first_match.hash)"
 
 echo "==> 1. sim-cli verify $fixture"
 fixture_line="$("$simcli" verify "$fixture" 2>&1)"

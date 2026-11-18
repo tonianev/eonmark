@@ -1272,7 +1272,7 @@ fn bot_takes_seat() {
 #[test]
 #[ignore = "long golden; verified by sim-cli verify --release in CI"]
 fn golden_m5_first_match() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
     let replay = dir.join("m5_first_match.eonreplay");
     let expected = std::fs::read_to_string(dir.join("m5_first_match.hash")).unwrap();
     let outcome = sim::verify_with(

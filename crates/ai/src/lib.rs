@@ -811,7 +811,7 @@ mod tests {
     /// header to the hash in `scripted_match.hash`.
     #[test]
     fn golden_scripted_match() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
         let expected = std::fs::read_to_string(dir.join("scripted_match.hash")).unwrap();
         let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
         let outcome = sim::replay::verify_with(

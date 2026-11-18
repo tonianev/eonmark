@@ -972,13 +972,10 @@ mod tests {
     #[test]
     fn headless_run_takes_ticks_or_a_replay_path() {
         assert_eq!(
-            parse(&[
-                "--headless-run",
-                "crates/sim/tests/fixtures/move_500.eonreplay"
-            ]),
+            parse(&["--headless-run", "fixtures/move_500.eonreplay"]),
             Ok(Parsed::Run(Cli {
                 headless_run: Some(HeadlessRun::Replay(PathBuf::from(
-                    "crates/sim/tests/fixtures/move_500.eonreplay"
+                    "fixtures/move_500.eonreplay"
                 ))),
                 ..Cli::default()
             }))

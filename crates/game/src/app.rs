@@ -1390,7 +1390,7 @@ mod tests {
             build_match(&launch(&["--spectate", "--seed", "1"]), rules.clone()).unwrap();
         assert_eq!(input.name(), "local");
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sim/tests/fixtures/m5_first_match.eonreplay");
+            .join("../../fixtures/m5_first_match.eonreplay");
         let mut header = sim::replay::ReplayReader::open(&fixture).unwrap().setup;
         header.git_sha.clone_from(&spectated.setup().git_sha);
         assert_eq!(*spectated.setup(), header, "m5_first_match's setup");

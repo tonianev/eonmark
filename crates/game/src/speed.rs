@@ -1032,7 +1032,7 @@ mod tests {
     /// replays that both verify to `scripted_match.hash`.
     #[test]
     fn x4_with_a_pause_records_the_x1_replay() {
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures");
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
         let golden = std::fs::read_to_string(fixtures.join("scripted_match.hash")).unwrap();
         let golden = u64::from_str_radix(golden.trim().trim_start_matches("0x"), 16).unwrap();
         for (name, speed, pause) in [("x1", Speed::X1, None), ("x4p", Speed::X4, Some(600))] {

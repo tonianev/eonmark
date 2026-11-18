@@ -592,7 +592,7 @@ cargo test -p sim
 (the visuals counts follow `../visuals.ron`; the repository is at 28, so before the edit it prints `rules_version=28`;
 the hash is new because a file changed).
 `just rerecord` runs `scripts/rerecord_fixtures.sh`: it re-records every
-fixture under `crates/sim/tests/fixtures/` in release, writes each `.hash`
+fixture under `fixtures/` in release, writes each `.hash`
 from an independent `sim-cli verify` OK line, then fails if a fixture
 differs from the merge base with main while the working-tree
 `rules_version` is not larger than the base's (CI runs the same check,

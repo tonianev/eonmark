@@ -100,7 +100,7 @@ jobs:
         # alone so hash-parity diffs cleanly. Reuses the ci-profile artifacts
         # from clippy/nextest above.
         run: |
-          cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1 | tee hash-macos.txt
+          cargo run -p game --locked --profile ci -- --headless-run fixtures/move_500.eonreplay | tail -n 1 | tee hash-macos.txt
           grep -q '^tick=1200 hash=0x[0-9a-f]\{16\}$' hash-macos.txt
 
       - name: verify golden fixtures move_500, combat_skirmish, enemy_outpost_walkthrough, capture_seat, stalemate_45min, m5_first_match and scripted_match (release)
@@ -118,19 +118,19 @@ jobs:
         # `verify` exits 1 on any other outcome and pipefail propagates it
         # through grep and tee.
         run: |
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/move_500.eonreplay | grep '^OK' | tee hash-macos-fixture.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/move_500.eonreplay | grep '^OK' | tee hash-macos-fixture.txt
           test -s hash-macos-fixture.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/combat_skirmish.eonreplay | grep '^OK' | tee hash-macos-combat.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/combat_skirmish.eonreplay | grep '^OK' | tee hash-macos-combat.txt
           test -s hash-macos-combat.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/enemy_outpost_walkthrough.eonreplay
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/capture_seat.eonreplay | grep '^OK' | tee hash-macos-capture-seat.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/enemy_outpost_walkthrough.eonreplay
+          cargo run -p sim-cli --locked --release -- verify fixtures/capture_seat.eonreplay | grep '^OK' | tee hash-macos-capture-seat.txt
           test -s hash-macos-capture-seat.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/stalemate_45min.eonreplay | grep '^OK' | tee hash-macos-stalemate.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/stalemate_45min.eonreplay | grep '^OK' | tee hash-macos-stalemate.txt
           test -s hash-macos-stalemate.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/m5_first_match.eonreplay | grep '^OK' | tee hash-macos-m5.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/m5_first_match.eonreplay | grep '^OK' | tee hash-macos-m5.txt
           test -s hash-macos-m5.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/scripted_match.eonreplay | grep '^OK' | tee hash-macos-scripted.txt
-          test "$(sed -n 's/^OK final_hash=\(0x[0-9a-f]*\) .*/\1/p' hash-macos-scripted.txt)" = "$(cat crates/sim/tests/fixtures/scripted_match.hash)"
+          cargo run -p sim-cli --locked --release -- verify fixtures/scripted_match.eonreplay | grep '^OK' | tee hash-macos-scripted.txt
+          test "$(sed -n 's/^OK final_hash=\(0x[0-9a-f]*\) .*/\1/p' hash-macos-scripted.txt)" = "$(cat fixtures/scripted_match.hash)"
 
       - name: M6 acceptance 3 (two play-bots --seeds 7..7 runs print identical final hashes)
         # ROADMAP M6 line 3, the literal command twice on macOS (the headless
@@ -217,23 +217,23 @@ jobs:
         # m5_first_match (M5b) is the bot-match parity fixture, and
         # scripted_match (M6 line 5) the human-against-bot one.
         run: |
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/move_500.eonreplay | grep '^OK' | tee hash-linux-fixture.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/move_500.eonreplay | grep '^OK' | tee hash-linux-fixture.txt
           test -s hash-linux-fixture.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/group_spiral.eonreplay | tee verify-group-spiral.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/snapshot_restore.eonreplay | tee verify-snapshot-restore.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/economy_second_town.eonreplay | tee verify-economy-second-town.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/economy_walkthrough.eonreplay | tee verify-economy-walkthrough.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/combat_skirmish.eonreplay | grep '^OK' | tee hash-linux-combat.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/group_spiral.eonreplay | tee verify-group-spiral.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/snapshot_restore.eonreplay | tee verify-snapshot-restore.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/economy_second_town.eonreplay | tee verify-economy-second-town.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/economy_walkthrough.eonreplay | tee verify-economy-walkthrough.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/combat_skirmish.eonreplay | grep '^OK' | tee hash-linux-combat.txt
           test -s hash-linux-combat.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/enemy_outpost_walkthrough.eonreplay | tee verify-enemy-outpost-walkthrough.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/capture_seat.eonreplay | grep '^OK' | tee hash-linux-capture-seat.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/enemy_outpost_walkthrough.eonreplay | tee verify-enemy-outpost-walkthrough.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/capture_seat.eonreplay | grep '^OK' | tee hash-linux-capture-seat.txt
           test -s hash-linux-capture-seat.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/stalemate_45min.eonreplay | grep '^OK' | tee hash-linux-stalemate.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/stalemate_45min.eonreplay | grep '^OK' | tee hash-linux-stalemate.txt
           test -s hash-linux-stalemate.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/m5_first_match.eonreplay | grep '^OK' | tee hash-linux-m5.txt
+          cargo run -p sim-cli --locked --release -- verify fixtures/m5_first_match.eonreplay | grep '^OK' | tee hash-linux-m5.txt
           test -s hash-linux-m5.txt
-          cargo run -p sim-cli --locked --release -- verify crates/sim/tests/fixtures/scripted_match.eonreplay | grep '^OK' | tee hash-linux-scripted.txt
-          test "$(sed -n 's/^OK final_hash=\(0x[0-9a-f]*\) .*/\1/p' hash-linux-scripted.txt)" = "$(cat crates/sim/tests/fixtures/scripted_match.hash)"
+          cargo run -p sim-cli --locked --release -- verify fixtures/scripted_match.eonreplay | grep '^OK' | tee hash-linux-scripted.txt
+          test "$(sed -n 's/^OK final_hash=\(0x[0-9a-f]*\) .*/\1/p' hash-linux-scripted.txt)" = "$(cat fixtures/scripted_match.hash)"
 
       - name: M5b acceptance 1 (Standard vs Standard, five seeds, twice)
         # ROADMAP M5b line 1: the literal play-bots command twice. Exit 0
@@ -249,7 +249,7 @@ jobs:
           if awk -F, 'NR>1 && $2!="a" && $2!="b"' m5b-run1.csv | grep -q .; then
             echo "::error::a Standard-vs-Standard game has no declared winner"; exit 1
           fi
-          test "$(awk -F, '$1==1{print $5}' m5b-run1.csv)" = "$(cat crates/sim/tests/fixtures/m5_first_match.hash)"
+          test "$(awk -F, '$1==1{print $5}' m5b-run1.csv)" = "$(cat fixtures/m5_first_match.hash)"
 
       - name: M5b acceptance 2 (the first wave against Passive, from either side)
         # ROADMAP M5b line 2 through scripts/check_first_wave.sh with
@@ -307,30 +307,45 @@ jobs:
           git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
           scripts/check_fixture_policy.sh "${{ github.event.pull_request.base.sha }}"
 
+      - name: fixture policy self-test
+        run: scripts/check_fixture_policy.sh --self-test
+
+      - name: ROADMAP acceptance lines are only ticked, never reworded (CLAUDE.md rule 5)
+        # scripts/check_roadmap_ticks.py: a base line's text must still open a
+        # head line, and a new tick needs an evidence suffix.
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.sha }}"
+          python3 -I scripts/check_roadmap_ticks.py --self-test
+          python3 -I scripts/check_roadmap_ticks.py "${{ github.event.pull_request.base.sha }}"
+
+      - name: same_outcomes self-test (scripts/same_outcomes.sh)
+        run: scripts/same_outcomes.sh --self-test
+
       - name: headless replay (move_500 fixture)
         # Same command as the macOS job; the two `tick=1200 hash=0x...` lines
         # must be byte-identical (hash-parity job).
         run: |
-          cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay | tail -n 1 | tee hash-linux.txt
+          cargo run -p game --locked --profile ci -- --headless-run fixtures/move_500.eonreplay | tail -n 1 | tee hash-linux.txt
           grep -q '^tick=1200 hash=0x[0-9a-f]\{16\}$' hash-linux.txt
 
       - name: headless replay (enemy_outpost_walkthrough fixture)
         # M4b: the game's own driver re-simulates the scripted owner proxy
         # (400 units fighting, then the build-up and siege) and exits 0 only
         # if its final hash matches the recorded one.
-        run: cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/enemy_outpost_walkthrough.eonreplay | tail -n 1
+        run: cargo run -p game --locked --profile ci -- --headless-run fixtures/enemy_outpost_walkthrough.eonreplay | tail -n 1
 
       - name: headless replay (m5_first_match fixture)
         # M5b: the game builds the two Standard bots from the header and
         # re-simulates the first match to its Seat capture; it exits 0 only
         # if its final hash matches the recorded one.
-        run: cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/m5_first_match.eonreplay | tail -n 1
+        run: cargo run -p game --locked --profile ci -- --headless-run fixtures/m5_first_match.eonreplay | tail -n 1
 
       - name: headless replay (scripted_match fixture)
         # M6 line 5: the game rebuilds the Standard bot from the header and
         # re-simulates the scripted human stream to its surrender; it exits
         # 0 only if its final hash matches the recorded one.
-        run: cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/scripted_match.eonreplay | tail -n 1
+        run: cargo run -p game --locked --profile ci -- --headless-run fixtures/scripted_match.eonreplay | tail -n 1
 
       - uses: actions/upload-artifact@v7
         with:
@@ -374,70 +389,29 @@ jobs:
       - name: build sim-cli (release)
         run: cargo build -p sim-cli --locked --release
 
+      # The step bodies live in scripts/fun_gate_all.sh (one section per
+      # step), so `just fun-gate-all` runs exactly what this job runs. Every
+      # section keeps going after a failed command and fails its step at the
+      # end, so one run reports every line.
       - name: M6 acceptance 1 (20 personality games, a winner in all)
         if: ${{ !cancelled() }}
-        # The literal command; scripts/fun_gate.sh checks every clause by
-        # the M6 owner decision 1 readings (a winner is a or b; decisive is
-        # seat_captured before tick 48000; past 24000 is tick > 24000).
-        # The line requires exit 0, so play-bots' exit fails the step, but
-        # only after the summary and fun_gate.sh's clauses are printed.
-        run: |
-          start=$(date +%s)
-          rc=0
-          target/release/sim-cli play-bots --seeds 1..20 --a standard --b standard --personality-a rush,boom,tower --personality-b rush,boom,tower --max-ticks 72000 --jobs 5 > l1.csv 2> l1.err || { echo "play-bots exit=$?"; rc=1; }
-          tail -n 1 l1.err
-          scripts/fun_gate.sh l1.csv l1.err || rc=1
-          echo "elapsed_s=$(( $(date +%s) - start ))"
-          exit "$rc"
+        run: scripts/fun_gate_all.sh line1
 
       - name: M6 acceptance 2 (Standard beats Easy, Hard beats Standard)
         if: ${{ !cancelled() }}
-        # The literal commands at --jobs 4 and with --allow-undecided: the
-        # CSV is the same at any --jobs and with or without the flag, which
-        # only stops a draw from making play-bots exit 1 (the line counts
-        # wins, not draws; a panic or a usage error still exits non-zero
-        # and fails the step). Only `winner == b` counts; check_ordering.sh
-        # also prints the cap games that ended untouched. Both pairings run
-        # and report whatever the first one gave.
-        run: |
-          start=$(date +%s)
-          rc=0
-          target/release/sim-cli play-bots --a easy --b standard --seeds 1..20 --jobs 4 --allow-undecided > e_s.csv 2> e_s.err || { echo "play-bots exit=$?"; rc=1; }
-          tail -n 1 e_s.err
-          scripts/check_ordering.sh e_s.csv b 15 || rc=1
-          target/release/sim-cli play-bots --a standard --b hard --seeds 1..20 --jobs 4 --allow-undecided > s_h.csv 2> s_h.err || { echo "play-bots exit=$?"; rc=1; }
-          tail -n 1 s_h.err
-          scripts/check_ordering.sh s_h.csv b 15 || rc=1
-          echo "elapsed_s=$(( $(date +%s) - start ))"
-          exit "$rc"
+        run: scripts/fun_gate_all.sh line2
 
       - name: M6 acceptance 4, first clause (Hard attacks the borders before minute 12)
         if: ${{ !cancelled() }}
-        # Hard against Passive in seeds 1..3, as the New Game seat (b), with
-        # every Random style, and from seat a; check_attack_before.sh also
-        # requires an armed unit on the enemy's land before tick 14400.
-        run: |
-          rc=0
-          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --max-ticks 14400 --allow-undecided > h.csv || rc=1
-          scripts/check_attack_before.sh --side b --before 14400 h.csv || rc=1
-          target/release/sim-cli play-bots --seeds 1..3 --a passive --b hard --personality-b rush,boom,tower --max-ticks 14400 --allow-undecided > hp.csv || rc=1
-          scripts/check_attack_before.sh --side b --before 14400 hp.csv || rc=1
-          target/release/sim-cli play-bots --seeds 1..3 --a hard --b passive --max-ticks 14400 --allow-undecided > ha.csv || rc=1
-          scripts/check_attack_before.sh --side a --before 14400 ha.csv || rc=1
-          exit "$rc"
+        run: scripts/fun_gate_all.sh line4a
 
       - name: M6 acceptance 4, second clause (hard.ron income_interval_ds 200 -> 300 flips Hard vs Easy)
         if: ${{ !cancelled() }}
-        run: |
-          start=$(date +%s)
-          rc=0
-          scripts/check_difficulty_flip.sh || rc=1
-          echo "elapsed_s=$(( $(date +%s) - start ))"
-          exit "$rc"
+        run: scripts/fun_gate_all.sh line4b
 
       - name: ignored M6 bot tests (long games)
         if: ${{ !cancelled() }}
-        run: cargo test -p ai --locked -- --ignored m6_
+        run: scripts/fun_gate_all.sh tests
 
   game-linux:
     name: game compiles on Linux
@@ -538,7 +512,7 @@ jobs:
           grep -q '^pause: on tick=600$' "$out/x4.log"
           grep -q '^pause: off tick=600 after_s=' "$out/x4.log"
           grep -Eq '^driver: .* x1_s=0\.0 x2_s=0\.0 x4_s=[0-9]*[1-9][0-9]*\.[0-9] ' "$out/x4.log"
-          golden="$(cat crates/sim/tests/fixtures/scripted_match.hash)"
+          golden="$(cat fixtures/scripted_match.hash)"
           grep -q "^outcome: victory player=1 decisive=true reason=surrender tick=1203 hash=$golden\$" "$out/x4.log"
           replay="$(sed -n 's/^replay: //p' "$out/x4.log" | head -1)"
           cargo run -p game --locked --profile ci -- --headless-run "$replay" | tail -n 1 | tee "$out/headless.txt"
@@ -578,7 +552,7 @@ jobs:
           path: hashes/linux
       - name: compare headless replay (move_500 fixture)
         # Both files hold exactly the `tick=1200 hash=0x...` line the game's
-        # `--headless-run crates/sim/tests/fixtures/move_500.eonreplay`
+        # `--headless-run fixtures/move_500.eonreplay`
         # printed last on each OS.
         run: |
           echo "macOS:"; cat hashes/macos/hash-macos.txt

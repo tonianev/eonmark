@@ -40,7 +40,7 @@ fn data_dir() -> PathBuf {
 }
 
 fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
 /// Verify `fixtures/<name>.eonreplay` and compare its final hash with

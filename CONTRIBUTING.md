@@ -47,7 +47,7 @@ The game opens on its main menu (since M5b); New Game starts a skirmish against 
 | Models | `cargo run -p inspect_gltf --locked --release -- check data assets`: every Scene of `data/visuals.ron` against the art pass's budgets and import rules ([docs/ART_STYLE.md](docs/ART_STYLE.md)) |
 | Naming | `scripts/check_trademark.sh` |
 | One Bevy | `cargo tree -i bevy_ecs --depth 0` must print exactly one line |
-| Headless replay | `cargo run -p game --locked --profile ci -- --headless-run crates/sim/tests/fixtures/move_500.eonreplay` must end with a `tick=1200 hash=0x...` line and exit 0 (the game re-simulates the golden and compares hashes; `--headless-run <ticks>` still runs a plain skirmish) |
+| Headless replay | `cargo run -p game --locked --profile ci -- --headless-run fixtures/move_500.eonreplay` must end with a `tick=1200 hash=0x...` line and exit 0 (the game re-simulates the golden and compares hashes; `--headless-run <ticks>` still runs a plain skirmish) |
 
 Other recipes in the [justfile](justfile):
 
@@ -111,7 +111,7 @@ test result: ok. 16 passed; 1 ignored ... (m1)
 test result: ok. 8 passed ... (m2)
 test result: ok. 51 passed ... (m3a, including the one-Yeoman-on-a-Croft and ten-Croft flatline tests)
 $ git status --short
- M crates/sim/tests/fixtures/*.eonreplay (5 files), economy_second_town.hash
+ M fixtures/*.eonreplay (5 files), economy_second_town.hash
  M data/rules/buildings.ron
  M data/rules/rules.ron
 ```
@@ -148,7 +148,7 @@ Commit the RON files, the bump and the re-recorded fixtures together, and paste 
 This path was run on 2026-10-26 (`rules_version` 24) against a scratch copy of `data/`, with the release `sim-cli`'s `--data` flag standing in for the edited checkout. The only edits were the first step of `standard.ron` (`Workers(count: 7, split: {"grain": 3, "lumber": 4})` to `count: 8` with 5 Lumber) and the version:
 
 ```text
-$ sim-cli verify --data <copy> crates/sim/tests/fixtures/m5_first_match.eonreplay   # the edit, before any re-record
+$ sim-cli verify --data <copy> fixtures/m5_first_match.eonreplay   # the edit, before any re-record
 RULES CHANGED since recording (replay 0xb231ab753cb4197e, loaded 0xa23a5bd80473a249)
 $ sim-cli data-check <copy>                                                        # after 24 -> 25
 OK rules_version=25 rules_hash=0x1a725b28f5c3e543 resources=4 units=8 buildings=8 ages=3 techs=12 side_techs=2 factions=1 personalities=1 build_orders=1 maps=plains_1v1 strings=en
@@ -239,14 +239,14 @@ Swapping a kind back to its box or primitive is step 3 alone (`"croft": Primitiv
 
 ## Golden replay fixtures
 
-`crates/sim/tests/fixtures/` holds `.eonreplay` recordings with a sibling `.hash` file (`0x<16 hex>` and a newline). `cargo test -p sim` re-simulates the short ones and `sim-cli verify --release` checks the long ones in CI on both operating systems; the `hash-parity` job diffs the macOS and Linux results. The rules:
+`fixtures/` holds `.eonreplay` recordings with a sibling `.hash` file (`0x<16 hex>` and a newline). `cargo test -p sim` re-simulates the short ones and `sim-cli verify --release` checks the long ones in CI on both operating systems; the `hash-parity` job diffs the macOS and Linux results. The rules:
 
 1. A fixture regenerates only in a commit that also bumps `rules_version` in `data/rules/rules.ron` and states the reason in one line of the commit message (`Bump rules_version to 2: Yeoman speed 1.8 -> 2.0 tiles/s`). One commit, both changes.
 2. A changed hash without that bump is a bug. Do not update the `.hash` file; bisect with `sim-cli hash-dump <replay> --every 1` as described in [docs/DETERMINISM.md](docs/DETERMINISM.md).
 3. `RULES CHANGED since recording` from `verify` means RON was edited without a bump. Either revert the edit or bump and regenerate in the same commit.
 4. An intended behaviour change in Rust (a new movement rule, a fixed sim bug, and from M5b a change in `crates/ai` that can alter a bot decision) bumps `SIM_VERSION` in `crates/sim/src/state.rs` as well, and the same commit regenerates every fixture.
 
-To regenerate, run `just rerecord` (every fixture) or `just rerecord <name> ...` (`scripts/rerecord_fixtures.sh`). It automates the manual steps for each fixture: `cargo run -p sim-cli --release -- record --scenario <name> --ticks <n> --out crates/sim/tests/fixtures/<name>.eonreplay`, then `verify` the new file and write its `OK final_hash=` value into `<name>.hash`. The fixture README in that directory lists each scenario and its tick count. Reviewers reject a PR that changes a fixture without the version bump, and CI reports the mismatch as a failing golden test.
+To regenerate, run `just rerecord` (every fixture) or `just rerecord <name> ...` (`scripts/rerecord_fixtures.sh`). It automates the manual steps for each fixture: `cargo run -p sim-cli --release -- record --scenario <name> --ticks <n> --out fixtures/<name>.eonreplay`, then `verify` the new file and write its `OK final_hash=` value into `<name>.hash`. The fixture README in that directory lists each scenario and its tick count. Reviewers reject a PR that changes a fixture without the version bump, and CI reports the mismatch as a failing golden test.
 
 ## Determinism rules
 

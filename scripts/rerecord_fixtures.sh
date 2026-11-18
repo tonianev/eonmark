@@ -3,7 +3,7 @@
 # rules_version bump (docs/DETERMINISM.md, "Golden fixtures"; the data-only
 # contributor path in CONTRIBUTING.md). No Rust is touched.
 #
-# For each crates/sim/tests/fixtures/<name>.eonreplay:
+# For each fixtures/<name>.eonreplay:
 #   1. sim-cli record --scenario <name> --out <file> (release build)
 #   2. sim-cli verify <file>, which re-simulates from the header
 #   3. <name>.hash gets the final_hash from verify's OK line, so the hash
@@ -18,7 +18,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-dir=crates/sim/tests/fixtures
+dir=fixtures
 if [ $# -eq 0 ]; then
   set --
   for f in "$dir"/*.eonreplay; do

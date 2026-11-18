@@ -1467,8 +1467,8 @@ mod tests {
 
     #[test]
     fn replay_input_hands_out_batches_and_ends_at_the_last_hash() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sim/tests/fixtures/move_500_short.eonreplay");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/move_500_short.eonreplay");
         let (setup, mut src) = ReplayInput::open(&path).unwrap();
         assert!(setup.debug_commands);
         let end = src.end_of_input().unwrap();
@@ -1494,8 +1494,8 @@ mod tests {
     #[test]
     fn drive_tick_replays_a_fixture_to_its_recorded_hash() {
         let rules = rules();
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sim/tests/fixtures/move_500_short.eonreplay");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/move_500_short.eonreplay");
         let (setup, mut src) = ReplayInput::open(&path).unwrap();
         let mut sim = SimHandle::from_setup(setup, rules);
         let mut pending = PendingCommands::default();
@@ -1556,8 +1556,8 @@ mod tests {
     #[test]
     fn drive_tick_matches_a_cut_replay_with_a_batch_after_its_last_hash() {
         let rules = rules();
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../sim/tests/fixtures/move_500_short.eonreplay");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/move_500_short.eonreplay");
         let mut file = ReplayReader::open(&path).unwrap();
         // Keep everything up to the first hash checkpoint after the move,
         // then append a command batch at that checkpoint's tick, the shape a
@@ -2218,8 +2218,7 @@ mod tests {
                 ticks: decided_at
             }
         );
-        let golden =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../sim/tests/fixtures/capture_seat.hash");
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/capture_seat.hash");
         let golden = std::fs::read_to_string(golden).unwrap();
         assert_eq!(format!("{hash:#018x}"), golden.trim());
         eprintln!("{}", outcome_line(&result, hash));

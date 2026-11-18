@@ -84,8 +84,8 @@ fi
 now() { perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
 only="${ONLY:-1 2 3 4 5 6}"
 units200_seconds="${UNITS200_SECONDS:-65}"
-fixture=crates/sim/tests/fixtures/move_500.eonreplay
-fixture_hash="$(tr -d '[:space:]' < crates/sim/tests/fixtures/move_500.hash)"
+fixture=fixtures/move_500.eonreplay
+fixture_hash="$(tr -d '[:space:]' < fixtures/move_500.hash)"
 # sim::scenarios::SCRIPTED_MOVES_TICKS: the two replays must agree at least this far.
 scripted_moves_ticks=600
 

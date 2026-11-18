@@ -119,8 +119,8 @@ verify_is() {
 
 if want_step 1; then
   echo "==> 1. line 5: scripted_match at x1, and at x4 with a pause at tick 600"
-  fixture=crates/sim/tests/fixtures/scripted_match.eonreplay
-  golden="$(tr -d '[:space:]' < crates/sim/tests/fixtures/scripted_match.hash)"
+  fixture=fixtures/scripted_match.eonreplay
+  golden="$(tr -d '[:space:]' < fixtures/scripted_match.hash)"
   line="$("$simcli" verify "$fixture" 2>&1)"
   echo "    $line"
   case "$line" in
